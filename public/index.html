@@ -2,8 +2,8 @@
 <html lang="en" class="dark">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
+
   <script>
   // usernode-dev-console@1
   (function () {
@@ -63,60 +63,129 @@
     try { post('info', ['[dev-console ready]'], { kind: 'ready' }); } catch (_) {}
   })();
   </script>
-  <title>Supply Line RTS</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%237c3aed'/><circle cx='50' cy='50' r='18' fill='white'/></svg>">
+  <title>Supply Line</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text x='50' y='72' font-size='64' text-anchor='middle'>🌾</text></svg>">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
+  <style>
+    html, body { height: 100%; overscroll-behavior: none; }
+    #game-canvas { touch-action: none; user-select: none; -webkit-user-select: none; display: block; }
+    #minimap { touch-action: none; }
+    .btn { min-height: 44px; min-width: 44px; }
+    .btn-sm { min-height: 40px; }
+  </style>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen flex flex-col items-center justify-center gap-8 p-4">
-  <h1 class="text-2xl font-bold">Supply Line RTS</h1>
+<body class="bg-zinc-950 text-zinc-100 h-full overflow-hidden">
 
-  <button id="press-btn" class="w-32 h-32 rounded-full bg-violet-600 hover:bg-violet-500 active:scale-95 transition-all text-white text-xl font-bold shadow-lg shadow-violet-600/30">
-    Press!
-  </button>
+  <!-- ============ Game screen ============ -->
+  <div id="game-ui" class="hidden fixed inset-0">
+    <canvas id="game-canvas" class="absolute inset-0 w-full h-full"></canvas>
 
-  <div id="count" class="text-lg text-zinc-400">0 total presses</div>
+    <!-- top bar -->
+    <div class="absolute top-0 inset-x-0 flex items-center gap-2 px-2 py-1.5 bg-zinc-950/80 backdrop-blur text-sm select-none">
+      <span class="font-bold text-amber-300 hidden sm:inline">🌾 Supply Line</span>
+      <span id="stat-units" class="text-zinc-300"></span>
+      <span id="stat-setts" class="text-zinc-300"></span>
+      <span id="stat-time" class="text-zinc-400 font-mono"></span>
+      <span class="flex-1"></span>
+      <button id="btn-pause" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">⏸</button>
+      <button id="btn-speed" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700 font-mono">1×</button>
+      <button id="btn-surrender" class="btn-sm px-3 rounded bg-red-900/70 hover:bg-red-800 text-red-200">Surrender</button>
+    </div>
 
-  <div class="w-full max-w-sm">
-    <h2 class="text-sm font-medium text-zinc-500 mb-2 text-center">Leaderboard</h2>
-    <div id="leaderboard" class="space-y-1"></div>
+    <!-- targeting hint -->
+    <div id="hint" class="hidden absolute top-12 inset-x-0 mx-auto w-fit max-w-[90%] px-4 py-2 rounded-lg bg-violet-700/90 text-white text-sm shadow-lg z-20 flex items-center gap-3">
+      <span id="hint-text"></span>
+      <button id="btn-cancel-order" class="px-2 py-0.5 rounded bg-violet-900 text-violet-100 text-xs">Cancel</button>
+    </div>
+
+    <!-- toast -->
+    <div id="toast" class="hidden absolute top-12 inset-x-0 mx-auto w-fit max-w-[90%] px-4 py-2 rounded-lg bg-zinc-800/95 text-zinc-100 text-sm shadow-lg z-30"></div>
+
+    <!-- minimap -->
+    <!-- top-right on phones (the bottom sheet owns the bottom edge); bottom-left on desktop -->
+    <canvas id="minimap" width="144" height="144"
+      class="absolute top-14 right-2 bottom-auto left-auto sm:top-auto sm:right-auto sm:bottom-2 sm:left-2 w-28 h-28 sm:w-36 sm:h-36 rounded border border-zinc-700 bg-black/70 z-10"></canvas>
+
+    <!-- selection panel: bottom sheet on phones, card bottom-right on desktop -->
+    <div id="panel" class="hidden absolute bottom-0 inset-x-0 sm:inset-x-auto sm:right-3 sm:bottom-3 sm:w-80 bg-zinc-900/95 backdrop-blur border-t sm:border border-zinc-700 sm:rounded-xl p-3 z-10 text-sm max-h-[45%] overflow-y-auto">
+    </div>
   </div>
 
-  <script>
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get('token') || '';
-    const headers = token ? { 'x-usernode-token': token } : {};
+  <!-- ============ Main menu ============ -->
+  <div id="main-menu" class="fixed inset-0 overflow-y-auto bg-zinc-950">
+    <div class="max-w-md mx-auto px-4 py-8 flex flex-col gap-5">
+      <div class="text-center">
+        <div class="text-5xl mb-2">🌾</div>
+        <h1 class="text-3xl font-bold tracking-tight">Supply Line</h1>
+        <p class="text-zinc-400 text-sm mt-1">A slow-paced logistics wargame. Feed your armies — or watch them starve.</p>
+      </div>
 
-    async function loadLeaderboard() {
-      const res = await fetch('/api/leaderboard', { headers });
-      if (!res.ok) return;
-      const { leaderboard } = await res.json();
-      const el = document.getElementById('leaderboard');
-      if (!leaderboard.length) {
-        el.innerHTML = '<p class="text-center text-zinc-600 text-sm">No presses yet</p>';
-        return;
-      }
-      el.innerHTML = leaderboard.map((r, i) =>
-        '<div class="flex justify-between px-3 py-1 rounded ' + (i === 0 ? 'bg-violet-600/20 text-violet-300' : 'text-zinc-400') + '">' +
-        '<span>' + (i + 1) + '. ' + r.username + '</span>' +
-        '<span class="font-mono">' + r.presses + '</span></div>'
-      ).join('');
-      const total = leaderboard.reduce((s, r) => s + parseInt(r.presses), 0);
-      document.getElementById('count').textContent = total + ' total presses';
-    }
+      <div id="menu-error" class="hidden text-red-400 text-sm text-center"></div>
 
-    document.getElementById('press-btn').addEventListener('click', async () => {
-      try {
-        const res = await fetch('/api/press', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...headers },
-        });
-        if (res.ok) loadLeaderboard();
-        else if (res.status === 401) document.getElementById('count').textContent = 'Sign in to press!';
-      } catch {}
-    });
+      <button id="btn-resume" class="hidden btn w-full py-3 rounded-xl bg-emerald-700 hover:bg-emerald-600 font-semibold text-lg">
+        ▶ Resume Match
+      </button>
 
-    loadLeaderboard();
-  </script>
+      <div class="bg-zinc-900 rounded-xl p-4 flex flex-col gap-3 border border-zinc-800">
+        <h2 class="font-semibold text-zinc-200">New Match</h2>
+        <label class="flex items-center justify-between gap-2 text-zinc-300">Difficulty
+          <select id="sel-difficulty" class="bg-zinc-800 rounded px-3 py-2 text-zinc-100">
+            <option value="easy">Easy</option>
+            <option value="normal" selected>Normal</option>
+            <option value="hard">Hard</option>
+          </select>
+        </label>
+        <label class="flex items-center justify-between gap-2 text-zinc-300">Map size
+          <select id="sel-mapsize" class="bg-zinc-800 rounded px-3 py-2 text-zinc-100">
+            <option value="small">Small</option>
+            <option value="medium" selected>Medium</option>
+            <option value="large">Large</option>
+          </select>
+        </label>
+        <label class="flex items-center justify-between gap-2 text-zinc-300">Map seed
+          <input id="inp-seed" placeholder="random" class="bg-zinc-800 rounded px-3 py-2 w-36 text-zinc-100 placeholder-zinc-600">
+        </label>
+        <button id="btn-new" class="btn w-full py-3 rounded-xl bg-violet-600 hover:bg-violet-500 font-semibold text-lg">Start Match</button>
+      </div>
+
+      <details class="bg-zinc-900 rounded-xl border border-zinc-800">
+        <summary class="cursor-pointer px-4 py-3 font-semibold text-zinc-200">How to Play</summary>
+        <div class="px-4 pb-4 text-sm text-zinc-400 space-y-2">
+          <p><b class="text-zinc-200">Goal:</b> destroy every enemy settlement. You lose if all your settlements fall and you have fewer than 5 units left.</p>
+          <p><b class="text-zinc-200">Units</b> are all one type; their <b>role</b> is switchable any time from the selection panel: <b>Deploy</b> fights at normal speed, <b>Supply</b> moves 2× but can't fight, <b>Farmer</b> boosts food output while garrisoned in a settlement.</p>
+          <p><b class="text-zinc-200">Settlements</b> cost 5 units to found (build on fertile land!), auto-till the ground around them, and run one production mode: Farm (grow the stockpile), or train Supply / Deploy units.</p>
+          <p><b class="text-zinc-200">Food:</b> every unit eats. Feed armies by garrisoning near a settlement, toggling <b>Pillage</b> (strips the land — it recovers very slowly), or running a <b>Supply route</b>: select a supply blob, tap "Supply route", tap the army. Routes draw color-coded: green = fed, amber = falling behind, red = starving. Roughly 1 supply unit feeds 5 fighters at a quarter of the map's distance.</p>
+          <p><b class="text-zinc-200">Hunger and combat:</b> above ¾ fed fights best; below ½ worse; below ¼ famished (weakest), and at zero food units start dying.</p>
+          <p><b class="text-zinc-200">Touch:</b> drag to pan, pinch to zoom, tap to select. Orders are two taps: tap the order button, then tap the target.</p>
+          <p><b class="text-zinc-200">Desktop:</b> right-click = move (hold A for attack-move), left-drag = box select, WASD/edge/middle-drag = pan, wheel = zoom, Esc = cancel.</p>
+        </div>
+      </details>
+
+      <div id="match-history" class="bg-zinc-900 rounded-xl p-4 border border-zinc-800">
+        <h2 class="font-semibold text-zinc-200 mb-2">Recent matches</h2>
+        <div id="history-mine">
+          <h3 class="text-xs uppercase tracking-wide text-zinc-500 mb-1">Yours</h3>
+          <div id="history-mine-rows" class="space-y-1 text-sm text-zinc-400">Loading…</div>
+        </div>
+        <div class="mt-3">
+          <h3 class="text-xs uppercase tracking-wide text-zinc-500 mb-1">Recent wins on Usernode</h3>
+          <div id="history-recent-rows" class="space-y-1 text-sm text-zinc-400">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ End-of-match modal ============ -->
+  <div id="end-modal" class="hidden fixed inset-0 z-40 bg-black/70 flex items-center justify-center p-4">
+    <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 max-w-sm w-full text-center">
+      <div id="end-emoji" class="text-5xl mb-2"></div>
+      <h2 id="end-title" class="text-2xl font-bold mb-1"></h2>
+      <p id="end-detail" class="text-zinc-400 text-sm mb-5"></p>
+      <button id="btn-end-menu" class="btn w-full py-3 rounded-xl bg-violet-600 hover:bg-violet-500 font-semibold">Back to menu</button>
+    </div>
+  </div>
+
+  <script type="module" src="/js/main.js"></script>
 </body>
 </html>

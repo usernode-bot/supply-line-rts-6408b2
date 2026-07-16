@@ -26,13 +26,23 @@ tables you've marked private), etc.
 
 ---
 
-## About Supply Line RTS
+## About Supply Line
 
-_(add a sentence or two of product context here so Claude Code has a
-shared understanding of what this app is for)_
+Single-player, slow-paced 2D top-down RTS ("Supply Line") played in the
+browser vs a scripted AI, tuned for a 20–40 minute match. Core loop:
+found settlements on fertile land, feed armies via pillage or supply
+routes, destroy all enemy settlements to win. The full game sim runs
+client-side (ES modules under `public/js/`); the server only gates auth
+and records match history in the `matches` table.
 
 ## App-specific conventions
 
-_(optional — e.g. "all currency values stored as integer cents, not
-floats"; "the `posts` table is append-only"; "avoid adding new
-dependencies"; etc.)_
+- One unit type; role (deploy / supply / farmer) is switchable state on
+  a blob, never a separate species. Keep it that way.
+- All game logic runs at a fixed 100 ms tick in `public/js/sim.js`;
+  save/resume is a JSON round-trip (map regenerated from its seed), so
+  keep sim state JSON-serializable.
+- Input is pointer-first: every action must be reachable by tap alone;
+  mouse/keyboard bindings are shortcuts, never the only path.
+- No build step and no new runtime dependencies — plain ES modules
+  served from `public/`.

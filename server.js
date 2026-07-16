@@ -7,6 +7,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const JWT_SECRET = process.env.JWT_SECRET;
+const IS_STAGING = process.env.USERNODE_ENV === 'staging';
 
 // Paths that stay open without authentication. Add a path here (and add it
 // with `app.get`/`app.post` below) if you deliberately want it public.
@@ -44,29 +45,42 @@ app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 // fresh load.
 app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
-// Button press
-app.post('/api/press', async (req, res) => {
+const RESULTS = new Set(['win', 'loss', 'surrender']);
+const DIFFICULTIES = new Set(['easy', 'normal', 'hard']);
+
+// Record a finished match. Fire-and-forget from the client at match end.
+app.post('/api/match-result', async (req, res) => {
   try {
+    const { result, difficulty, duration_seconds, map_seed } = req.body || {};
+    if (!RESULTS.has(result)) return res.status(400).json({ error: 'Bad result' });
+    if (!DIFFICULTIES.has(difficulty)) return res.status(400).json({ error: 'Bad difficulty' });
+    const duration = Math.max(0, Math.min(86400, parseInt(duration_seconds, 10) || 0));
+    const seed = typeof map_seed === 'string' ? map_seed.slice(0, 64) : null;
     await pool.query(`
-      INSERT INTO presses (user_id, username) VALUES ($1, $2)
-    `, [req.user.id, req.user.username]);
+      INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, req.user.username, result, difficulty, duration, seed]);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Leaderboard
-app.get('/api/leaderboard', async (_req, res) => {
+// Recent matches for the menu panel: the caller's last 10 plus recent
+// wins platform-wide.
+app.get('/api/matches', async (req, res) => {
   try {
-    const { rows } = await pool.query(`
-      SELECT username, COUNT(*) as presses
-      FROM presses
-      GROUP BY username
-      ORDER BY presses DESC
-      LIMIT 50
+    const mine = await pool.query(`
+      SELECT result, difficulty, duration_seconds, map_seed, created_at
+      FROM matches WHERE user_id = $1
+      ORDER BY created_at DESC LIMIT 10
+    `, [req.user.id]);
+    const recent = await pool.query(`
+      SELECT username, difficulty, duration_seconds, created_at
+      FROM matches WHERE result = 'win'
+      ORDER BY created_at DESC LIMIT 10
     `);
-    res.json({ leaderboard: rows });
+    res.json({ mine: mine.rows, recent: recent.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -101,13 +115,34 @@ app.get('*', (req, res) => {
 
 async function start() {
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS presses (
+    CREATE TABLE IF NOT EXISTS matches (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL,
       username VARCHAR(255) NOT NULL,
+      result VARCHAR(16) NOT NULL,
+      difficulty VARCHAR(16) NOT NULL,
+      duration_seconds INTEGER NOT NULL,
+      map_seed VARCHAR(64),
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  // Staging-only demo rows so the menu's match-history panel has content
+  // in previews (the `matches` table is new, so staging starts empty).
+  // Obviously-fake identities, idempotent, strictly a no-op in production.
+  if (IS_STAGING) {
+    await pool.query(`
+      INSERT INTO matches (id, user_id, username, result, difficulty, duration_seconds, map_seed)
+      VALUES
+        (900001, -1, 'Staging demo Quartermaster', 'win',       'normal', 1622, 'staging-demo-1'),
+        (900002, -2, 'Staging demo Forager',       'loss',      'hard',   2210, 'staging-demo-2'),
+        (900003, -3, 'Staging demo Warden',        'win',       'easy',   1385, 'staging-demo-3'),
+        (900004, -1, 'Staging demo Quartermaster', 'surrender', 'normal', 940,  'staging-demo-4'),
+        (900005, -2, 'Staging demo Forager',       'win',       'normal', 1990, 'staging-demo-5')
+      ON CONFLICT (id) DO NOTHING
+    `);
+  }
+
   app.listen(port, () => console.log(`Listening on :${port}`));
 }
 

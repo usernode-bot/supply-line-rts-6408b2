@@ -1,3 +1,9 @@
 {
-  "secrets": []
+  "name": "Supply Line",
+  "icon": { "emoji": "🌾" },
+  "secrets": [],
+  "tests": [
+    { "name": "Main menu renders", "path": "/?demo=1", "expectSelector": "#main-menu" },
+    { "name": "Match history panel renders", "path": "/?demo=1", "expectSelector": "#match-history" }
+  ]
 }
