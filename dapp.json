@@ -5,6 +5,8 @@
   "tests": [
     { "name": "Main menu renders", "path": "/?demo=1", "expectSelector": "#main-menu" },
     { "name": "Match history panel renders", "path": "/?demo=1", "expectSelector": "#match-history" },
+    { "name": "Multiplayer lobby section renders", "path": "/?demo=1", "expectSelector": "#mp-section" },
+    { "name": "Challenge inbox container present", "path": "/?demo=1", "expectSelector": "#challenge-inbox" },
     { "name": "In-app confirm dialog present (surrender / start-over flows)", "path": "/?demo=1", "expectSelector": "#confirm-modal" },
     { "name": "Start Match button renders", "path": "/?demo=1", "expectSelector": "#btn-new" },
     { "name": "Back-to-work button present in top bar", "path": "/?demo=1", "expectSelector": "#btn-backtowork" }

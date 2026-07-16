@@ -27,6 +27,8 @@ export const C = {
   VISION_SETT: 8,
   AGGRO: 4,
   PILLAGE_RATE: 0.02,      // max food per unit per tick
+  PILLAGE_RADIUS: 2.5,     // pillage harvest reach in tiles (half a territory ring)
+  PILLAGE_WASTE: 4,        // fertility destroyed per food pillaged, vs the farmed value
   FOOD_PER_FERT: 100,      // food extracted per 1.0 fertility
   FERT_LEVEL: 0.25,        // one visible fertility level; scorched per tile entered while pillage-moving
   FERT_REGEN: 0.01 / 600,  // fertility per tick (0.01/min)
@@ -147,13 +149,16 @@ function spawnWorkingFarmer(game, s, unit) {
 
 // Enemy settlement tiles a mover of `owner` knows about — impassable.
 // Player blocks on visible + remembered settlements; the AI on the ones
-// it has scouted (no fog cheating on player entities).
+// it has scouted (no fog cheating on player entities). In PvP each side
+// has its own fog + memory.
 function blockedTiles(game, owner) {
   const set = new Set();
   for (const s of game.settlements) {
     if (s.owner === owner) continue;
     const i = s.y * game.map.w + s.x;
-    if (owner === 0) {
+    if (game.pvp) {
+      if (game.fogs[owner][i] === 2 || game.knowns[owner][s.id]) set.add(i);
+    } else if (owner === 0) {
       if (game.fog[i] === 2 || game.known[s.id]) set.add(i);
     } else if (game.ai.known[s.id]) {
       set.add(i);
@@ -162,9 +167,16 @@ function blockedTiles(game, owner) {
   return set;
 }
 
+// Fog array used for pathfinding by `owner` (null = omniscient pathing,
+// which is how the solo AI behaves today).
+function pathFog(game, owner) {
+  if (game.pvp) return game.fogs[owner];
+  return owner === 0 ? game.fog : null;
+}
+
 // ---------------------------------------------------------------- setup
 
-export function newGame(seedStr, sizeKey, difficulty) {
+export function newGame(seedStr, sizeKey, difficulty, pvp) {
   const map = generateMap(seedStr, sizeKey);
   const game = {
     seed: seedStr, sizeKey, difficulty,
@@ -181,12 +193,21 @@ export function newGame(seedStr, sizeKey, difficulty) {
     known: {},                             // player memory of enemy settlements {id:{x,y}}
     events: [],
     fx: [],                                // transient damage-feedback events (not serialized)
+    combat: [],                            // this tick's engagement links (not serialized)
     mergeLog: {},                          // oldBlobId -> survivingBlobId (for UI selection)
     result: null,                          // 'win' | 'loss' | 'surrender'
     farmAlarmT: -999,                      // last "farmers ran to shelter" toast (transient)
     pillageAlarmT: -999,                   // last "land stripped bare" toast (transient)
     ai: { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
+  if (pvp) {
+    game.pvp = true;
+    game.me = 0;
+    game.fogs = [new Uint8Array(map.w * map.h), new Uint8Array(map.w * map.h)];
+    game.knowns = [{}, {}];
+    game.fog = game.fogs[0];
+    game.resultReason = null;
+  }
   for (let side = 0; side < 2; side++) {
     const s = map.starts[side];
     const sett = foundSettlement(game, side, s.x, s.y);
@@ -200,6 +221,13 @@ export function newGame(seedStr, sizeKey, difficulty) {
   }
   updateVision(game);
   return game;
+}
+
+// Which side this client plays. In PvP, `game.fog` stays aliased to the
+// viewer's own fog array so all render/UI fog reads are viewer-relative.
+export function setViewer(game, me) {
+  game.me = me;
+  if (game.pvp) game.fog = game.fogs[me];
 }
 
 function makeBlob(game, owner, x, y, count, units) {
@@ -271,10 +299,9 @@ function destroySettlement(game, s, why) {
   }
   delete game.known[s.id];
   delete game.ai.known[s.id];
-  game.events.push({
-    msg: s.owner === 0 ? '💥 Your settlement was destroyed!' : '🔥 Enemy settlement destroyed!',
-    x: s.x, y: s.y,
-  });
+  if (game.pvp) { delete game.knowns[0][s.id]; delete game.knowns[1][s.id]; }
+  game.events.push({ owner: s.owner, msg: '💥 Your settlement was destroyed!', x: s.x, y: s.y });
+  game.events.push({ owner: 1 - s.owner, msg: '🔥 Enemy settlement destroyed!', x: s.x, y: s.y });
 }
 
 // ---------------------------------------------------------------- ops (player + AI share these)
@@ -285,7 +312,7 @@ export function opMove(game, b, x, y, attack) {
   b.working = null;
   b.order = { type: attack ? 'attack' : 'move', x, y };
   b.chaseId = null;
-  const p = findPath(game.map, b.x, b.y, x, y, b.owner === 0 ? game.fog : null, blockedTiles(game, b.owner));
+  const p = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), blockedTiles(game, b.owner));
   if (!p) { b.order = null; return { err: 'No path there' }; }
   b.path = p; b.pathGoal = { x, y };
   return { ok: true };
@@ -639,7 +666,7 @@ function pushFx(game, fx) {
 // -- movement / orders
 
 function ensurePath(game, b, x, y) {
-  const p = findPath(game.map, b.x, b.y, x, y, b.owner === 0 ? game.fog : null, blockedTiles(game, b.owner));
+  const p = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), blockedTiles(game, b.owner));
   b.path = p;
   b.pathGoal = p ? { x, y } : null;
   return !!p;
@@ -651,12 +678,22 @@ function ensurePath(game, b, x, y) {
 function pathBlocked(game, b) {
   if (!b.path) return false;
   const blocked = blockedTiles(game, b.owner);
-  const n = Math.min(2, b.path.length);
+  const w = game.map.w;
+  const fog = pathFog(game, b.owner);
+  // a mountain the mover knows about: the player (or pvp side) sees explored
+  // terrain only; the AI is omniscient (its paths never contain one anyway)
+  const knownMountain = ti => game.map.mountain[ti] && (!fog || fog[ti] > 0);
+  let px = Math.floor(b.x), py = Math.floor(b.y);
+  const n = Math.min(3, b.path.length);
   for (let i = 0; i < n; i++) {
     const wp = b.path[i];
-    const ti = Math.floor(wp.y) * game.map.w + Math.floor(wp.x);
+    const x = Math.floor(wp.x), y = Math.floor(wp.y);
+    const ti = y * w + x;
     if (blocked.has(ti)) return true;
-    if (b.owner === 0 && game.fog[ti] > 0 && game.map.mountain[ti]) return true;
+    if (knownMountain(ti)) return true;
+    // diagonal step that would cut past a revealed mountain corner
+    if (x !== px && y !== py && (knownMountain(py * w + x) || knownMountain(y * w + px))) return true;
+    px = x; py = y;
   }
   return false;
 }
@@ -667,9 +704,11 @@ function moveBlob(game, b) {
   let remaining = blobSpeed(b) * C.DT;
   while (remaining > 0 && b.path.length) {
     const wp = b.path[0];
-    // never step onto a known enemy settlement tile; stall and let the
-    // pathBlocked replan route around it next tick
-    if (blocked.has(Math.floor(wp.y) * game.map.w + Math.floor(wp.x))) return false;
+    // never step onto a known enemy settlement tile or any mountain tile
+    // (mountains are static — no unit may ever occupy one, fog or not);
+    // stall and let the pathBlocked replan route around it next tick
+    const wi = Math.floor(wp.y) * game.map.w + Math.floor(wp.x);
+    if (blocked.has(wi) || game.map.mountain[wi]) return false;
     const d = dist(b.x, b.y, wp.x, wp.y);
     if (d <= remaining) {
       b.x = wp.x; b.y = wp.y;
@@ -713,7 +752,7 @@ function tickOrder(game, b) {
     if (pathBlocked(game, b) && !ensurePath(game, b, o.x, o.y)) {
       // walled in by explored mountains — the optimistic plan was wrong
       b.order = null; b.pathGoal = null;
-      game.events.push({ msg: '⛰️ No way through — order cancelled', x: b.x, y: b.y });
+      game.events.push({ owner: b.owner, msg: '⛰️ No way through — order cancelled', x: b.x, y: b.y });
       return;
     }
     const arrived = moveBlob(game, b);
@@ -740,6 +779,16 @@ function tickOrder(game, b) {
 
 function targetPos(tgt, kind) {
   return kind === 'blob' ? { x: tgt.x, y: tgt.y } : { x: tgt.x + 0.5, y: tgt.y + 0.5 };
+}
+
+// No way through to this leg's destination (revealed mountains walled it
+// off) — release the carrier instead of pacing at the wall forever. It
+// keeps as much of its cargo as it can carry as its own food.
+function releaseBlockedCarrier(game, b, route) {
+  b.food = Math.min(foodCap(b), b.food + (b.order.cargo || 0));
+  SUP.removeCarrier(game, route, b.id);
+  b.order = null;
+  game.events.push({ msg: '⛰️ Supply route blocked', x: b.x, y: b.y });
 }
 
 function tickCarrier(game, b) {
@@ -774,7 +823,7 @@ function tickCarrier(game, b) {
     if (dist(b.x, b.y, tp.x, tp.y) <= 2.0) { o.phase = 'unload'; b.path = null; return; }
     const stale = b.pathGoal && dist(b.pathGoal.x, b.pathGoal.y, tp.x, tp.y) > 2.5;
     if (!b.path || !b.path.length || (stale && game.tick % 20 === 0)) {
-      if (!ensurePath(game, b, tp.x, tp.y)) return;
+      if (!ensurePath(game, b, tp.x, tp.y)) { releaseBlockedCarrier(game, b, route); return; }
     }
     moveBlob(game, b);
   } else if (o.phase === 'unload') {
@@ -797,7 +846,9 @@ function tickCarrier(game, b) {
     if (o.cargo <= 0.01 || taken <= 0.001) { o.phase = 'return'; b.path = null; }
   } else { // return
     if (dist(b.x, b.y, src.x + 0.5, src.y + 0.5) <= 2.2) { o.phase = 'load'; o.wait = 0; b.path = null; return; }
-    if (!b.path || !b.path.length) { if (!ensurePath(game, b, src.x, src.y)) return; }
+    if (!b.path || !b.path.length) {
+      if (!ensurePath(game, b, src.x, src.y)) { releaseBlockedCarrier(game, b, route); return; }
+    }
     moveBlob(game, b);
   }
 }
@@ -805,6 +856,7 @@ function tickCarrier(game, b) {
 // -- combat
 
 function tickCombat(game) {
+  game.combat = []; // rebuilt every tick — engaged pairs re-register while in contact
   const alive = game.blobs.filter(b => !b.dead);
   const dmg = new Map();
   for (let i = 0; i < alive.length; i++) {
@@ -814,6 +866,7 @@ function tickCombat(game) {
       const d = dist(a.x, a.y, b.x, b.y);
       if (d > blobRadius(a) + blobRadius(b) + 0.2) continue;
       a.engagedT = game.tick; b.engagedT = game.tick;
+      game.combat.push({ kind: 'bb', a: a.id, b: b.id });
       dmg.set(a, (dmg.get(a) || 0) + b.count.deploy * fedMult(fedMeter(b)) * C.K_COMBAT);
       dmg.set(b, (dmg.get(b) || 0) + a.count.deploy * fedMult(fedMeter(a)) * C.K_COMBAT);
     }
@@ -826,6 +879,7 @@ function tickCombat(game) {
       if (d > blobRadius(b) + 1.4) continue;
       b.engagedT = game.tick;
       s.lastHitT = game.tick;
+      game.combat.push({ kind: 'bs', b: b.id, s: s.id });
       const attack = b.count.deploy * fedMult(fedMeter(b));
       const gd = s.garrison.deploy;
       if (garrisonTotal(s) > 0) {
@@ -878,9 +932,9 @@ function shelterFarmers(game, s) {
     if (opMove(game, b, s.x + 0.5, s.y + 0.5, false).ok) any = true;
     else b.working = null; // no path home — at least stop working
   }
-  if (any && s.owner === 0 && game.tick - game.farmAlarmT > 100) {
+  if (any && game.tick - game.farmAlarmT > 100) {
     game.farmAlarmT = game.tick;
-    game.events.push({ msg: '🌱 Your farmers ran to shelter!', x: s.x + 0.5, y: s.y + 0.5 });
+    game.events.push({ owner: s.owner, msg: '🌱 Your farmers ran to shelter!', x: s.x + 0.5, y: s.y + 0.5 });
   }
 }
 
@@ -986,27 +1040,31 @@ function applyGarrisonLosses(game, s, casualties) {
 
 // -- food / pillage / starvation
 
-// Tiles a pillaging blob is stripping right now: only the ground it
-// actually stands on — the tile underfoot, plus neighbours its body
-// circle overlaps (big armies reach further). Shared with the renderer
-// so the on-screen grid highlights match the sim exactly.
+// Tiles a pillaging blob is stripping right now: a fixed camp-sized
+// disc around the army (every non-mountain tile whose center lies
+// within PILLAGE_RADIUS), the same for all army sizes. Sorted
+// nearest-first so the per-cell-capped harvest drains the land
+// center-out. Shared with the renderer so the on-screen grid
+// highlights match the sim exactly.
 export function pillageCells(game, b) {
   const cx = Math.floor(b.x), cy = Math.floor(b.y);
   const { w, h } = game.map;
-  const reach = blobRadius(b);
-  const ui = tileIdx(game, b.x, b.y);
+  const reach = C.PILLAGE_RADIUS;
+  const span = Math.ceil(reach);
   const cells = [];
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dx = -1; dx <= 1; dx++) {
+  for (let dy = -span; dy <= span; dy++) {
+    for (let dx = -span; dx <= span; dx++) {
       const tx = cx + dx, ty = cy + dy;
       if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+      const d = dist(tx + 0.5, ty + 0.5, b.x, b.y);
+      if (d > reach) continue;
       const i = ty * w + tx;
-      if (i !== ui && dist(tx + 0.5, ty + 0.5, b.x, b.y) > reach) continue;
       if (game.map.mountain[i]) continue;
-      cells.push(i);
+      cells.push({ i, d });
     }
   }
-  return cells;
+  cells.sort((a, c) => a.d - c.d || a.i - c.i);
+  return cells.map(c => c.i);
 }
 
 function tickFood(game, b) {
@@ -1031,12 +1089,17 @@ function tickFood(game, b) {
     }
     let budget = Math.min(foodCap(b) - b.food, n * C.PILLAGE_RATE);
     if (budget > 0.0001) {
+      // Foraging is wasteful (PILLAGE_WASTE× the fertility a farm would
+      // spend per food), and tiles below half a level — the point where
+      // they display as Barren — yield nothing, so stripped land really
+      // stops feeding the army.
       for (const i of pillageCells(game, b)) {
         if (budget <= 0.0001) break;
-        const avail = game.map.fert[i] * C.FOOD_PER_FERT;
+        const avail = Math.max(0, game.map.fert[i] - C.FERT_LEVEL / 2)
+          * C.FOOD_PER_FERT / C.PILLAGE_WASTE;
         const take = Math.min(budget, avail, C.PILLAGE_RATE * n / 4);
         if (take <= 0.0001) continue;
-        game.map.fert[i] -= take / C.FOOD_PER_FERT;
+        game.map.fert[i] -= take * C.PILLAGE_WASTE / C.FOOD_PER_FERT;
         b.food += take;
         gained += take;
         budget -= take;
@@ -1045,16 +1108,16 @@ function tickFood(game, b) {
       }
     }
     if (gained > 0.001) b.lastYieldT = game.tick;
-    else if (b.owner === 0 && fedMeter(b) < 0.5
+    else if (fedMeter(b) < 0.5
       && game.tick - (b.lastYieldT || 0) > 100 && game.tick - game.pillageAlarmT > 100) {
       game.pillageAlarmT = game.tick;
-      game.events.push({ msg: '🍂 The land here is stripped bare!', x: b.x, y: b.y });
+      game.events.push({ owner: b.owner, msg: '🍂 The land here is stripped bare!', x: b.x, y: b.y });
     }
   }
   if (b.food <= 0.0001) {
     if (!b.starving) {
       b.starving = true;
-      if (b.owner === 0) game.events.push({ msg: '💀 Your army is starving!', x: b.x, y: b.y });
+      game.events.push({ owner: b.owner, msg: '💀 Your army is starving!', x: b.x, y: b.y });
     }
     applyStarvation(game, b);
   } else if (b.starving && fedMeter(b) > 0.1) {
@@ -1096,7 +1159,7 @@ export function trainGated(s) { return s.flow < C.EAT_PER_SEC * C.DT; }
 
 function tickSettlement(game, s) {
   if (!game.settlements.includes(s)) return;
-  const aiMult = s.owner === 1 ? DIFF[game.difficulty].income : 1;
+  const aiMult = (!game.pvp && s.owner === 1) ? DIFF[game.difficulty].income : 1;
   // farmland income accrues in every mode (boosted by farmers actually
   // working the fields) — training modes pick what the surplus becomes
   let fertSum = 0;
@@ -1222,40 +1285,49 @@ function cleanup(game) {
   game.blobs = game.blobs.filter(b => !b.dead);
 }
 
-function markCircle(game, cx, cy, r) {
-  const { w, h } = game.map;
+function markCircle(fog, map, cx, cy, r) {
+  const { w, h } = map;
   const r2 = r * r;
   const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(w - 1, Math.ceil(cx + r));
   const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(h - 1, Math.ceil(cy + r));
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
       const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
-      if (dx * dx + dy * dy <= r2) game.fog[y * w + x] = 2;
+      if (dx * dx + dy * dy <= r2) fog[y * w + x] = 2;
+    }
+  }
+}
+
+// Recompute vision + settlement memory for one side into (fog, known).
+function updateVisionFor(game, owner, fog, known) {
+  for (let i = 0; i < fog.length; i++) if (fog[i] === 2) fog[i] = 1;
+  for (const b of game.blobs) {
+    if (!b.dead && b.owner === owner) markCircle(fog, game.map, b.x, b.y, C.VISION_BLOB);
+  }
+  for (const s of game.settlements) {
+    if (s.owner === owner) markCircle(fog, game.map, s.x + 0.5, s.y + 0.5, C.VISION_SETT);
+  }
+  // remember enemy settlements we can currently see; forget destroyed ones
+  for (const s of game.settlements) {
+    if (s.owner !== owner && fog[s.y * game.map.w + s.x] === 2) {
+      known[s.id] = { x: s.x, y: s.y };
+    }
+  }
+  for (const id of Object.keys(known)) {
+    const k = known[id];
+    if (fog[k.y * game.map.w + k.x] === 2 && !game.settlements.some(s => s.id === +id)) {
+      delete known[id];
     }
   }
 }
 
 function updateVision(game) {
-  const fog = game.fog;
-  for (let i = 0; i < fog.length; i++) if (fog[i] === 2) fog[i] = 1;
-  for (const b of game.blobs) {
-    if (!b.dead && b.owner === 0) markCircle(game, b.x, b.y, C.VISION_BLOB);
+  if (game.pvp) {
+    updateVisionFor(game, 0, game.fogs[0], game.knowns[0]);
+    updateVisionFor(game, 1, game.fogs[1], game.knowns[1]);
+    return;
   }
-  for (const s of game.settlements) {
-    if (s.owner === 0) markCircle(game, s.x + 0.5, s.y + 0.5, C.VISION_SETT);
-  }
-  // remember enemy settlements we can currently see; forget destroyed ones
-  for (const s of game.settlements) {
-    if (s.owner === 1 && fog[s.y * game.map.w + s.x] === 2) {
-      game.known[s.id] = { x: s.x, y: s.y };
-    }
-  }
-  for (const id of Object.keys(game.known)) {
-    const k = game.known[id];
-    if (fog[k.y * game.map.w + k.x] === 2 && !game.settlements.some(s => s.id === +id)) {
-      delete game.known[id];
-    }
-  }
+  updateVisionFor(game, 0, game.fog, game.known);
 }
 
 export function isVisible(game, x, y) {
@@ -1265,6 +1337,15 @@ export function isVisible(game, x, y) {
 function checkResult(game) {
   const p = unitCounts(game, 0);
   const e = unitCounts(game, 1);
+  if (game.pvp) {
+    // symmetric: a side is out at 0 settlements and too few units to rebuild
+    const pOut = p.setts === 0 && p.units < C.SETT_COST;
+    const eOut = e.setts === 0 && e.units < C.SETT_COST;
+    if (pOut && eOut) game.result = p.units >= e.units ? 'p0-win' : 'p1-win';
+    else if (pOut) game.result = 'p1-win';
+    else if (eOut) game.result = 'p0-win';
+    return;
+  }
   if (e.setts === 0) { game.result = 'win'; return; }
   if (p.setts === 0 && p.units < C.SETT_COST) game.result = 'loss';
 }
@@ -1288,7 +1369,7 @@ function b64ToU8(b64) {
 export function serialize(game) {
   const fertDelta = {};
   for (const i of game.pillaged) fertDelta[i] = game.map.fert[i];
-  return {
+  const data = {
     v: 3,
     seed: game.seed, sizeKey: game.sizeKey, difficulty: game.difficulty,
     tick: game.tick, nextId: game.nextId, result: game.result,
@@ -1308,14 +1389,37 @@ export function serialize(game) {
       targetKind: r.targetKind, targetId: r.targetId, carrierIds: r.carrierIds,
     })),
     fertDelta,
-    fog: u8ToB64(game.fog),
-    known: game.known,
-    ai: game.ai,
   };
+  if (game.pvp) {
+    // PvP snapshot: both sides' fog + memory (rejoiners recover their
+    // explored map), plus the mergeLog so the guest's selections survive
+    // merges across snapshot applications.
+    data.pvp = true;
+    data.fogs = [u8ToB64(game.fogs[0]), u8ToB64(game.fogs[1])];
+    data.knowns = game.knowns;
+    data.mergeLog = game.mergeLog;
+    data.resultReason = game.resultReason || null;
+  } else {
+    data.fog = u8ToB64(game.fog);
+    data.known = game.known;
+    data.ai = game.ai;
+  }
+  return data;
 }
 
-export function deserialize(data) {
-  const map = generateMap(data.seed, data.sizeKey);
+// Rebuild a game from serialized data. Pass `prev` (the current game for
+// the same match) to reuse its map object — the renderer keys its terrain
+// layer on map identity, so PvP snapshot applications must NOT regenerate
+// the map. Fertility, dirty-tile and blob-interpolation state carry over.
+export function deserialize(data, prev) {
+  const reuse = prev && prev.seed === data.seed && prev.sizeKey === data.sizeKey;
+  const map = reuse ? prev.map : generateMap(data.seed, data.sizeKey);
+  const dirty = new Set(reuse ? prev.dirty : []);
+  if (reuse) {
+    // reset tiles our local dead-reckoning may have pillaged; the
+    // snapshot's fertDelta below re-applies the authoritative values
+    for (const i of prev.pillaged) { map.fert[i] = map.orig[i]; dirty.add(i); }
+  }
   const game = {
     seed: data.seed, sizeKey: data.sizeKey, difficulty: data.difficulty,
     map,
@@ -1323,20 +1427,31 @@ export function deserialize(data) {
     blobs: [], settlements: [], routes: [],
     tilledBy: new Int32Array(map.w * map.h),
     pillaged: new Set(),
-    dirty: new Set(),
-    fog: b64ToU8(data.fog),
+    dirty,
+    fog: data.fog ? b64ToU8(data.fog) : new Uint8Array(map.w * map.h),
     known: data.known || {},
     events: [],
-    fx: [],
+    fx: reuse ? prev.fx : [],
+    combat: [],
     mergeLog: {},
     result: data.result || null,
     farmAlarmT: -999,
     pillageAlarmT: -999,
     ai: data.ai || { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
+  if (data.pvp) {
+    game.pvp = true;
+    game.fogs = [b64ToU8(data.fogs[0]), b64ToU8(data.fogs[1])];
+    game.knowns = data.knowns || [{}, {}];
+    game.mergeLog = data.mergeLog || {};
+    game.resultReason = data.resultReason || null;
+    game.me = prev && prev.me != null ? prev.me : 0;
+    game.fog = game.fogs[game.me];
+  }
   for (const [i, f] of Object.entries(data.fertDelta || {})) {
     map.fert[+i] = f;
     if (f < map.orig[+i] - 0.0001) game.pillaged.add(+i);
+    if (reuse) dirty.add(+i);
   }
   for (const sd of data.settlements) {
     const s = {
@@ -1381,6 +1496,19 @@ export function deserialize(data) {
   }
   for (const rd of data.routes) {
     game.routes.push({ ...rd, window: [] });
+  }
+  if (reuse) {
+    // repaint tiles whose tilled state changed (settlements founded/lost)
+    for (let i = 0; i < game.tilledBy.length; i++) {
+      if (game.tilledBy[i] !== prev.tilledBy[i]) dirty.add(i);
+    }
+    // carry interpolation anchors so blobs glide instead of teleporting
+    const prevById = new Map();
+    for (const ob of prev.blobs) if (!ob.dead) prevById.set(ob.id, ob);
+    for (const b of game.blobs) {
+      const ob = prevById.get(b.id);
+      if (ob && dist(ob.x, ob.y, b.x, b.y) < 3) { b.prevX = ob.x; b.prevY = ob.y; }
+    }
   }
   return game;
 }

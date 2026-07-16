@@ -254,16 +254,10 @@ export function findPath(map, sx, sy, tx, ty, fog, blocked) {
     cur = came[cur];
   }
   path.reverse();
-  // light smoothing: drop collinear waypoints
-  const out = [];
-  for (let i = 0; i < path.length; i++) {
-    if (i > 0 && i < path.length - 1) {
-      const a = path[i - 1], b = path[i], c = path[i + 1];
-      if ((b.x - a.x) === (c.x - b.x) && (b.y - a.y) === (c.y - b.y)) continue;
-    }
-    out.push(path[i]);
-  }
-  return out;
+  // per-tile waypoints, deliberately unsmoothed: movement code checks the
+  // tile under every waypoint, so a mountain revealed under a fog-planned
+  // route is always caught before a unit can walk into it
+  return path;
 }
 
 function octile(ax, ay, bx, by) {

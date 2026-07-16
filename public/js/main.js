@@ -1,4 +1,5 @@
-// Boot, menu wiring, match lifecycle, HUD + selection panel, autosave.
+// Boot, menu wiring, match lifecycle, HUD + selection panel, autosave,
+// multiplayer lobbies (host-authoritative snapshot sync over polling).
 
 import * as S from './sim.js';
 import { aiTick } from './ai.js';
@@ -11,6 +12,7 @@ const params = new URLSearchParams(location.search);
 const token = params.get('token') || '';
 const apiHeaders = token ? { 'x-usernode-token': token } : {};
 const SAVE_KEY = 'supply-line-save-v1';
+const IS_DEMO = params.get('demo') === '1';
 
 let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
@@ -24,6 +26,34 @@ let panelHeld = false;
 let toastTimer = null;
 let lastPanelHTML = '';
 
+// -- multiplayer state ------------------------------------------------
+let me = 0;        // which owner this client plays (0 solo/host, 1 guest)
+let mp = null;     // { lobbyId, role, opponent, timer, ... } while in a PvP match
+let waiting = null;   // { id, challenge, timer } while a lobby/challenge waits
+let menuTimer = null;
+let mineLobby = null;                 // my active lobby (for Rejoin)
+let seenChallengeIds = new Set();     // for "challenge withdrawn" toasts
+let actedChallengeIds = new Set();    // accepted/declined — no withdrawn toast
+let dismissedDemoChallenge = false;   // hide the injected staging demo challenge
+let suggestTimer = null;
+
+function isGuest() { return mp && mp.role === 'guest'; }
+
+async function api(path, body) {
+  const opts = body !== undefined
+    ? { method: 'POST', headers: { 'Content-Type': 'application/json', ...apiHeaders }, body: JSON.stringify(body) }
+    : { headers: apiHeaders };
+  const res = await fetch(path, opts);
+  let data = {};
+  try { data = await res.json(); } catch { }
+  if (!res.ok) {
+    const err = new Error(data.error || ('Request failed (' + res.status + ')'));
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
 // ---------------------------------------------------------------- menu
 
 async function loadHistory() {
@@ -36,16 +66,17 @@ async function loadHistory() {
       return;
     }
     const { mine, recent } = await res.json();
+    const tag = (m) => m.mode === 'pvp' ? `vs ${esc(m.opponent || '?')}` : esc(m.difficulty);
     mineEl.innerHTML = mine.length ? mine.map(m => `
       <div class="flex justify-between gap-2">
         <span class="${m.result === 'win' ? 'text-emerald-400' : 'text-red-400'}">${m.result === 'win' ? 'Victory' : m.result === 'surrender' ? 'Surrendered' : 'Defeat'}</span>
-        <span class="text-zinc-500">${esc(m.difficulty)}</span>
+        <span class="text-zinc-500 truncate">${tag(m)}</span>
         <span class="font-mono text-zinc-500">${fmtDur(m.duration_seconds)}</span>
       </div>`).join('') : '<span class="text-zinc-600">No matches yet — start one above!</span>';
     recentEl.innerHTML = recent.length ? recent.map(m => `
       <div class="flex justify-between gap-2">
         <span class="truncate">${esc(m.username)}</span>
-        <span class="text-zinc-500">${esc(m.difficulty)}</span>
+        <span class="text-zinc-500 truncate">${tag(m)}</span>
         <span class="font-mono text-zinc-500">${fmtDur(m.duration_seconds)}</span>
       </div>`).join('') : '<span class="text-zinc-600">No wins recorded yet.</span>';
   } catch {
@@ -69,7 +100,7 @@ function loadSaveData() {
     const data = JSON.parse(raw);
     // v1 saves predate per-unit health and are not migratable — discard.
     // v2 saves load fine (new fields default; farmer HP is clamped).
-    if ((data.v !== 2 && data.v !== 3) || data.result) return null;
+    if ((data.v !== 2 && data.v !== 3) || data.result || data.pvp) return null;
     return data;
   } catch { return null; }
 }
@@ -84,6 +115,7 @@ function startNewMatch() {
   const size = $('sel-mapsize').value;
   const diff = $('sel-difficulty').value;
   try {
+    me = 0;
     startMatch(S.newGame(seed, size, diff));
   } catch (e) {
     showMenuError('Could not start the match: ' + (e && e.message || e));
@@ -91,6 +123,7 @@ function startNewMatch() {
 }
 
 $('btn-new').addEventListener('click', () => {
+  if (waiting) { showMenuError('Cancel your multiplayer lobby first.'); return; }
   if (loadSaveData()) {
     showConfirm('Match already in progress',
       'You have a match in progress. You can resume it, or discard it and start a new one.', [
@@ -106,6 +139,7 @@ $('btn-resume').addEventListener('click', () => {
   const data = loadSaveData();
   if (!data) { refreshMenu(); return; }
   try {
+    me = 0;
     startMatch(S.deserialize(data));
   } catch (e) {
     localStorage.removeItem(SAVE_KEY);
@@ -149,6 +183,499 @@ function showMenuError(msg) {
   setTimeout(() => el.classList.add('hidden'), 5000);
 }
 
+// ---------------------------------------------------------------- multiplayer menu
+
+function startMenuPolling() {
+  stopMenuPolling();
+  refreshLobbies();
+  menuTimer = setInterval(refreshLobbies, 3000);
+}
+function stopMenuPolling() {
+  if (menuTimer) { clearInterval(menuTimer); menuTimer = null; }
+}
+
+async function refreshLobbies() {
+  if (game) return;
+  let data;
+  try {
+    data = await api('/api/lobbies' + (IS_DEMO ? '?demo=1' : ''));
+  } catch (e) {
+    $('lobby-list').innerHTML = '<span class="text-zinc-600">Sign in via Usernode to play multiplayer.</span>';
+    return;
+  }
+  renderLobbyList(data.open || []);
+  renderChallenges(data.challenges || []);
+  handleMine(data.mine || null);
+}
+
+function renderLobbyList(rows) {
+  const el = $('lobby-list');
+  if (!rows.length) {
+    el.innerHTML = '<span class="text-zinc-600">No open lobbies right now — create one above!</span>';
+    return;
+  }
+  el.innerHTML = rows.map(l => `
+    <div class="flex items-center justify-between gap-2 bg-zinc-800/50 rounded-lg px-3 py-2">
+      <span class="truncate text-zinc-200">${esc(l.host_username)}</span>
+      <span class="text-xs text-zinc-500">${esc(l.size_key)} · ${lobbyAge(l.created_at)}</span>
+      <button data-join="${l.id}" data-host="${esc(l.host_username)}" class="btn-sm px-3 rounded bg-sky-700 hover:bg-sky-600 text-white">Join</button>
+    </div>`).join('');
+}
+
+function lobbyAge(createdAt) {
+  const s = Math.max(0, Math.round((Date.now() - new Date(createdAt).getTime()) / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m`;
+}
+
+function renderChallenges(rows) {
+  const el = $('challenge-inbox');
+  const visible = rows.filter(c => !(dismissedDemoChallenge && c.host_username === 'Staging demo Warden'));
+  // "challenge withdrawn" toast: a previously shown challenge vanished
+  const ids = new Set(visible.map(c => c.id));
+  for (const old of seenChallengeIds) {
+    if (!ids.has(old) && !actedChallengeIds.has(old)) toast('⚔️ Challenge withdrawn');
+  }
+  seenChallengeIds = ids;
+  el.innerHTML = visible.map(c => `
+    <div class="bg-violet-950/60 border border-violet-700 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+      <span class="text-sm text-violet-100">⚔️ <b>${esc(c.host_username)}</b> challenges you! <span class="text-violet-300">(${esc(c.size_key)} map)</span></span>
+      <span class="flex gap-1 shrink-0">
+        <button data-accept="${c.id}" data-host="${esc(c.host_username)}" class="btn-sm px-3 rounded bg-emerald-700 hover:bg-emerald-600 text-white">Accept</button>
+        <button data-decline="${c.id}" class="btn-sm px-3 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200">Decline</button>
+      </span>
+    </div>`).join('');
+}
+
+function handleMine(mine) {
+  mineLobby = mine && mine.status === 'active' ? mine : null;
+  $('btn-mp-rejoin').classList.toggle('hidden', !mineLobby);
+  if (!mine) return;
+  if (mine.status === 'declined') {
+    toast(`${mine.challenge_username || 'They'} declined your challenge`);
+    api(`/api/lobbies/${mine.id}/cancel`, {}).catch(() => { });
+    if (waiting && waiting.id === mine.id) stopWaiting();
+    return;
+  }
+  // page was reloaded while a lobby was waiting — resume the waiting state
+  if (mine.status === 'open' && !waiting) enterWaiting(mine);
+}
+
+$('lobby-list').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-join]');
+  if (!btn) return;
+  joinLobby(+btn.dataset.join, btn.dataset.host);
+});
+
+$('challenge-inbox').addEventListener('click', async (e) => {
+  const acc = e.target.closest('[data-accept]');
+  const dec = e.target.closest('[data-decline]');
+  if (acc) {
+    actedChallengeIds.add(+acc.dataset.accept);
+    joinLobby(+acc.dataset.accept, acc.dataset.host);
+  } else if (dec) {
+    const id = +dec.dataset.decline;
+    actedChallengeIds.add(id);
+    try {
+      const r = await api(`/api/lobbies/${id}/decline`, {});
+      if (r.demo) dismissedDemoChallenge = true;
+    } catch (err) { toast(err.message); }
+    refreshLobbies();
+  }
+});
+
+async function joinLobby(id, hostName) {
+  if (waiting) { toast('Cancel your own lobby first'); return; }
+  try {
+    await api(`/api/lobbies/${id}/join`, {});
+  } catch (err) {
+    toast(err.message);
+    refreshLobbies();
+    return;
+  }
+  startPvpGuest(id, hostName);
+}
+
+$('btn-mp-create').addEventListener('click', async () => {
+  if (waiting) return;
+  try {
+    const r = await api('/api/lobbies', { sizeKey: $('mp-size').value });
+    enterWaiting(r.lobby);
+  } catch (err) { showMenuError(err.message); }
+});
+
+$('btn-mp-challenge').addEventListener('click', async () => {
+  if (waiting) return;
+  const name = $('challenge-input').value.trim();
+  if (!name) { showMenuError('Type a username to challenge.'); return; }
+  try {
+    const r = await api('/api/lobbies', { sizeKey: $('mp-size').value, challengeUsername: name });
+    $('challenge-input').value = '';
+    hideSuggest();
+    enterWaiting(r.lobby);
+  } catch (err) { showMenuError(err.message); }
+});
+
+$('btn-mp-cancel').addEventListener('click', async () => {
+  if (!waiting) return;
+  const id = waiting.id;
+  stopWaiting();
+  try { await api(`/api/lobbies/${id}/cancel`, {}); } catch { }
+  refreshLobbies();
+});
+
+function enterWaiting(lobby) {
+  stopWaiting();
+  waiting = { id: lobby.id, challenge: lobby.challenge_username || null, lobby };
+  $('mp-waiting-text').textContent = waiting.challenge
+    ? `Challenge sent to ${waiting.challenge} — they'll see it when they open Supply Line…`
+    : 'Waiting for an opponent…';
+  $('mp-waiting').classList.remove('hidden');
+  $('mp-forms').classList.add('hidden');
+  waiting.timer = setInterval(waitTick, 2000);
+  waitTick();
+}
+
+function stopWaiting() {
+  if (waiting && waiting.timer) clearInterval(waiting.timer);
+  waiting = null;
+  $('mp-waiting').classList.add('hidden');
+  $('mp-forms').classList.remove('hidden');
+}
+
+async function waitTick() {
+  if (!waiting) return;
+  let r;
+  try {
+    r = await api(`/api/lobbies/${waiting.id}/sync`, { commandsAfter: 0, tick: 0 });
+  } catch { return; }
+  if (!waiting) return;
+  if (r.status === 'active') {
+    const lobby = waiting.lobby;
+    stopWaiting();
+    startPvpHost(lobby, r.guest_username);
+  } else if (r.status === 'declined') {
+    const name = waiting.challenge || 'They';
+    const id = waiting.id;
+    stopWaiting();
+    toast(`${name} declined your challenge`);
+    api(`/api/lobbies/${id}/cancel`, {}).catch(() => { });
+  } else if (r.status === 'cancelled' || r.status === 'finished') {
+    stopWaiting();
+  }
+}
+
+// -- challenge autocomplete
+$('challenge-input').addEventListener('input', () => {
+  clearTimeout(suggestTimer);
+  const q = $('challenge-input').value.trim();
+  if (!q) { hideSuggest(); return; }
+  suggestTimer = setTimeout(async () => {
+    try {
+      const r = await api(`/api/players?q=${encodeURIComponent(q)}${IS_DEMO ? '&demo=1' : ''}`);
+      const names = r.players || [];
+      if (!names.length) { hideSuggest(); return; }
+      $('challenge-suggest').innerHTML = names.map(n =>
+        `<button data-name="${esc(n)}" class="block w-full text-left px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-700">${esc(n)}</button>`).join('');
+      $('challenge-suggest').classList.remove('hidden');
+    } catch { hideSuggest(); }
+  }, 250);
+});
+$('challenge-suggest').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-name]');
+  if (!btn) return;
+  $('challenge-input').value = btn.dataset.name;
+  hideSuggest();
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#challenge-suggest') && e.target.id !== 'challenge-input') hideSuggest();
+});
+function hideSuggest() { $('challenge-suggest').classList.add('hidden'); }
+
+$('btn-mp-rejoin').addEventListener('click', async () => {
+  if (!mineLobby) return;
+  try {
+    const st = await api(`/api/lobbies/${mineLobby.id}/state`);
+    if (st.status !== 'active') { toast('That match is already over.'); refreshLobbies(); loadHistory(); return; }
+    if (st.role === 'host') {
+      let g;
+      if (st.snapshot) {
+        g = S.deserialize(st.snapshot);
+      } else {
+        g = S.newGame(st.seed, st.size_key, 'normal', true);
+      }
+      // skip commands already applied before the reload — the snapshot
+      // reflects them; replaying would double splits/builds
+      beginPvp('host', st.id, st.opponent, g, st.last_command_id || 0);
+    } else {
+      startPvpGuest(st.id, st.opponent);
+    }
+  } catch (err) { toast(err.message); }
+});
+
+// ---------------------------------------------------------------- pvp session
+
+function startPvpHost(lobby, guestName) {
+  const g = S.newGame(lobby.seed, lobby.size_key, 'normal', true);
+  beginPvp('host', lobby.id, guestName, g);
+}
+
+function beginPvp(role, lobbyId, opponent, g, lastCmdId) {
+  stopMpTimers();
+  mp = {
+    lobbyId, role, opponent: opponent || '…',
+    lastCmdId: lastCmdId || 0, pollN: 0, outQueue: [], guestEvents: [],
+    lastSnapTick: -1, oppSeen: null, ended: false, busy: false,
+    finalSnapSent: false, noSnapPolls: 0,
+  };
+  me = role === 'host' ? 0 : 1;
+  if (g) {
+    S.setViewer(g, me);
+    startMatch(g);
+  }
+  if (role === 'host') {
+    hostSync(true);
+    mp.timer = setInterval(() => hostSync(false), 1000);
+  } else {
+    guestSync();
+    mp.timer = setInterval(guestSync, 1000);
+  }
+}
+
+function startPvpGuest(lobbyId, hostName) {
+  beginPvp('guest', lobbyId, hostName, null);
+  toast('⚔️ Joining match…');
+}
+
+function stopMpTimers() {
+  if (mp && mp.timer) { clearInterval(mp.timer); mp.timer = null; }
+}
+
+function buildSnapshot() {
+  const snap = S.serialize(game);
+  snap.netEvents = mp.guestEvents.splice(0);
+  return snap;
+}
+
+async function hostSync(force) {
+  if (!mp || mp.busy) return;
+  mp.busy = true;
+  try {
+    mp.pollN++;
+    const body = { commandsAfter: mp.lastCmdId, tick: game ? game.tick : 0 };
+    const wantSnap = force || mp.pollN % 2 === 0 || (game && game.result && !mp.finalSnapSent);
+    if (wantSnap && game) {
+      body.snapshot = buildSnapshot();
+      if (game.result) mp.finalSnapSent = true;
+    }
+    const r = await api(`/api/lobbies/${mp.lobbyId}/sync`, body);
+    if (!mp) return;
+    if (r.guest_username && mp.opponent === '…') { mp.opponent = r.guest_username; updateOppLabel(); }
+    for (const row of r.commands || []) {
+      mp.lastCmdId = Math.max(mp.lastCmdId, row.id);
+      try { applyGuestCommand(row.payload); } catch { }
+    }
+    mp.oppSeen = r.opponentSeenAgoMs;
+    if (r.status === 'finished' && !mp.ended) finishFromServer(r);
+    updateMpBanner();
+  } catch { } finally { if (mp) mp.busy = false; }
+}
+
+async function guestSync() {
+  if (!mp || mp.busy || mp.ended) return;
+  mp.busy = true;
+  const batch = mp.outQueue.splice(0, 50);
+  try {
+    const r = await api(`/api/lobbies/${mp.lobbyId}/sync`, { haveTick: mp.lastSnapTick, commands: batch });
+    if (!mp) return;
+    if (r.snapshot) {
+      mp.lastSnapTick = r.snapshot_tick || (r.snapshot.tick | 0);
+      mp.noSnapPolls = 0;
+      applySnapshot(r.snapshot);
+    } else if (!game) {
+      mp.noSnapPolls++;
+      if (mp.noSnapPolls > 30) {
+        // host never produced a starting snapshot — bail out
+        toast('The host never showed up — match abandoned.');
+        leavePvpToMenu();
+        return;
+      }
+    }
+    mp.oppSeen = r.opponentSeenAgoMs;
+    if (r.status === 'finished' && !mp.ended) finishFromServer(r);
+    updateMpBanner();
+  } catch {
+    mp.outQueue = batch.concat(mp.outQueue); // retry unsent orders
+  } finally { if (mp) mp.busy = false; }
+}
+
+function applySnapshot(snap) {
+  if (!game) {
+    const g = S.deserialize(snap);
+    S.setViewer(g, 1);
+    startMatch(g);
+  } else {
+    const prevTick = game.tick;
+    const g = S.deserialize(snap, game);
+    S.setViewer(g, 1);
+    game = g;
+    // dead-reckon back toward where we were rendering (bounded catch-up)
+    let ahead = Math.min(25, Math.max(0, prevTick - g.tick));
+    while (ahead-- > 0 && !g.result) S.step(g);
+  }
+  for (const ev of snap.netEvents || []) toast(ev.msg);
+}
+
+// Host-side application of the guest's relayed orders. Every entity id is
+// re-resolved against authoritative state and must belong to owner 1.
+function resolveBlobFor(owner, id) {
+  let cur = id, hops = 0;
+  while (hops++ < 10) {
+    const b = game.blobs.find(x => x.id === cur && !x.dead);
+    if (b) return b.owner === owner ? b : null;
+    if (game.mergeLog[cur] != null) cur = game.mergeLog[cur];
+    else return null;
+  }
+  return null;
+}
+
+function applyGuestCommand(c) {
+  if (!game || game.result || !c || typeof c !== 'object') return;
+  const b = c.blobId != null ? resolveBlobFor(1, c.blobId) : null;
+  const st = c.settlementId != null
+    ? game.settlements.find(s => s.id === c.settlementId && s.owner === 1) : null;
+  switch (c.op) {
+    case 'surrender':
+      game.result = 'p0-win';
+      game.resultReason = 'surrender';
+      break;
+    case 'move': if (b) S.opMove(game, b, +c.x || 0, +c.y || 0, !!c.attack); break;
+    case 'setRole': if (b) S.opSetRole(game, b, c.role); break;
+    case 'split': if (b) S.opSplit(game, b, c.take | 0); break;
+    case 'build': if (b) S.opBuild(game, b); break;
+    case 'pillage': if (b) S.opPillage(game, b, !!c.on); break;
+    case 'route':
+      if (b && c.target) {
+        if (c.target.kind === 'blob') {
+          const t = resolveBlobFor(1, c.target.id);
+          if (t && t.id !== b.id) S.opRoute(game, b, { kind: 'blob', id: t.id });
+        } else if (c.target.kind === 'settlement') {
+          const t = game.settlements.find(s => s.id === c.target.id && s.owner === 1);
+          if (t) S.opRoute(game, b, { kind: 'settlement', id: t.id });
+        }
+      }
+      break;
+    case 'setMode': if (st) S.opSetMode(game, st, c.mode); break;
+    case 'fieldGarrison': if (st) S.opFieldGarrison(game, st); break;
+    case 'fieldRole': if (st) S.opFieldRole(game, st, c.role, Math.max(1, c.n | 0)); break;
+    case 'garrisonRole': if (st) S.opGarrisonRole(game, st, c.role); break;
+  }
+}
+
+function updateMpBanner() {
+  const el = $('mp-banner');
+  if (!mp || mp.ended || !game || game.result) { el.classList.add('hidden'); return; }
+  const gone = mp.oppSeen != null ? mp.oppSeen : 0;
+  if (gone > 6000) {
+    el.classList.remove('hidden');
+    const canClaim = gone > 60000;
+    $('mp-banner-text').textContent = canClaim
+      ? `${mp.opponent} seems to be gone (${Math.round(gone / 1000)}s).`
+      : `Opponent connection lost — waiting… (${Math.round(gone / 1000)}s)`;
+    $('btn-claim').classList.toggle('hidden', !canClaim);
+  } else {
+    el.classList.add('hidden');
+  }
+}
+
+$('btn-claim').addEventListener('click', async () => {
+  if (!mp || mp.ended) return;
+  try {
+    await api(`/api/lobbies/${mp.lobbyId}/result`, { winnerOwner: me, reason: 'abandoned' });
+    mp.ended = true;
+    resultPosted = true;
+    if (game) game.result = 'ended';
+    stopMpTimers();
+    $('mp-banner').classList.add('hidden');
+    showEndModal(true, 'abandoned');
+    loadHistory();
+  } catch (err) { toast(err.message); }
+});
+
+function finishFromServer(r) {
+  // the lobby finished without a local result (opponent claimed abandonment,
+  // or the result landed before our snapshot did)
+  mp.ended = true;
+  resultPosted = true;
+  if (game) game.result = 'ended';
+  stopMpTimers();
+  $('mp-banner').classList.add('hidden');
+  showEndModal(r.winner_owner === me, r.end_reason || 'elimination');
+}
+
+function leavePvpToMenu() {
+  stopMpTimers();
+  mp = null;
+  me = 0;
+  $('mp-banner').classList.add('hidden');
+  backToMenu();
+}
+
+function updateOppLabel() {
+  const el = $('stat-opp');
+  if (game && game.pvp && mp) {
+    el.textContent = `⚔️ vs ${mp.opponent}`;
+    el.classList.remove('hidden');
+  } else {
+    el.classList.add('hidden');
+  }
+}
+
+// -- order dispatch: direct in solo / as host, relayed as guest --------
+
+function sendCmd(c) { if (mp) mp.outQueue.push(c); }
+const QUEUED = { ok: true, queued: true };
+
+function doMove(b, x, y, attack) {
+  if (isGuest()) { sendCmd({ op: 'move', blobId: b.id, x, y, attack: !!attack }); return QUEUED; }
+  return S.opMove(game, b, x, y, attack);
+}
+function doSetRole(b, role) {
+  if (isGuest()) { sendCmd({ op: 'setRole', blobId: b.id, role }); return QUEUED; }
+  return S.opSetRole(game, b, role);
+}
+function doSplit(b, n) {
+  if (isGuest()) { sendCmd({ op: 'split', blobId: b.id, take: n }); return QUEUED; }
+  return S.opSplit(game, b, n);
+}
+function doBuild(b) {
+  if (isGuest()) { sendCmd({ op: 'build', blobId: b.id }); return QUEUED; }
+  return S.opBuild(game, b);
+}
+function doPillage(b, on) {
+  if (isGuest()) { sendCmd({ op: 'pillage', blobId: b.id, on: !!on }); return QUEUED; }
+  return S.opPillage(game, b, on);
+}
+function doRoute(b, target) {
+  if (isGuest()) { sendCmd({ op: 'route', blobId: b.id, target }); return QUEUED; }
+  return S.opRoute(game, b, target);
+}
+function doSetMode(st, mode) {
+  if (isGuest()) { sendCmd({ op: 'setMode', settlementId: st.id, mode }); return QUEUED; }
+  return S.opSetMode(game, st, mode);
+}
+function doFieldGarrison(st) {
+  if (isGuest()) { sendCmd({ op: 'fieldGarrison', settlementId: st.id }); return QUEUED; }
+  return S.opFieldGarrison(game, st);
+}
+function doFieldRole(st, role, n) {
+  if (isGuest()) { sendCmd({ op: 'fieldRole', settlementId: st.id, role, n }); return QUEUED; }
+  return S.opFieldRole(game, st, role, n);
+}
+function doGarrisonRole(st, role) {
+  if (isGuest()) { sendCmd({ op: 'garrisonRole', settlementId: st.id, role }); return QUEUED; }
+  return S.opGarrisonRole(game, st, role);
+}
+
 // ---------------------------------------------------------------- match lifecycle
 
 function startMatch(g) {
@@ -159,13 +686,18 @@ function startMatch(g) {
   acc = 0; speed = 1; paused = false; lastSaveTick = g.tick;
   $('btn-speed').textContent = '1×';
   $('btn-pause').textContent = '⏸';
+  // no pause / fast-forward in multiplayer — the sim is shared
+  $('btn-pause').classList.toggle('hidden', !!g.pvp);
+  $('btn-speed').classList.toggle('hidden', !!g.pvp);
+  updateOppLabel();
+  stopMenuPolling();
 
   if (!renderer) {
     renderer = createRenderer($('game-canvas'), $('minimap'));
     input = createInput({ canvas: $('game-canvas'), minimap: $('minimap'), view, handlers: { tap: onTap, box: onBox, rightClick: onRightClick, cancel: onCancel, gesture: hideOrderPopup } });
   }
   input.setMapSize(g.map.w, g.map.h);
-  const start = g.map.starts[0];
+  const start = g.map.starts[me] || g.map.starts[0];
   view.cx = start.x + 2; view.cy = start.y;
   const cssW = window.innerWidth;
   view.scale = Math.max(10, Math.min(20, cssW / (cssW < 640 ? 22 : 30)));
@@ -179,21 +711,65 @@ function startMatch(g) {
 }
 
 function backToMenu() {
+  stopMpTimers();
+  mp = null;
+  me = 0;
   game = null;
+  $('mp-banner').classList.add('hidden');
+  $('stat-opp').classList.add('hidden');
   $('game-ui').classList.add('hidden');
   $('end-modal').classList.add('hidden');
   $('main-menu').classList.remove('hidden');
   refreshMenu();
   loadHistory();
+  startMenuPolling();
 }
 
 function saveGame() {
-  if (!game || game.result) return;
+  if (!game || game.result || game.pvp) return;
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(S.serialize(game))); } catch { }
+}
+
+function showEndModal(win, reason) {
+  $('end-emoji').textContent = win ? '🏆' : '🏳️';
+  $('end-title').textContent = win ? 'Victory!' : (reason === 'surrender' ? 'Surrendered' : 'Defeat');
+  const opp = mp ? mp.opponent : 'your opponent';
+  const dur = game ? fmtDur(game.tick / 10) : '';
+  $('end-detail').textContent = win
+    ? (reason === 'abandoned'
+      ? `${opp} abandoned the match — victory is yours.`
+      : reason === 'surrender'
+        ? `${opp} surrendered after ${dur}.`
+        : `You destroyed every settlement ${opp} had in ${dur}.`)
+    : (reason === 'abandoned'
+      ? `The match was claimed while you were away.`
+      : reason === 'surrender'
+        ? `You surrendered to ${opp} after ${dur}.`
+        : `${opp} destroyed your war effort after ${dur}.`);
+  $('end-modal').classList.remove('hidden');
 }
 
 function endMatch(result) {
   resultPosted = true;
+  if (game.pvp) {
+    const winner = result === 'p0-win' ? 0 : 1;
+    const reason = game.resultReason || 'elimination';
+    showEndModal(winner === me, reason);
+    if (mp && !mp.ended) {
+      mp.ended = true;
+      if (mp.role === 'host') {
+        // push the final snapshot (so the guest sees the outcome), then record it
+        api(`/api/lobbies/${mp.lobbyId}/sync`, { commandsAfter: mp.lastCmdId, tick: game.tick, snapshot: buildSnapshot() })
+          .catch(() => { })
+          .then(() => api(`/api/lobbies/${mp.lobbyId}/result`, { winnerOwner: winner, reason }))
+          .catch(() => { });
+      }
+      stopMpTimers();
+    }
+    $('mp-banner').classList.add('hidden');
+    loadHistory();
+    return;
+  }
   localStorage.removeItem(SAVE_KEY);
   const win = result === 'win';
   $('end-emoji').textContent = win ? '🏆' : '🏳️';
@@ -219,14 +795,30 @@ $('btn-end-menu').addEventListener('click', backToMenu);
 $('btn-surrender').addEventListener('click', () => {
   if (!game || game.result) return;
   showConfirm('Surrender this match?', 'The match ends immediately and counts as a loss.', [
-    { label: '🏳️ Surrender', cls: 'bg-red-700 hover:bg-red-600 text-white', fn: () => { if (game && !game.result) game.result = 'surrender'; } },
+    { label: '🏳️ Surrender', cls: 'bg-red-700 hover:bg-red-600 text-white', fn: () => {
+      if (!game || game.result) return;
+      if (game.pvp) {
+        if (isGuest()) {
+          sendCmd({ op: 'surrender' });
+          toast('🏳️ Surrendering…');
+          guestSync();
+        } else {
+          game.result = 'p1-win';
+          game.resultReason = 'surrender';
+        }
+        return;
+      }
+      game.result = 'surrender';
+    } },
   ]);
 });
 $('btn-pause').addEventListener('click', () => {
+  if (game && game.pvp) return;
   paused = !paused;
   $('btn-pause').textContent = paused ? '▶' : '⏸';
 });
 $('btn-speed').addEventListener('click', () => {
+  if (game && game.pvp) return;
   speed = speed === 1 ? 2 : 1;
   $('btn-speed').textContent = speed + '×';
 });
@@ -285,11 +877,11 @@ function onTap(world, pointerType, screen) {
   if (!orderPopup.classList.contains('hidden')) { hideOrderPopup(); return; }
   // prefer own blob, then own settlement
   let b = S.blobAt(game, world.x, world.y, hitR);
-  const eb = b && b.owner !== 0 ? b : null;
-  if (b && b.owner !== 0) b = null;
+  const eb = b && b.owner !== me ? b : null;
+  if (b && b.owner !== me) b = null;
   if (b) { ui.selected = { kind: 'blob', id: b.id }; renderPanel(true); return; }
   const st = S.settlementAt(game, world.x, world.y, Math.max(1.4, hitR));
-  if (st && st.owner === 0) { ui.selected = { kind: 'settlement', id: st.id }; renderPanel(true); return; }
+  if (st && st.owner === me) { ui.selected = { kind: 'settlement', id: st.id }; renderPanel(true); return; }
   // tap elsewhere with blobs selected → inline order popup at the tap point
   if (selectedBlobs().length > 0) { showOrderPopup(world, screen); return; }
   // nothing selected → inspect what was tapped
@@ -298,7 +890,8 @@ function onTap(world, pointerType, screen) {
     renderPanel(true);
     return;
   }
-  if (st && st.owner !== 0 && (S.isVisible(game, st.x + 0.5, st.y + 0.5) || game.known[st.id])) {
+  const known = game.pvp ? game.knowns[me] : game.known;
+  if (st && st.owner !== me && (S.isVisible(game, st.x + 0.5, st.y + 0.5) || known[st.id])) {
     ui.selected = { kind: 'enemy-settlement', id: st.id };
     renderPanel(true);
     return;
@@ -317,7 +910,7 @@ function onBox(rect) {
   if (!game || game.result) return;
   hideOrderPopup();
   const ids = game.blobs
-    .filter(b => !b.dead && b.owner === 0 && b.x >= rect.x0 && b.x <= rect.x1 && b.y >= rect.y0 && b.y <= rect.y1)
+    .filter(b => !b.dead && b.owner === me && b.x >= rect.x0 && b.x <= rect.x1 && b.y >= rect.y0 && b.y <= rect.y1)
     .map(b => b.id);
   if (ids.length === 0) { ui.selected = null; }
   else if (ids.length === 1) ui.selected = { kind: 'blob', id: ids[0] };
@@ -332,7 +925,7 @@ function onRightClick(world, attackHeld) {
   if (!blobs.length) return;
   let err = null;
   for (const b of blobs) {
-    const r = S.opMove(game, b, world.x, world.y, attackHeld);
+    const r = doMove(b, world.x, world.y, attackHeld);
     if (r.err) err = r.err;
   }
   if (err) toast(err);
@@ -380,9 +973,9 @@ orderPopup.addEventListener('click', (e) => {
   if (!world) return;
   let err = null;
   for (const b of selectedBlobs()) {
-    if (act === 'pmove') S.opPillage(game, b, false);
-    else if (act === 'ppillage') S.opPillage(game, b, true);
-    const r = S.opMove(game, b, world.x, world.y, act === 'pattack');
+    if (act === 'pmove') doPillage(b, false);
+    else if (act === 'ppillage') doPillage(b, true);
+    const r = doMove(b, world.x, world.y, act === 'pattack');
     if (r.err) err = r.err;
   }
   if (err) toast(err);
@@ -398,7 +991,7 @@ function resolvePending(world) {
     if (!blobs.length) return;
     let err = null;
     for (const b of blobs) {
-      const r = S.opMove(game, b, world.x, world.y, pending === 'attack');
+      const r = doMove(b, world.x, world.y, pending === 'attack');
       if (r.err) err = r.err;
     }
     if (err) toast(err);
@@ -407,15 +1000,15 @@ function resolvePending(world) {
     if (!carrier) return;
     const hitR = Math.max(1.5, 24 / view.scale);
     let tgt = S.blobAt(game, world.x, world.y, hitR);
-    if (tgt && (tgt.owner !== 0 || tgt.id === carrier.id)) tgt = null;
+    if (tgt && (tgt.owner !== me || tgt.id === carrier.id)) tgt = null;
     if (tgt) {
-      const r = S.opRoute(game, carrier, { kind: 'blob', id: tgt.id });
-      toast(r.err ? r.err : '🚚 Supply route established');
+      const r = doRoute(carrier, { kind: 'blob', id: tgt.id });
+      toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
     } else {
       const st = S.settlementAt(game, world.x, world.y, hitR);
-      if (st && st.owner === 0) {
-        const r = S.opRoute(game, carrier, { kind: 'settlement', id: st.id });
-        toast(r.err ? r.err : '🚚 Supply route established');
+      if (st && st.owner === me) {
+        const r = doRoute(carrier, { kind: 'settlement', id: st.id });
+        toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
       } else {
         toast('Tap a friendly army or settlement to supply');
       }
@@ -435,6 +1028,9 @@ function updateHint() {
 }
 
 function toast(msg) {
+  // the toast element lives in the (hidden) game UI — on the menu screen,
+  // surface notices through the menu's message line instead
+  if (!game) { showMenuError(msg); return; }
   const el = $('toast');
   el.textContent = msg;
   el.classList.remove('hidden');
@@ -461,7 +1057,7 @@ panel.addEventListener('click', (e) => {
       const role = btn.dataset.role;
       let err = null, okCount = 0, partial = false;
       for (const b of blobs) {
-        const res = S.opSetRole(game, b, role);
+        const res = doSetRole(b, role);
         if (res.err) err = res.err; else { okCount++; if (res.partial) partial = true; }
       }
       if (err && !okCount) toast(err);
@@ -475,7 +1071,7 @@ panel.addEventListener('click', (e) => {
       const b = blobs[0];
       if (b) {
         const n = S.total(b);
-        r = S.opSplit(game, b, Math.max(1, Math.min(n - 1, ui.splitCount || Math.floor(n / 2))));
+        r = doSplit(b, Math.max(1, Math.min(n - 1, ui.splitCount || Math.floor(n / 2))));
         if (r.err) toast(r.err);
       }
       break;
@@ -483,8 +1079,9 @@ panel.addEventListener('click', (e) => {
     case 'build': {
       const b = blobs[0];
       if (b) {
-        r = S.opBuild(game, b);
+        r = doBuild(b);
         if (r.err) toast(r.err);
+        else if (r.queued) toast('🏠 Build ordered');
         else {
           toast('🏠 Settlement founded');
           if (b.dead || S.total(b) === 0) ui.selected = { kind: 'settlement', id: r.settlement.id };
@@ -493,24 +1090,24 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'pillage': {
-      for (const b of blobs) S.opPillage(game, b, !b.pillaging);
+      for (const b of blobs) doPillage(b, !b.pillaging);
       break;
     }
-    case 'mode': if (st) S.opSetMode(game, st, btn.dataset.mode); break;
+    case 'mode': if (st) doSetMode(st, btn.dataset.mode); break;
     case 'field': {
       if (st) {
-        r = S.opFieldGarrison(game, st);
+        r = doFieldGarrison(st);
         if (r.err) toast(r.err);
-        else ui.selected = { kind: 'blob', id: r.blob.id };
+        else if (!r.queued) ui.selected = { kind: 'blob', id: r.blob.id };
       }
       break;
     }
-    case 'grole': if (st) { r = S.opGarrisonRole(game, st, btn.dataset.role); if (r.err) toast(r.err); } break;
+    case 'grole': if (st) { r = doGarrisonRole(st, btn.dataset.role); if (r.err) toast(r.err); } break;
     case 'fieldn': {
       if (st) {
         const role = btn.dataset.role;
         const n = Math.max(1, Math.min(st.garrison[role], ui.fieldCounts[role] || 1));
-        r = S.opFieldRole(game, st, role, n);
+        r = doFieldRole(st, role, n);
         if (r.err) toast(r.err);
       }
       break;
@@ -519,8 +1116,8 @@ panel.addEventListener('click', (e) => {
       if (st) {
         let c = 0;
         for (const b of [...game.blobs]) {
-          if (!b.dead && b.owner === 0 && b.working === st.id) {
-            if (S.opMove(game, b, st.x + 0.5, st.y + 0.5, false).ok) c++;
+          if (!b.dead && b.owner === me && b.working === st.id) {
+            if (doMove(b, st.x + 0.5, st.y + 0.5, false).ok) c++;
           }
         }
         toast(c ? `🏠 Recalling ${c} farmer${c === 1 ? '' : 's'}` : 'No farmers working the fields');
@@ -618,7 +1215,7 @@ function renderPanel(force) {
           <span class="text-xs text-zinc-400">Fertility <b class="text-emerald-300">tier ${tier}/4</b>${tier < otier ? ` <span class="text-zinc-500">was ${otier}/4</span>` : ''}</span>
         </div>
         <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-emerald-500" style="width:${tier * 25}%"></div></div>
-        ${tb ? `<div class="text-xs ${tb.owner === 0 ? 'text-amber-300' : 'text-red-400'} mb-1">🌾 ${tb.owner === 0 ? 'Farmland of your settlement' : 'Enemy farmland'}</div>` : ''}
+        ${tb ? `<div class="text-xs ${tb.owner === me ? 'text-amber-300' : 'text-red-400'} mb-1">🌾 ${tb.owner === me ? 'Farmland of your settlement' : 'Enemy farmland'}</div>` : ''}
         ${game.pillaged.has(i) ? '<div class="text-xs text-orange-400">🔥 Scorched — recovering very slowly</div>' : ''}`);
     }
     return;
@@ -747,7 +1344,7 @@ function renderPanel(force) {
 // ---------------------------------------------------------------- HUD / loop
 
 function updateHUD() {
-  const p = S.unitCounts(game, 0);
+  const p = S.unitCounts(game, me);
   $('stat-units').textContent = `👥 ${p.units}`;
   $('stat-setts').textContent = `🏠 ${p.setts}`;
   $('stat-time').textContent = fmtDur(game.tick / 10);
@@ -756,7 +1353,16 @@ function updateHUD() {
   const btw = $('btn-backtowork');
   btw.classList.toggle('hidden', idleN === 0 || !!game.result);
   if (idleN > 0) btw.textContent = `🌱 Back to work (${idleN})`;
-  for (const ev of game.events) toast(ev.msg);
+  if (isGuest()) {
+    // guest toasts come from host snapshots (netEvents); the local
+    // dead-reckoning sim's events would duplicate them
+    game.events.length = 0;
+    return;
+  }
+  for (const ev of game.events) {
+    if (ev.owner == null || ev.owner === me) toast(ev.msg);
+    else if (mp && mp.role === 'host') mp.guestEvents.push(ev);
+  }
   game.events.length = 0;
 }
 
@@ -771,7 +1377,7 @@ function frame(ts) {
     let iter = 0;
     while (acc >= 100 && iter++ < 40) {
       S.step(game);
-      if (game.tick % 20 === 0) aiTick(game, S);
+      if (!game.pvp && game.tick % 20 === 0) aiTick(game, S);
       acc -= 100;
     }
     if (acc >= 100) acc = 0; // fell behind (background tab); drop the backlog
@@ -785,7 +1391,7 @@ function frame(ts) {
     updateHUD();
     renderPanel(false);
   }
-  if (game.tick - lastSaveTick >= 300) {
+  if (!game.pvp && game.tick - lastSaveTick >= 300) {
     lastSaveTick = game.tick;
     saveGame();
   }
@@ -798,3 +1404,4 @@ requestAnimationFrame(frame);
 
 refreshMenu();
 loadHistory();
+startMenuPolling();
