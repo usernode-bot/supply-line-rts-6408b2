@@ -5,6 +5,7 @@
 
 import * as S from './sim.js';
 import * as SUP from './supply.js';
+import { fertTier } from './mapgen.js';
 
 const T = 16;     // terrain layer px per tile (drawn smoothed — kills shimmer)
 const FOG_T = 4;  // fog layer px per tile (tighter edge gradient)
@@ -24,7 +25,8 @@ function tileRGB(game, i) {
     const v = 108 + ((i * 2654435761) % 24);
     return [v, v + 4, v + 10];
   }
-  const f = game.map.fert[i];
+  // five flat shades, one per fertility tier
+  const f = fertTier(game.map.fert[i]) / 4;
   let c = f < 0.5 ? mix(BARREN, MID, f * 2) : mix(MID, LUSH, (f - 0.5) * 2);
   if (game.tilledBy[i]) c = mix(c, TILL, 0.45);
   return c;
@@ -161,6 +163,28 @@ export function createRenderer(canvas, minimap) {
       ctx.setLineDash([]);
     }
 
+    // territory rings — armies inside get fed from the stockpile
+    ctx.setLineDash([6, 6]);
+    ctx.lineWidth = 1.5;
+    for (const st of game.settlements) {
+      if (st.owner === 1 && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
+      ctx.strokeStyle = OWNER_COLOR[st.owner];
+      ctx.globalAlpha = 0.35;
+      ctx.beginPath();
+      ctx.arc(wx(st.x + 0.5), wy(st.y + 0.5), S.C.TERRITORY * s, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    for (const k of Object.values(game.known)) {
+      if (S.isVisible(game, k.x + 0.5, k.y + 0.5)) continue;
+      ctx.strokeStyle = OWNER_COLOR[1];
+      ctx.globalAlpha = 0.15;
+      ctx.beginPath();
+      ctx.arc(wx(k.x + 0.5), wy(k.y + 0.5), S.C.TERRITORY * s, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
     // selected blob path
     if (ui.selected && ui.selected.kind === 'blob') {
       const b = game.blobs.find(x => x.id === ui.selected.id && !x.dead);
@@ -178,14 +202,18 @@ export function createRenderer(canvas, minimap) {
     for (const [id, k] of Object.entries(game.known)) {
       if (S.isVisible(game, k.x + 0.5, k.y + 0.5)) continue;
       const gsel = ui.selected && ui.selected.kind === 'enemy-settlement' && ui.selected.id === +id;
-      drawSettlement(game, { x: k.x, y: k.y, owner: 1, hp: S.C.SETT_HP }, wx, wy, s, true, gsel);
+      drawSettlement(game, { x: k.x, y: k.y, owner: 1, hp: S.C.SETT_HP }, wx, wy, s, true, gsel, 0);
     }
 
-    // settlements
+    // settlements (with per-settlement working-farmer totals, one sweep)
+    const workingBy = new Map();
+    for (const b of game.blobs) {
+      if (!b.dead && b.working != null) workingBy.set(b.working, (workingBy.get(b.working) || 0) + S.total(b));
+    }
     for (const st of game.settlements) {
       if (st.owner === 1 && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
       const sel = ui.selected && (ui.selected.kind === 'settlement' || ui.selected.kind === 'enemy-settlement') && ui.selected.id === st.id;
-      drawSettlement(game, st, wx, wy, s, false, sel);
+      drawSettlement(game, st, wx, wy, s, false, sel, workingBy.get(st.id) || 0);
     }
 
     // blobs
@@ -318,7 +346,7 @@ export function createRenderer(canvas, minimap) {
     ctx.fill();
   }
 
-  function drawSettlement(game, st, wx, wy, s, ghost, sel) {
+  function drawSettlement(game, st, wx, wy, s, ghost, sel, workingN) {
     const px = wx(st.x + 0.5), py = wy(st.y + 0.5);
     const half = Math.max(8, 0.85 * s);
     const hit = !ghost && st.lastHitT != null && game.tick - st.lastHitT < 3;
@@ -351,6 +379,21 @@ export function createRenderer(canvas, minimap) {
       ctx.fillRect(px - half, barY, half * 2, 3);
       ctx.fillStyle = '#fbbf24';
       ctx.fillRect(px - half, barY, half * 2 * (st.trainTicks / S.C.TRAIN_TICKS), 3);
+      barY += 4;
+    }
+    // unit counts: garrison ⚔️/🚚 plus farmers (garrisoned + in the fields)
+    if (!ghost && st.garrison && s >= 8) {
+      const label = `⚔️${st.garrison.deploy} 🚚${st.garrison.supply} 🌱${st.garrison.farm + (workingN || 0)}`;
+      const fs = Math.max(9, Math.min(12, s * 0.75));
+      ctx.font = `600 ${fs}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const tw = ctx.measureText(label).width;
+      const ty = barY + fs * 0.8;
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(px - tw / 2 - 3, ty - fs * 0.7, tw + 6, fs * 1.4);
+      ctx.fillStyle = '#e4e4e7';
+      ctx.fillText(label, px, ty);
     }
     ctx.globalAlpha = 1;
   }

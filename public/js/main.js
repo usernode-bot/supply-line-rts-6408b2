@@ -4,7 +4,7 @@ import * as S from './sim.js';
 import { aiTick } from './ai.js';
 import { createRenderer } from './render.js';
 import { createInput } from './input.js';
-import { dist } from './mapgen.js';
+import { dist, fertTier, FERT_TIERS } from './mapgen.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -67,8 +67,9 @@ function loadSaveData() {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    // v1 saves predate per-unit health and are not migratable — discard
-    if (data.v !== 2 || data.result) return null;
+    // v1 saves predate per-unit health and are not migratable — discard.
+    // v2 saves load fine (new fields default; farmer HP is clamped).
+    if ((data.v !== 2 && data.v !== 3) || data.result) return null;
     return data;
   } catch { return null; }
 }
@@ -529,15 +530,15 @@ function renderPanel(force) {
         <div class="text-xs text-zinc-400">Impassable terrain. Nothing grows here.</div>`);
     } else {
       const f = game.map.fert[i], o = game.map.orig[i];
-      const pct = Math.round(f * 100), opct = Math.round(o * 100);
-      const label = f >= 0.75 ? 'Lush' : f >= 0.5 ? 'Fertile' : f >= 0.25 ? 'Poor' : 'Barren';
+      const tier = fertTier(f), otier = fertTier(o);
+      const label = FERT_TIERS[tier];
       const tb = game.tilledBy[i] ? game.settlements.find(s => s.id === game.tilledBy[i]) : null;
       setPanelHTML(`
         <div class="flex items-center justify-between mb-1">
           <span class="font-semibold">🟩 ${label} land</span>
-          <span class="text-xs text-zinc-400">Fertility <b class="text-emerald-300">${pct}%</b>${pct < opct ? ` <span class="text-zinc-500">of ${opct}%</span>` : ''}</span>
+          <span class="text-xs text-zinc-400">Fertility <b class="text-emerald-300">tier ${tier}/4</b>${tier < otier ? ` <span class="text-zinc-500">was ${otier}/4</span>` : ''}</span>
         </div>
-        <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-emerald-500" style="width:${pct}%"></div></div>
+        <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-emerald-500" style="width:${tier * 25}%"></div></div>
         ${tb ? `<div class="text-xs ${tb.owner === 0 ? 'text-amber-300' : 'text-red-400'} mb-1">🌾 ${tb.owner === 0 ? 'Farmland of your settlement' : 'Enemy farmland'}</div>` : ''}
         ${game.pillaged.has(i) ? '<div class="text-xs text-orange-400">🔥 Scorched — recovering very slowly</div>' : ''}`);
     }
@@ -560,14 +561,19 @@ function renderPanel(force) {
     const gTot = S.garrisonTotal(st);
     const wc = S.workingCount(game, st);
     const pct = Math.round(100 * st.trainTicks / S.C.TRAIN_TICKS);
+    const gated = S.trainGated(st);
+    const pausedNote = '<div class="text-xs text-amber-400 mt-1">⏸ Paused — food at break-even. More farmers or fewer mouths to resume.</div>';
     let prog;
     if (st.mode === 'off') {
       prog = '<div class="text-xs text-zinc-500 mt-1">⏹ Production stopped — stockpiling food.</div>';
     } else if (st.mode === 'farm') {
       const hungry = st.stockpile < S.C.FARM_GROW_FLOOR ? `<span class="text-red-400">(needs ${S.C.FARM_GROW_FLOOR} food)</span>` : '';
       prog = wc >= S.C.FARM_CAP
-        ? `<div class="text-xs text-zinc-400 mt-1">Farmer cap reached — training ⚔️ deploy unit: ${pct}% ${hungry}</div>`
+        ? (gated ? pausedNote
+          : `<div class="text-xs text-zinc-400 mt-1">Farmer cap reached — training ⚔️ deploy unit: ${pct}% ${hungry}</div>`)
         : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% ${hungry}</div>`;
+    } else if (gated && st.stockpile >= S.C.TRAIN_COST) {
+      prog = pausedNote;
     } else {
       prog = `<div class="text-xs text-zinc-400 mt-1">Training ${st.mode === 'supply' ? 'supply' : 'deploy'} unit: ${pct}% ${st.stockpile < S.C.TRAIN_COST ? '<span class="text-red-400">(needs food)</span>' : ''}</div>`;
     }
@@ -625,7 +631,8 @@ function renderPanel(force) {
   const fedColor = meter >= 0.75 ? 'text-emerald-400' : meter >= 0.5 ? 'text-lime-400' : meter >= 0.25 ? 'text-amber-400' : 'text-red-400';
   const onRoute = !multi && b0.order && b0.order.type === 'route';
   const hpSum = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + u.hp, 0), 0);
-  const hpPct = Math.round(100 * hpSum / Math.max(1, tot * S.C.UNIT_HP));
+  const hpMax = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + S.unitMaxHP(u.role), 0), 0);
+  const hpPct = Math.round(100 * hpSum / Math.max(1, hpMax));
   const hpColor = hpPct >= 75 ? 'text-emerald-400' : hpPct >= 40 ? 'text-amber-400' : 'text-red-400';
   if (!multi && tot >= 2) {
     ui.splitCount = Math.max(1, Math.min(tot - 1, ui.splitCount || Math.floor(tot / 2)));
