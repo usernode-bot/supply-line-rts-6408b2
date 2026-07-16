@@ -102,6 +102,9 @@
     <!-- toast -->
     <div id="toast" class="hidden absolute top-12 inset-x-0 mx-auto w-fit max-w-[90%] px-4 py-2 rounded-lg bg-zinc-800/95 text-zinc-100 text-sm shadow-lg z-30"></div>
 
+    <!-- inline order popup (tap a blob, then tap a destination) -->
+    <div id="order-popup" class="hidden absolute z-20 w-44 flex flex-col gap-1 p-1.5 rounded-xl bg-zinc-900/95 backdrop-blur border border-zinc-700 shadow-lg text-sm"></div>
+
     <!-- minimap -->
     <!-- top-right on phones (the bottom sheet owns the bottom edge); bottom-left on desktop -->
     <canvas id="minimap" width="144" height="144"
@@ -157,7 +160,7 @@
           <p><b class="text-zinc-200">Settlements</b> cost 5 units to found (build on fertile land!), auto-till the ground around them, and run one production mode: Farm (grow the stockpile), or train Supply / Deploy units.</p>
           <p><b class="text-zinc-200">Food:</b> every unit eats. Feed armies by garrisoning near a settlement, toggling <b>Pillage</b> (strips the land — it recovers very slowly), or running a <b>Supply route</b>: select a supply blob, tap "Supply route", tap the army. Routes draw color-coded: green = fed, amber = falling behind, red = starving. Roughly 1 supply unit feeds 5 fighters at a quarter of the map's distance.</p>
           <p><b class="text-zinc-200">Hunger and combat:</b> above ¾ fed fights best; below ½ worse; below ¼ famished (weakest), and at zero food units start dying.</p>
-          <p><b class="text-zinc-200">Touch:</b> drag to pan, pinch to zoom, tap to select. Orders are two taps: tap the order button, then tap the target.</p>
+          <p><b class="text-zinc-200">Touch:</b> drag to pan, pinch to zoom, tap to select. With a blob selected, tap a destination to choose Move / Pillage-move / Attack-move right there — or use the panel buttons, then tap the target.</p>
           <p><b class="text-zinc-200">Desktop:</b> right-click = move (hold A for attack-move), left-drag = box select, WASD/edge/middle-drag = pan, wheel = zoom, Esc = cancel.</p>
         </div>
       </details>

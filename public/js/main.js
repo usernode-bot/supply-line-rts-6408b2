@@ -16,12 +16,13 @@ let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1;
 let paused = false;
-let ui = { selected: null, pending: null, splitFrac: 0.5 };
+let ui = { selected: null, pending: null, splitCount: null, orderTarget: null };
 let renderer = null, input = null;
 let lastFrame = 0, acc = 0, lastSaveTick = 0, lastPanel = 0;
 let resultPosted = false;
 let panelHeld = false;
 let toastTimer = null;
+let lastPanelHTML = '';
 
 // ---------------------------------------------------------------- menu
 
@@ -112,14 +113,15 @@ function showMenuError(msg) {
 function startMatch(g) {
   game = g;
   resultPosted = false;
-  ui = { selected: null, pending: null, splitFrac: 0.5 };
+  ui = { selected: null, pending: null, splitCount: null, orderTarget: null };
+  hideOrderPopup();
   acc = 0; speed = 1; paused = false; lastSaveTick = g.tick;
   $('btn-speed').textContent = '1×';
   $('btn-pause').textContent = '⏸';
 
   if (!renderer) {
     renderer = createRenderer($('game-canvas'), $('minimap'));
-    input = createInput({ canvas: $('game-canvas'), minimap: $('minimap'), view, handlers: { tap: onTap, box: onBox, rightClick: onRightClick, cancel: onCancel } });
+    input = createInput({ canvas: $('game-canvas'), minimap: $('minimap'), view, handlers: { tap: onTap, box: onBox, rightClick: onRightClick, cancel: onCancel, gesture: hideOrderPopup } });
   }
   input.setMapSize(g.map.w, g.map.h);
   const start = g.map.starts[0];
@@ -219,22 +221,27 @@ function selectedSettlement() {
   return game.settlements.find(s => s.id === ui.selected.id) || null;
 }
 
-function onTap(world, pointerType) {
+function onTap(world, pointerType, screen) {
   if (!game || game.result) return;
   const hitR = 24 / view.scale;
   if (ui.pending) { resolvePending(world); return; }
-  // prefer own blob, then own settlement; tapping elsewhere clears
+  // a tap while the order popup is open only dismisses it
+  if (!orderPopup.classList.contains('hidden')) { hideOrderPopup(); return; }
+  // prefer own blob, then own settlement
   let b = S.blobAt(game, world.x, world.y, hitR);
   if (b && b.owner !== 0) b = null;
   if (b) { ui.selected = { kind: 'blob', id: b.id }; renderPanel(true); return; }
   const st = S.settlementAt(game, world.x, world.y, Math.max(1.4, hitR));
   if (st && st.owner === 0) { ui.selected = { kind: 'settlement', id: st.id }; renderPanel(true); return; }
+  // tap elsewhere with blobs selected → inline order popup at the tap point
+  if (selectedBlobs().length > 0) { showOrderPopup(world, screen); return; }
   ui.selected = null;
   renderPanel(true);
 }
 
 function onBox(rect) {
   if (!game || game.result) return;
+  hideOrderPopup();
   const ids = game.blobs
     .filter(b => !b.dead && b.owner === 0 && b.x >= rect.x0 && b.x <= rect.x1 && b.y >= rect.y0 && b.y <= rect.y1)
     .map(b => b.id);
@@ -246,6 +253,7 @@ function onBox(rect) {
 
 function onRightClick(world, attackHeld) {
   if (!game || game.result) return;
+  hideOrderPopup();
   const blobs = selectedBlobs();
   if (!blobs.length) return;
   let err = null;
@@ -257,10 +265,55 @@ function onRightClick(world, attackHeld) {
 }
 
 function onCancel() {
+  if (!orderPopup.classList.contains('hidden')) { hideOrderPopup(); return; }
   if (ui.pending) { ui.pending = null; updateHint(); return; }
   ui.selected = null;
   renderPanel(true);
 }
+
+// ---------------------------------------------------------------- order popup
+
+const orderPopup = $('order-popup');
+
+function hideOrderPopup() {
+  orderPopup.classList.add('hidden');
+  ui.orderTarget = null;
+}
+
+function showOrderPopup(world, screen) {
+  ui.orderTarget = world;
+  const hasDeploy = selectedBlobs().some(b => b.count.deploy > 0);
+  orderPopup.innerHTML = `
+    <button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
+    <button data-act="ppillage" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">🔥 Pillage-move</button>
+    ${hasDeploy ? '<button data-act="pattack" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">⚔️ Attack-move</button>' : ''}
+    <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`;
+  orderPopup.classList.remove('hidden');
+  const px = screen ? screen.x : window.innerWidth / 2;
+  const py = screen ? screen.y : window.innerHeight / 2;
+  const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
+  orderPopup.style.left = Math.max(4, Math.min(window.innerWidth - w - 4, px + 10)) + 'px';
+  orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
+}
+
+orderPopup.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn || !game) return;
+  const act = btn.dataset.act;
+  const world = ui.orderTarget;
+  hideOrderPopup();
+  if (act === 'pclose') { ui.selected = null; renderPanel(true); return; }
+  if (!world) return;
+  let err = null;
+  for (const b of selectedBlobs()) {
+    if (act === 'pmove') S.opPillage(game, b, false);
+    else if (act === 'ppillage') S.opPillage(game, b, true);
+    const r = S.opMove(game, b, world.x, world.y, act === 'pattack');
+    if (r.err) err = r.err;
+  }
+  if (err) toast(err);
+  renderPanel(true);
+});
 
 function resolvePending(world) {
   const pending = ui.pending;
@@ -324,6 +377,7 @@ window.addEventListener('pointerup', () => { panelHeld = false; });
 panel.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-act]');
   if (!btn || !game) return;
+  hideOrderPopup();
   const act = btn.dataset.act;
   const blobs = selectedBlobs();
   const st = selectedSettlement();
@@ -345,7 +399,8 @@ panel.addEventListener('click', (e) => {
     case 'split': {
       const b = blobs[0];
       if (b) {
-        r = S.opSplit(game, b, ui.splitFrac);
+        const n = S.total(b);
+        r = S.opSplit(game, b, Math.max(1, Math.min(n - 1, ui.splitCount || Math.floor(n / 2))));
         if (r.err) toast(r.err);
       }
       break;
@@ -381,10 +436,10 @@ panel.addEventListener('click', (e) => {
 });
 
 panel.addEventListener('input', (e) => {
-  if (e.target.id === 'split-frac') {
-    ui.splitFrac = e.target.value / 100;
+  if (e.target.id === 'split-count') {
+    ui.splitCount = Math.max(1, e.target.value | 0);
     const lbl = $('split-label');
-    if (lbl) lbl.textContent = Math.round(ui.splitFrac * 100) + '%';
+    if (lbl) lbl.textContent = `${ui.splitCount} / ${(e.target.max | 0) + 1}`;
   }
 });
 
@@ -393,8 +448,14 @@ function roleBtn(role, label, active, disabled) {
     class="btn-sm flex-1 px-2 rounded ${active ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-300'} ${disabled ? 'opacity-40' : 'hover:bg-violet-700'}">${label}</button>`;
 }
 
+function setPanelHTML(html) {
+  if (html === lastPanelHTML) return;
+  lastPanelHTML = html;
+  panel.innerHTML = html;
+}
+
 function renderPanel(force) {
-  if (!game) { panel.classList.add('hidden'); return; }
+  if (!game) { panel.classList.add('hidden'); lastPanelHTML = ''; return; }
   if (!force && panelHeld) return;
   const blobs = selectedBlobs();
   const st = selectedSettlement();
@@ -402,6 +463,7 @@ function renderPanel(force) {
     // selection died out
     if (ui.selected) ui.selected = null;
     panel.classList.add('hidden');
+    lastPanelHTML = '';
     return;
   }
   panel.classList.remove('hidden');
@@ -409,9 +471,13 @@ function renderPanel(force) {
   if (st) {
     const g = st.garrison;
     const gTot = S.garrisonTotal(st);
-    const prog = st.mode === 'farm' ? '' :
-      `<div class="text-xs text-zinc-400 mt-1">Training ${st.mode === 'supply' ? 'supply' : 'deploy'} unit: ${Math.round(100 * st.trainTicks / S.C.TRAIN_TICKS)}% ${st.stockpile < S.C.TRAIN_COST ? '<span class="text-red-400">(needs food)</span>' : ''}</div>`;
-    panel.innerHTML = `
+    const pct = Math.round(100 * st.trainTicks / S.C.TRAIN_TICKS);
+    const prog = st.mode === 'farm'
+      ? (st.garrison.farm >= S.C.FARM_CAP
+        ? `<div class="text-xs text-zinc-500 mt-1">Farmer cap reached (${S.C.FARM_CAP})</div>`
+        : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% ${st.stockpile < S.C.FARM_GROW_FLOOR ? `<span class="text-red-400">(needs ${S.C.FARM_GROW_FLOOR} food)</span>` : ''}</div>`)
+      : `<div class="text-xs text-zinc-400 mt-1">Training ${st.mode === 'supply' ? 'supply' : 'deploy'} unit: ${pct}% ${st.stockpile < S.C.TRAIN_COST ? '<span class="text-red-400">(needs food)</span>' : ''}</div>`;
+    setPanelHTML(`
       <div class="flex items-center justify-between mb-1">
         <span class="font-semibold">🏠 Settlement</span>
         <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
@@ -431,7 +497,7 @@ function renderPanel(force) {
           </div>
           <button data-act="field" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600">Field garrison (${gTot})</button>
         `.replaceAll('data-act="role"', 'data-act="grole"') : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the settlement.</div>'}
-      </div>`;
+      </div>`);
     return;
   }
 
@@ -444,23 +510,25 @@ function renderPanel(force) {
   const meter = multi
     ? blobs.reduce((s, b) => s + S.fedMeter(b) * S.total(b), 0) / Math.max(1, tot)
     : S.fedMeter(b0);
-  const cd = Math.max(...blobs.map(b => b.reroleCd)) - game.tick;
-  const cdActive = cd > 0;
   const pureSupply = cnt.supply === tot && tot > 0;
+  const atHome = blobs.some(b => S.isAtHome(game, b));
   const fedColor = meter >= 0.75 ? 'text-emerald-400' : meter >= 0.5 ? 'text-lime-400' : meter >= 0.25 ? 'text-amber-400' : 'text-red-400';
   const onRoute = !multi && b0.order && b0.order.type === 'route';
+  if (!multi && tot >= 2) {
+    ui.splitCount = Math.max(1, Math.min(tot - 1, ui.splitCount || Math.floor(tot / 2)));
+  }
 
-  panel.innerHTML = `
+  setPanelHTML(`
     <div class="flex items-center justify-between mb-1">
       <span class="font-semibold">${multi ? `${blobs.length} blobs` : 'Blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
       <span class="text-xs ${fedColor}">${S.fedLabel(meter)} · ${Math.round(meter * 100)}%</span>
     </div>
     <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ' · <span class="text-sky-300">on supply route</span>' : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}</div>
-    <div class="text-xs text-zinc-500 mb-1">Role ${cdActive ? `<span class="text-amber-400">(changing… ${Math.ceil(cd / 10)}s)</span>` : ''}</div>
+    <div class="text-xs text-zinc-500 mb-1">Role ${!atHome ? '<span class="text-zinc-600">(farmers need a settlement)</span>' : ''}</div>
     <div class="flex gap-1 mb-2">
-      ${roleBtn('deploy', '⚔️ Deploy', cnt.deploy === tot, cdActive)}
-      ${roleBtn('supply', '🚚 Supply', pureSupply, cdActive)}
-      ${roleBtn('farm', '🌱 Farmer', cnt.farm === tot, cdActive)}
+      ${roleBtn('deploy', '⚔️ Deploy', cnt.deploy === tot, false)}
+      ${roleBtn('supply', '🚚 Supply', pureSupply, false)}
+      ${roleBtn('farm', '🌱 Farmer', cnt.farm === tot, !atHome)}
     </div>
     <div class="grid grid-cols-2 gap-1 mb-2">
       <button data-act="move" class="btn rounded bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
@@ -472,9 +540,9 @@ function renderPanel(force) {
     ${!multi && tot >= 2 ? `
     <div class="flex items-center gap-2">
       <button data-act="split" class="btn px-3 rounded bg-zinc-800 hover:bg-zinc-700">✂️ Split</button>
-      <input id="split-frac" type="range" min="10" max="90" value="${Math.round(ui.splitFrac * 100)}" class="flex-1">
-      <span id="split-label" class="text-xs text-zinc-400 w-9 text-right">${Math.round(ui.splitFrac * 100)}%</span>
-    </div>` : ''}`;
+      <input id="split-count" type="range" min="1" max="${tot - 1}" step="1" value="${ui.splitCount}" class="flex-1">
+      <span id="split-label" class="text-xs text-zinc-400 w-12 text-right">${ui.splitCount} / ${tot}</span>
+    </div>` : ''}`);
 }
 
 // ---------------------------------------------------------------- HUD / loop
@@ -506,7 +574,7 @@ function frame(ts) {
   }
 
   input.update(dt);
-  renderer.draw(game, view, ui);
+  renderer.draw(game, view, ui, Math.max(0, Math.min(1, acc / 100)));
 
   if (ts - lastPanel > 400) {
     lastPanel = ts;

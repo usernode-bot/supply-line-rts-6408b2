@@ -50,6 +50,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
     if (pointers.size === 2) {
       const [a, b] = [...pointers.values()];
       mode = 'pinch';
+      if (handlers.gesture) handlers.gesture();
       pinch = {
         d: Math.hypot(a.x - b.x, a.y - b.y),
         scale: view.scale,
@@ -60,6 +61,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
       start = { x: e.clientX, y: e.clientY, type: e.pointerType, button: e.button };
       panStart = { cx: view.cx, cy: view.cy };
       mode = e.button === 1 ? 'pan' : 'maybe';
+      if (mode === 'pan' && handlers.gesture) handlers.gesture();
     }
     e.preventDefault();
   });
@@ -89,6 +91,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
     if (mode === 'maybe' && start) {
       if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > SLOP) {
         mode = (start.type === 'mouse' && start.button === 0) ? 'box' : 'pan';
+        if (handlers.gesture) handlers.gesture();
       }
     }
     if (mode === 'pan' && start) {
@@ -124,7 +127,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
       return;
     }
     if (mode === 'maybe' && e.type === 'pointerup') {
-      handlers.tap(worldFromScreen(e.clientX, e.clientY), e.pointerType);
+      handlers.tap(worldFromScreen(e.clientX, e.clientY), e.pointerType, { x: e.clientX, y: e.clientY });
     } else if (mode === 'box' && boxRect) {
       const a = worldFromScreen(boxRect.x0, boxRect.y0);
       const b = worldFromScreen(boxRect.x1, boxRect.y1);
@@ -140,11 +143,12 @@ export function createInput({ canvas, minimap, view, handlers }) {
 
   canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    handlers.rightClick(worldFromScreen(e.clientX, e.clientY), keys.has('a'));
+    handlers.rightClick(worldFromScreen(e.clientX, e.clientY), keys.has('KeyA'));
   });
 
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
+    if (handlers.gesture) handlers.gesture();
     const before = worldFromScreen(e.clientX, e.clientY);
     view.scale *= e.deltaY < 0 ? 1.15 : 1 / 1.15;
     clampView();
@@ -164,6 +168,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
   }
   minimap.addEventListener('pointerdown', (e) => {
     minimap.setPointerCapture(e.pointerId);
+    if (handlers.gesture) handlers.gesture();
     minimapJump(e);
     e.preventDefault();
     e.stopPropagation();
@@ -174,23 +179,25 @@ export function createInput({ canvas, minimap, view, handlers }) {
 
   // -- keyboard --------------------------------------------------------
 
+  // Keys are tracked by KeyboardEvent.code (physical position), so WASD
+  // panning works the same on AZERTY / Dvorak / remapped layouts.
   window.addEventListener('keydown', (e) => {
     if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
-    keys.add(e.key.toLowerCase());
-    if (e.key === 'Escape') handlers.cancel();
+    keys.add(e.code);
+    if (e.code === 'Escape') handlers.cancel();
   });
-  window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
+  window.addEventListener('keyup', (e) => keys.delete(e.code));
   window.addEventListener('blur', () => keys.clear());
 
   // called each frame for keyboard / edge panning
   function update(dtMs) {
     const panPx = 0.6 * dtMs; // px per ms
     let dx = 0, dy = 0;
-    // 'a' is reserved as the attack-move modifier, so left-pan is Q/←
-    if (keys.has('w') || keys.has('arrowup')) dy -= panPx;
-    if (keys.has('s') || keys.has('arrowdown')) dy += panPx;
-    if (keys.has('q') || keys.has('arrowleft')) dx -= panPx;
-    if (keys.has('d') || keys.has('arrowright')) dx += panPx;
+    // the A position is reserved as the attack-move modifier, so left-pan is Q/←
+    if (keys.has('KeyW') || keys.has('ArrowUp')) dy -= panPx;
+    if (keys.has('KeyS') || keys.has('ArrowDown')) dy += panPx;
+    if (keys.has('KeyQ') || keys.has('ArrowLeft')) dx -= panPx;
+    if (keys.has('KeyD') || keys.has('ArrowRight')) dx += panPx;
     // edge scroll (mouse only, when not dragging)
     if (mousePos && mode === null && document.hasFocus()) {
       const { w, h } = cssSize();
@@ -207,5 +214,5 @@ export function createInput({ canvas, minimap, view, handlers }) {
     }
   }
 
-  return { update, worldFromScreen, setMapSize, clampView, get attackHeld() { return keys.has('a'); } };
+  return { update, worldFromScreen, setMapSize, clampView, get attackHeld() { return keys.has('KeyA'); } };
 }
