@@ -22,6 +22,12 @@ export function mulberry32(a) {
 
 export const MAP_SIZES = { small: 72, medium: 96, large: 128 };
 
+// Fertility is presented as exactly five tiers. Generation quantizes to
+// multiples of 0.25; pillage/regen drift fractionally in between, so
+// display code maps back through fertTier().
+export const FERT_TIERS = ['Barren', 'Sparse', 'Fair', 'Fertile', 'Lush'];
+export function fertTier(f) { return Math.max(0, Math.min(4, Math.round(f * 4))); }
+
 // -- value noise ------------------------------------------------------
 
 function makeNoise(rng, w, h, freq) {
@@ -99,6 +105,10 @@ export function generateMap(seedStr, sizeKey) {
   if (!connected(w, h, mountain, starts[0], starts[1])) {
     carveLine(w, h, mountain, starts[0], starts[1]);
   }
+
+  // Quantize fertility to the five tiers (multiples of 0.25) so one
+  // pillage pass burns exactly one visible level.
+  for (let i = 0; i < fert.length; i++) fert[i] = fertTier(fert[i]) / 4;
 
   const orig = Float32Array.from(fert);
   return { w, h, fert, orig, mountain, starts, seed: seedStr, sizeKey };

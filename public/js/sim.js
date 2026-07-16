@@ -11,7 +11,7 @@ export const C = {
   SPEED_SUPPLY: 2.4,
   FOOD_PER_UNIT: 10,       // food meter capacity per unit
   EAT_PER_SEC: 1 / 12,     // food per unit per second
-  STARVE_FRAC: 0.0005,     // fraction of blob lost per tick at 0 food (1%/2s)
+  STARVE_FRAC: 0.005,      // fraction of blob lost per tick at 0 food (5%/s — dead in ~20 s)
   K_COMBAT: 0.0035,        // casualties per enemy deploy-unit per tick
   K_SIEGE: 0.0067,         // settlement HP per deploy-unit per tick
   SETT_HP: 100,
@@ -30,8 +30,9 @@ export const C = {
   FOOD_PER_FERT: 100,      // food extracted per 1.0 fertility
   FERT_LEVEL: 0.25,        // one visible fertility level; scorched per tile entered while pillage-moving
   FERT_REGEN: 0.01 / 600,  // fertility per tick (0.01/min)
-  FEED_RADIUS: 3,          // settlement feeds friendly blobs within this
-  UNIT_HP: 100,            // individual unit health
+  TERRITORY: 5,            // settlement territory radius: feeds friendly blobs, farmer reach, drawn ring
+  UNIT_HP: 100,            // individual unit health (deploy / supply)
+  UNIT_HP_FARM: 10,        // farmers are 1/10th as tough
 };
 
 export const DIFF = {
@@ -69,8 +70,17 @@ export function garrisonTotal(s) { return s.garrison.deploy + s.garrison.supply 
 function tileIdx(game, x, y) { return Math.floor(y) * game.map.w + Math.floor(x); }
 
 // -- per-unit records: each unit has its own hp plus a hidden seed that
-// fixes the (invisible) order units absorb damage in.
-function newUnit(role) { return { role, hp: C.UNIT_HP, seed: Math.random() }; }
+// fixes the (invisible) order units absorb damage in. Max HP depends on
+// role: farmers are 1/10th as tough as deploy/supply units.
+export function unitMaxHP(role) { return role === 'farm' ? C.UNIT_HP_FARM : C.UNIT_HP; }
+function newUnit(role) { return { role, hp: unitMaxHP(role), seed: Math.random() }; }
+// Role changes convert HP proportionally (a half-dead fighter becomes a
+// half-dead farmer, and vice versa).
+function convertRole(u, role) {
+  if (u.role === role) return;
+  u.hp = u.hp / unitMaxHP(u.role) * unitMaxHP(role);
+  u.role = role;
+}
 function unitsFromCount(count) {
   const us = [];
   for (const role of ['deploy', 'supply', 'farm']) {
@@ -85,9 +95,9 @@ function recount(b) {
 }
 export function blobHealth(b) {
   if (!b.units || !b.units.length) return 0;
-  let hp = 0;
-  for (const u of b.units) hp += u.hp;
-  return hp / (b.units.length * C.UNIT_HP);
+  let hp = 0, max = 0;
+  for (const u of b.units) { hp += u.hp; max += unitMaxHP(u.role); }
+  return max > 0 ? hp / max : 0;
 }
 
 // Farmers currently working a settlement's fields (as live field blobs).
@@ -154,7 +164,8 @@ export function newGame(seedStr, sizeKey, difficulty) {
     fx: [],                                // transient damage-feedback events (not serialized)
     mergeLog: {},                          // oldBlobId -> survivingBlobId (for UI selection)
     result: null,                          // 'win' | 'loss' | 'surrender'
-    farmAlarmT: -999,                      // last "farmers under attack" toast (transient)
+    farmAlarmT: -999,                      // last "farmers ran to shelter" toast (transient)
+    pillageAlarmT: -999,                   // last "land stripped bare" toast (transient)
     ai: { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
   for (let side = 0; side < 2; side++) {
@@ -184,6 +195,9 @@ function makeBlob(game, owner, x, y, count, units) {
     pillaging: false, working: null,
     engagedT: -999, chaseId: null,
     dead: false, mergedInto: null,
+    noMerge: false,               // set on split; cleared when a move order completes
+    lastYieldT: game.tick,        // last tick pillaging yielded food (transient)
+    starving: false,              // one-shot starvation toast latch (transient)
   };
   recount(b);
   game.blobs.push(b);
@@ -198,6 +212,8 @@ function foundSettlement(game, owner, x, y) {
     garrison: { deploy: 0, supply: 0, farm: 0 },
     trainTicks: 0, garrLoss: 0, lastHitT: -999,
     tilled: [],
+    flow: 0,       // EMA of net stockpile flow (food/tick) — gates training
+    flowAcc: 0,    // this tick's flow components (transient)
   };
   const { w, h } = game.map;
   for (let dy = -2; dy <= 2; dy++) {
@@ -259,7 +275,7 @@ export function opMove(game, b, x, y, attack) {
 // Field blobs may only become farmers at a friendly settlement.
 export function isAtHome(game, b) {
   return game.settlements.some(s =>
-    s.owner === b.owner && dist(s.x + 0.5, s.y + 0.5, b.x, b.y) <= C.FEED_RADIUS);
+    s.owner === b.owner && dist(s.x + 0.5, s.y + 0.5, b.x, b.y) <= C.TERRITORY);
 }
 
 export function opSetRole(game, b, role) {
@@ -274,7 +290,7 @@ export function opSetRole(game, b, role) {
     for (const st of game.settlements) {
       if (st.owner !== b.owner) continue;
       const d = dist(st.x + 0.5, st.y + 0.5, b.x, b.y);
-      if (d <= C.FEED_RADIUS && d < bd) { bd = d; s = st; }
+      if (d <= C.TERRITORY && d < bd) { bd = d; s = st; }
     }
     if (!s) return { err: 'Farmers can only be assigned at a friendly settlement' };
     const capLeft = C.FARM_CAP - workingCount(game, s);
@@ -285,7 +301,7 @@ export function opSetRole(game, b, role) {
     const foodShare = b.food / n;
     for (let k = 0; k < take; k++) {
       const u = b.units.shift();
-      u.role = 'farm';
+      convertRole(u, 'farm');
       const f = spawnWorkingFarmer(game, s, u);
       f.food = Math.min(foodCap(f), foodShare);
       b.food = Math.max(0, b.food - foodShare);
@@ -298,7 +314,7 @@ export function opSetRole(game, b, role) {
   if (b.count[role] === n) return { err: 'Already in that role' };
   if (role !== 'supply') leaveRoute(game, b);
   b.working = null;
-  for (const u of b.units) u.role = role;
+  for (const u of b.units) convertRole(u, role);
   recount(b);
   return { ok: true };
 }
@@ -331,10 +347,15 @@ export function opSplit(game, b, takeN) {
   }
   recount(b);
   b.food -= foodShare;
-  const spot = nearestPassable(game.map, Math.floor(b.x + 1), Math.floor(b.y), 3) || { x: b.x, y: b.y };
+  // spawn off the parent's tile, and suppress auto-merge on both halves
+  // until one of them completes a deliberate move order
+  const spot = nearestPassable(game.map, Math.floor(b.x + 1), Math.floor(b.y), 3, null,
+    new Set([tileIdx(game, b.x, b.y)])) || { x: b.x, y: b.y };
   const nb = makeBlob(game, b.owner, spot.x + 0.5, spot.y + 0.5, null, taken);
   nb.food = foodShare;
   nb.pillaging = b.pillaging;
+  b.noMerge = true;
+  nb.noMerge = true;
   return { ok: true, blob: nb };
 }
 
@@ -361,6 +382,7 @@ export function opBuild(game, b) {
 }
 
 export function opPillage(game, b, on) {
+  if (on && !b.pillaging) b.lastYieldT = game.tick;
   b.pillaging = on;
   return { ok: true };
 }
@@ -484,7 +506,7 @@ export function step(game) {
   for (const s of [...game.settlements]) tickSettlement(game, s);
 
   if (game.tick % 10 === 0) tickRegen(game);
-  if (game.tick % 5 === 0) { tickMerge(game); updateVision(game); }
+  if (game.tick % 5 === 0) { tickFarmerSafety(game); tickMerge(game); updateVision(game); }
   cleanup(game);
   if (game.fx.length) game.fx = game.fx.filter(f => game.tick - f.t < 15);
   if (game.tick % 10 === 0) checkResult(game);
@@ -579,6 +601,7 @@ function tickOrder(game, b) {
     if (arrived) {
       b.order = null;
       b.pathGoal = null;
+      b.noMerge = false; // completed a deliberate move — mergeable again
       if (o.type === 'move') {
         const s = game.settlements.find(s2 => s2.owner === b.owner && dist(s2.x + 0.5, s2.y + 0.5, b.x, b.y) < 1.4);
         if (s) { // garrison
@@ -620,6 +643,7 @@ function tickCarrier(game, b) {
     src.stockpile -= take; o.cargo += take;
     const self = Math.min(foodCap(b) - b.food, src.stockpile, total(b) * 0.1);
     src.stockpile -= self; b.food += self;
+    src.flowAcc = (src.flowAcc || 0) - take - self;
     if (o.cargo >= cap - 0.01) { o.phase = 'go'; o.wait = 0; b.path = null; }
     else if (src.stockpile <= 0.01) {
       o.wait++;
@@ -646,6 +670,7 @@ function tickCarrier(game, b) {
       const room = C.STOCK_CAP - tgt.stockpile;
       taken = Math.min(give, room);
       tgt.stockpile += taken;
+      tgt.flowAcc = (tgt.flowAcc || 0) + taken;
     }
     o.cargo -= taken;
     if (taken > 0) SUP.recordDelivery(game, route, taken);
@@ -704,16 +729,62 @@ function tickCombat(game) {
   }
   for (const [b, d] of dmg) {
     // working farmers under fire: alert their settlement (drives the AI's
-    // defend reflex and the player's warning toast)
+    // defend reflex) and send the whole field crew running for shelter
     if (b.working != null) {
       const s = game.settlements.find(x => x.id === b.working);
-      if (s) s.lastHitT = game.tick;
-      if (b.owner === 0 && game.tick - game.farmAlarmT > 100) {
-        game.farmAlarmT = game.tick;
-        game.events.push({ msg: '🌱 Your farmers are under attack!', x: b.x, y: b.y });
-      }
+      if (s) { s.lastHitT = game.tick; shelterFarmers(game, s); }
     }
     applyLosses(game, b, d);
+  }
+}
+
+// -- farmer safety: working farmers shelter in their settlement when
+// threatened, then walk back out to the fields once the area is quiet.
+
+function shelterFarmers(game, s) {
+  let any = false;
+  for (const b of game.blobs) {
+    if (b.dead || b.working !== s.id) continue;
+    if (opMove(game, b, s.x + 0.5, s.y + 0.5, false).ok) any = true;
+    else b.working = null; // no path home — at least stop working
+  }
+  if (any && s.owner === 0 && game.tick - game.farmAlarmT > 100) {
+    game.farmAlarmT = game.tick;
+    game.events.push({ msg: '🌱 Your farmers ran to shelter!', x: s.x + 0.5, y: s.y + 0.5 });
+  }
+}
+
+function tickFarmerSafety(game) {
+  // flee: an enemy war party near any working farmer (or a fresh hit on
+  // the settlement) sends that settlement's whole field crew home
+  const threatened = new Set();
+  for (const b of game.blobs) {
+    if (b.dead || b.working == null || threatened.has(b.working)) continue;
+    const s = game.settlements.find(x => x.id === b.working);
+    if (!s) { b.working = null; continue; }
+    if (game.tick - s.lastHitT < 30) { threatened.add(s.id); continue; }
+    for (const e of game.blobs) {
+      if (e.dead || e.owner === b.owner || e.count.deploy === 0) continue;
+      if (dist(e.x, e.y, b.x, b.y) <= C.AGGRO) { threatened.add(s.id); break; }
+    }
+  }
+  for (const id of threatened) {
+    const s = game.settlements.find(x => x.id === id);
+    if (s) shelterFarmers(game, s);
+  }
+  // return: sheltered farmers head back out once it's been quiet a while
+  if (game.tick % 50 === 0) {
+    for (const s of game.settlements) {
+      if (s.garrison.farm <= 0 || game.tick - s.lastHitT <= 300) continue;
+      const capLeft = C.FARM_CAP - workingCount(game, s);
+      if (capLeft <= 0) continue;
+      let danger = false;
+      for (const e of game.blobs) {
+        if (e.dead || e.owner === s.owner || e.count.deploy === 0) continue;
+        if (dist(e.x, e.y, s.x + 0.5, s.y + 0.5) <= C.TERRITORY + C.AGGRO) { danger = true; break; }
+      }
+      if (!danger) opFieldRole(game, s, 'farm', Math.min(s.garrison.farm, capLeft));
+    }
   }
 }
 
@@ -760,6 +831,7 @@ function applyGarrisonLosses(game, s, casualties) {
 function tickFood(game, b) {
   const n = total(b);
   b.food = Math.max(0, b.food - n * C.EAT_PER_SEC * C.DT);
+  let gained = 0; // food the land yielded this tick (for stripped-land feedback)
   if (b.pillaging) {
     // scorched earth: every tile entered while pillage-moving instantly
     // loses 1 fertility level (2 for armies of 10+). Food is credited up
@@ -771,6 +843,7 @@ function tickFood(game, b) {
       if (loss > 0.0001) {
         game.map.fert[ci] -= loss;
         b.food = Math.min(foodCap(b), b.food + loss * C.FOOD_PER_FERT);
+        gained += loss * C.FOOD_PER_FERT;
         game.pillaged.add(ci);
         game.dirty.add(ci);
       }
@@ -782,25 +855,62 @@ function tickFood(game, b) {
     if (budget > 0.0001) {
       const cx = Math.floor(b.x), cy = Math.floor(b.y);
       const { w, h } = game.map;
+      // only the ground the blob actually stands on: the tile underfoot,
+      // plus neighbours its body circle overlaps (big armies reach further)
+      const reach = blobRadius(b);
+      const ui = tileIdx(game, b.x, b.y);
       for (let dy = -1; dy <= 1 && budget > 0.0001; dy++) {
         for (let dx = -1; dx <= 1 && budget > 0.0001; dx++) {
           const tx = cx + dx, ty = cy + dy;
           if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
           const i = ty * w + tx;
+          if (i !== ui && dist(tx + 0.5, ty + 0.5, b.x, b.y) > reach) continue;
           if (game.map.mountain[i]) continue;
           const avail = game.map.fert[i] * C.FOOD_PER_FERT;
           const take = Math.min(budget, avail, C.PILLAGE_RATE * n / 4);
           if (take <= 0.0001) continue;
           game.map.fert[i] -= take / C.FOOD_PER_FERT;
           b.food += take;
+          gained += take;
           budget -= take;
           game.pillaged.add(i);
           game.dirty.add(i);
         }
       }
     }
+    if (gained > 0.001) b.lastYieldT = game.tick;
+    else if (b.owner === 0 && fedMeter(b) < 0.5
+      && game.tick - (b.lastYieldT || 0) > 100 && game.tick - game.pillageAlarmT > 100) {
+      game.pillageAlarmT = game.tick;
+      game.events.push({ msg: '🍂 The land here is stripped bare!', x: b.x, y: b.y });
+    }
   }
-  if (b.food <= 0.0001) applyLosses(game, b, total(b) * C.STARVE_FRAC);
+  if (b.food <= 0.0001) {
+    if (!b.starving) {
+      b.starving = true;
+      if (b.owner === 0) game.events.push({ msg: '💀 Your army is starving!', x: b.x, y: b.y });
+    }
+    applyStarvation(game, b);
+  } else if (b.starving && fedMeter(b) > 0.1) {
+    b.starving = false;
+  }
+}
+
+// At zero food every unit wastes away together: each loses STARVE_FRAC of
+// its own max HP per tick, so a full-health blob is gone in ~20 s.
+function applyStarvation(game, b) {
+  let removed = 0;
+  for (let i = b.units.length - 1; i >= 0; i--) {
+    const u = b.units[i];
+    u.hp -= C.STARVE_FRAC * unitMaxHP(u.role);
+    if (u.hp <= 0.0001) { b.units.splice(i, 1); removed++; }
+  }
+  if (removed > 0) {
+    recount(b);
+    pushFx(game, { kind: 'loss', x: b.x, y: b.y, n: removed, t: game.tick });
+    b.food = Math.min(b.food, foodCap(b));
+  }
+  if (b.units.length === 0) b.dead = true;
 }
 
 function tickRegen(game) {
@@ -814,39 +924,47 @@ function tickRegen(game) {
 
 // -- settlements
 
+// A settlement trains a new consumer only while its measured net food
+// flow can carry one more mouth.
+export function trainGated(s) { return s.flow < C.EAT_PER_SEC * C.DT; }
+
 function tickSettlement(game, s) {
   if (!game.settlements.includes(s)) return;
   const aiMult = s.owner === 1 ? DIFF[game.difficulty].income : 1;
-  if (s.mode === 'farm' || s.mode === 'off') {
-    // farmland income is boosted by farmers actually working the fields
-    let fertSum = 0;
-    for (const i of s.tilled) fertSum += game.map.fert[i];
-    const income = fertSum * C.FARM_BASE * (1 + 0.1 * workingCount(game, s)) * aiMult;
-    s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + income);
-  }
+  // farmland income accrues in every mode (boosted by farmers actually
+  // working the fields) — training modes pick what the surplus becomes
+  let fertSum = 0;
+  for (const i of s.tilled) fertSum += game.map.fert[i];
+  const income = fertSum * C.FARM_BASE * (1 + 0.1 * workingCount(game, s)) * aiMult;
+  s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + income);
+  s.flowAcc = (s.flowAcc || 0) + income;
   if (s.mode === 'farm') {
     // healthy farms grow population: surplus food becomes new farmers who
     // walk straight out to the fields; past the cap, growth trains deploy
-    // units into the garrison instead
+    // units into the garrison instead (those are pure consumers, so they
+    // gate on the break-even food flow)
     if (s.stockpile >= C.FARM_GROW_FLOOR) {
-      s.trainTicks++;
-      if (s.trainTicks >= C.TRAIN_TICKS) {
-        s.trainTicks = 0;
-        s.stockpile -= C.TRAIN_COST;
-        if (workingCount(game, s) < C.FARM_CAP) {
-          const f = spawnWorkingFarmer(game, s);
-          const give = Math.min(s.stockpile, foodCap(f));
-          s.stockpile -= give;
-          f.food = give;
-        } else {
-          s.garrison.deploy++;
+      const atCap = workingCount(game, s) >= C.FARM_CAP;
+      if (!atCap || !trainGated(s)) {
+        s.trainTicks++;
+        if (s.trainTicks >= C.TRAIN_TICKS) {
+          s.trainTicks = 0;
+          s.stockpile -= C.TRAIN_COST;
+          if (!atCap) {
+            const f = spawnWorkingFarmer(game, s);
+            const give = Math.min(s.stockpile, foodCap(f));
+            s.stockpile -= give;
+            f.food = give;
+          } else {
+            s.garrison.deploy++;
+          }
         }
       }
     } else {
       s.trainTicks = 0;
     }
   } else if (s.mode === 'supply' || s.mode === 'deploy') {
-    if (s.stockpile >= C.TRAIN_COST) {
+    if (s.stockpile >= C.TRAIN_COST && !trainGated(s)) {
       s.trainTicks++;
       if (s.trainTicks >= C.TRAIN_TICKS) {
         s.trainTicks = 0;
@@ -861,22 +979,28 @@ function tickSettlement(game, s) {
   const g = garrisonTotal(s);
   if (g > 0) {
     const eat = g * C.EAT_PER_SEC * C.DT;
-    if (s.stockpile >= eat) s.stockpile -= eat;
-    else { s.stockpile = 0; applyGarrisonLosses(game, s, g * C.STARVE_FRAC); }
+    if (s.stockpile >= eat) { s.stockpile -= eat; s.flowAcc -= eat; }
+    else { s.flowAcc -= s.stockpile; s.stockpile = 0; applyGarrisonLosses(game, s, g * C.STARVE_FRAC); }
   }
-  // feed nearby friendly blobs
+  // feed friendly blobs inside the territory
   if (s.stockpile > 0.01) {
     for (const b of game.blobs) {
       if (b.dead || b.owner !== s.owner) continue;
-      if (dist(b.x, b.y, s.x + 0.5, s.y + 0.5) > C.FEED_RADIUS) continue;
+      if (dist(b.x, b.y, s.x + 0.5, s.y + 0.5) > C.TERRITORY) continue;
       const need = foodCap(b) - b.food;
       if (need <= 0) continue;
       const give = Math.min(need, s.stockpile, total(b) * 0.1);
       s.stockpile -= give;
+      s.flowAcc -= give;
       b.food += give;
       if (s.stockpile <= 0.01) break;
     }
   }
+  // fold this tick's flow into the EMA (~10 s half-life). One-time
+  // transfers (train costs, garrison deposits, fielding grants) are
+  // deliberately excluded from flowAcc so the gate doesn't oscillate.
+  s.flow += ((s.flowAcc || 0) - s.flow) * 0.007;
+  s.flowAcc = 0;
 }
 
 // -- merge / cleanup / vision / result
@@ -890,6 +1014,7 @@ function tickMerge(game) {
       const b = alive[j];
       if (b.dead || b.order || b.working != null || a.owner !== b.owner) continue;
       if (a.pillaging !== b.pillaging) continue;
+      if (a.noMerge && b.noMerge) continue; // freshly split pair — stays apart
       if (dist(a.x, a.y, b.x, b.y) > 0.8) continue;
       const keep = total(a) >= total(b) ? a : b;
       const gone = keep === a ? b : a;
@@ -998,18 +1123,19 @@ export function serialize(game) {
   const fertDelta = {};
   for (const i of game.pillaged) fertDelta[i] = game.map.fert[i];
   return {
-    v: 2,
+    v: 3,
     seed: game.seed, sizeKey: game.sizeKey, difficulty: game.difficulty,
     tick: game.tick, nextId: game.nextId, result: game.result,
     blobs: game.blobs.filter(b => !b.dead).map(b => ({
       id: b.id, owner: b.owner, x: b.x, y: b.y,
       count: b.count, food: b.food, order: b.order,
-      pillaging: b.pillaging, working: b.working,
+      pillaging: b.pillaging, working: b.working, noMerge: b.noMerge,
       units: b.units.map(u => ({ role: u.role, hp: u.hp, seed: u.seed })),
     })),
     settlements: game.settlements.map(s => ({
       id: s.id, owner: s.owner, x: s.x, y: s.y, hp: s.hp,
-      mode: s.mode, stockpile: s.stockpile, garrison: s.garrison, trainTicks: s.trainTicks,
+      mode: s.mode, stockpile: s.stockpile, garrison: s.garrison,
+      trainTicks: s.trainTicks, flow: s.flow,
     })),
     routes: game.routes.map(r => ({
       id: r.id, owner: r.owner, settlementId: r.settlementId,
@@ -1039,6 +1165,7 @@ export function deserialize(data) {
     mergeLog: {},
     result: data.result || null,
     farmAlarmT: -999,
+    pillageAlarmT: -999,
     ai: data.ai || { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
   for (const [i, f] of Object.entries(data.fertDelta || {})) {
@@ -1051,6 +1178,7 @@ export function deserialize(data) {
       mode: sd.mode, stockpile: sd.stockpile,
       garrison: sd.garrison, trainTicks: sd.trainTicks,
       garrLoss: 0, lastHitT: -999, tilled: [],
+      flow: sd.flow || 0, flowAcc: 0,
     };
     const { w, h } = map;
     for (let dy = -2; dy <= 2; dy++) {
@@ -1068,7 +1196,8 @@ export function deserialize(data) {
   }
   for (const bd of data.blobs) {
     const units = (bd.units && bd.units.length
-      ? bd.units.map(u => ({ role: u.role, hp: u.hp, seed: u.seed }))
+      // clamp HP to the role's max: v2 saves stored farmers at up to 100 HP
+      ? bd.units.map(u => ({ role: u.role, hp: Math.min(u.hp, unitMaxHP(u.role)), seed: u.seed }))
       : unitsFromCount(bd.count || { deploy: 0, supply: 0, farm: 0 })
     ).sort((a, z) => a.seed - z.seed);
     const b = {
@@ -1079,6 +1208,7 @@ export function deserialize(data) {
       path: null, pathGoal: null,
       pillaging: bd.pillaging, working: bd.working != null ? bd.working : null,
       engagedT: -999, chaseId: null, dead: false, mergedInto: null,
+      noMerge: !!bd.noMerge, lastYieldT: data.tick, starving: false,
     };
     recount(b);
     game.blobs.push(b);

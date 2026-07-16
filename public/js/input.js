@@ -143,7 +143,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
 
   canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    handlers.rightClick(worldFromScreen(e.clientX, e.clientY), keys.has('KeyA'));
+    handlers.rightClick(worldFromScreen(e.clientX, e.clientY), isAttackHeld());
   });
 
   canvas.addEventListener('wheel', (e) => {
@@ -189,14 +189,17 @@ export function createInput({ canvas, minimap, view, handlers }) {
   window.addEventListener('keyup', (e) => keys.delete(e.code));
   window.addEventListener('blur', () => keys.clear());
 
+  // attack-move modifier: hold Shift while right-clicking
+  function isAttackHeld() { return keys.has('ShiftLeft') || keys.has('ShiftRight'); }
+
   // called each frame for keyboard / edge panning
   function update(dtMs) {
     const panPx = 0.6 * dtMs; // px per ms
     let dx = 0, dy = 0;
-    // the A position is reserved as the attack-move modifier, so left-pan is Q/←
+    // full WASD pan (attack-move modifier lives on Shift, so A is free)
     if (keys.has('KeyW') || keys.has('ArrowUp')) dy -= panPx;
     if (keys.has('KeyS') || keys.has('ArrowDown')) dy += panPx;
-    if (keys.has('KeyQ') || keys.has('ArrowLeft')) dx -= panPx;
+    if (keys.has('KeyA') || keys.has('KeyQ') || keys.has('ArrowLeft')) dx -= panPx;
     if (keys.has('KeyD') || keys.has('ArrowRight')) dx += panPx;
     // edge scroll (mouse only, when not dragging)
     if (mousePos && mode === null && document.hasFocus()) {
@@ -214,5 +217,5 @@ export function createInput({ canvas, minimap, view, handlers }) {
     }
   }
 
-  return { update, worldFromScreen, setMapSize, clampView, get attackHeld() { return keys.has('KeyA'); } };
+  return { update, worldFromScreen, setMapSize, clampView, get attackHeld() { return isAttackHeld(); } };
 }
