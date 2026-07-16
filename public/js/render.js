@@ -34,6 +34,26 @@ function tileRGB(game, i) {
 
 function fogTarget(v) { return v === 2 ? 0 : v === 1 ? 150 : 255; }
 
+// Grid-aligned territory outline: the border edges of the disc of tiles
+// whose centers lie within TERRITORY of a settlement's center, as segment
+// endpoints in tile offsets from the settlement's tile. Computed once —
+// the shape is identical for every settlement.
+const TERRITORY_EDGES = (() => {
+  const R = S.C.TERRITORY;
+  const inSet = (dx, dy) => dx * dx + dy * dy <= R * R;
+  const segs = [];
+  for (let dy = -R; dy <= R; dy++) {
+    for (let dx = -R; dx <= R; dx++) {
+      if (!inSet(dx, dy)) continue;
+      if (!inSet(dx, dy - 1)) segs.push([dx, dy, dx + 1, dy]);
+      if (!inSet(dx, dy + 1)) segs.push([dx, dy + 1, dx + 1, dy + 1]);
+      if (!inSet(dx - 1, dy)) segs.push([dx, dy, dx, dy + 1]);
+      if (!inSet(dx + 1, dy)) segs.push([dx + 1, dy, dx + 1, dy + 1]);
+    }
+  }
+  return segs;
+})();
+
 export function createRenderer(canvas, minimap) {
   const ctx = canvas.getContext('2d');
   const mctx = minimap.getContext('2d');
@@ -163,26 +183,29 @@ export function createRenderer(canvas, minimap) {
       ctx.setLineDash([]);
     }
 
-    // territory rings — armies inside get fed from the stockpile
-    ctx.setLineDash([6, 6]);
-    ctx.lineWidth = 1.5;
+    // territory borders — armies inside get fed from the stockpile.
+    // Solid, team-coloured, grid-aligned outlines (not circles).
+    function strokeTerritory(px0, py0) {
+      ctx.beginPath();
+      for (const [ax, ay, ex, ey] of TERRITORY_EDGES) {
+        ctx.moveTo(wx(px0 + ax), wy(py0 + ay));
+        ctx.lineTo(wx(px0 + ex), wy(py0 + ey));
+      }
+      ctx.stroke();
+    }
+    ctx.lineWidth = 2;
     for (const st of game.settlements) {
       if (st.owner === 1 && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
       ctx.strokeStyle = OWNER_COLOR[st.owner];
-      ctx.globalAlpha = 0.35;
-      ctx.beginPath();
-      ctx.arc(wx(st.x + 0.5), wy(st.y + 0.5), S.C.TERRITORY * s, 0, Math.PI * 2);
-      ctx.stroke();
+      ctx.globalAlpha = 0.55;
+      strokeTerritory(st.x, st.y);
     }
     for (const k of Object.values(game.known)) {
       if (S.isVisible(game, k.x + 0.5, k.y + 0.5)) continue;
       ctx.strokeStyle = OWNER_COLOR[1];
-      ctx.globalAlpha = 0.15;
-      ctx.beginPath();
-      ctx.arc(wx(k.x + 0.5), wy(k.y + 0.5), S.C.TERRITORY * s, 0, Math.PI * 2);
-      ctx.stroke();
+      ctx.globalAlpha = 0.25;
+      strokeTerritory(k.x, k.y);
     }
-    ctx.setLineDash([]);
     ctx.globalAlpha = 1;
 
     // selected blob path
@@ -205,6 +228,14 @@ export function createRenderer(canvas, minimap) {
       drawSettlement(game, { x: k.x, y: k.y, owner: 1, hp: S.C.SETT_HP }, wx, wy, s, true, gsel, 0);
     }
 
+    // working farmers — drawn before settlements so they can never cover
+    // the garrison readouts
+    for (const b of game.blobs) {
+      if (b.dead || b.working == null) continue;
+      if (b.owner === 1 && !S.isVisible(game, b.x, b.y)) continue;
+      drawWorkingFarmer(game, b, wx, wy, s, alpha, ui);
+    }
+
     // settlements (with per-settlement working-farmer totals, one sweep)
     const workingBy = new Map();
     for (const b of game.blobs) {
@@ -218,9 +249,8 @@ export function createRenderer(canvas, minimap) {
 
     // blobs
     for (const b of game.blobs) {
-      if (b.dead) continue;
+      if (b.dead || b.working != null) continue;
       if (b.owner === 1 && !S.isVisible(game, b.x, b.y)) continue;
-      if (b.working != null) { drawWorkingFarmer(game, b, wx, wy, s, alpha, ui); continue; }
       const r = Math.max(10, S.blobRadius(b) * s);
       const px = wx(bx(b)), py = wy(by(b));
       const isSupply = b.count.supply > 0 && b.count.deploy === 0 && b.count.farm === 0;
@@ -244,7 +274,7 @@ export function createRenderer(canvas, minimap) {
         ctx.lineWidth = 3;
         ctx.stroke();
       }
-      if (ui.selected && ui.selected.kind === 'blob' && ui.selected.id === b.id) {
+      if (ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'enemy-blob') && ui.selected.id === b.id) {
         ctx.beginPath();
         ctx.arc(px, py, r + 4, 0, Math.PI * 2);
         ctx.strokeStyle = '#ffffff';
@@ -278,6 +308,35 @@ export function createRenderer(canvas, minimap) {
         ctx.font = `${Math.max(10, r * 0.6)}px system-ui`;
         ctx.fillText('🔥', px + r * 0.9, py - r * 0.9);
       }
+    }
+
+    // pillage-target grid: outline the exact cells each pillaging army is
+    // stripping — the same cell set the sim harvests from. Drawn above the
+    // blobs (their circles cover the cells at most zoom levels): a bright
+    // boundary around the group, faint interior grid lines.
+    for (const b of game.blobs) {
+      if (b.dead || !b.pillaging) continue;
+      if (b.owner === 1 && !S.isVisible(game, b.x, b.y)) continue;
+      const cells = S.pillageCells(game, b);
+      const set = new Set(cells);
+      const w = game.map.w;
+      ctx.strokeStyle = 'rgba(251,146,60,0.4)';
+      ctx.lineWidth = 1;
+      for (const i of cells) {
+        const tx = i % w, ty = (i / w) | 0;
+        ctx.strokeRect(wx(tx), wy(ty), s, s);
+      }
+      ctx.strokeStyle = 'rgba(251,146,60,0.9)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (const i of cells) {
+        const tx = i % w, ty = (i / w) | 0;
+        if (!(ty > 0 && set.has(i - w))) { ctx.moveTo(wx(tx), wy(ty)); ctx.lineTo(wx(tx + 1), wy(ty)); }
+        if (!(ty < game.map.h - 1 && set.has(i + w))) { ctx.moveTo(wx(tx), wy(ty + 1)); ctx.lineTo(wx(tx + 1), wy(ty + 1)); }
+        if (!(tx > 0 && set.has(i - 1))) { ctx.moveTo(wx(tx), wy(ty)); ctx.lineTo(wx(tx), wy(ty + 1)); }
+        if (!(tx < w - 1 && set.has(i + 1))) { ctx.moveTo(wx(tx + 1), wy(ty)); ctx.lineTo(wx(tx + 1), wy(ty + 1)); }
+      }
+      ctx.stroke();
     }
 
     // floating damage numbers
@@ -316,7 +375,9 @@ export function createRenderer(canvas, minimap) {
   function drawWorkingFarmer(game, b, wx, wy, s, alpha, ui) {
     const t = game.tick + alpha;
     const bob = Math.abs(Math.sin(t * 0.14 + (b.id % 7) * 1.7)) * 0.1;
-    const px = wx(b.x), py = wy(b.y - bob);
+    const ix = lerp(b.prevX != null ? b.prevX : b.x, b.x, alpha);
+    const iy = lerp(b.prevY != null ? b.prevY : b.y, b.y, alpha);
+    const px = wx(ix), py = wy(iy - bob);
     const r = Math.max(2, s * 0.13);
     // taking-damage flash
     if (game.tick - b.engagedT < 3) {
@@ -327,7 +388,7 @@ export function createRenderer(canvas, minimap) {
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-    if (ui.selected && ui.selected.kind === 'blob' && ui.selected.id === b.id) {
+    if (ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'enemy-blob') && ui.selected.id === b.id) {
       ctx.beginPath();
       ctx.arc(px, py - r * 0.5, r * 2.2, 0, Math.PI * 2);
       ctx.strokeStyle = '#ffffff';

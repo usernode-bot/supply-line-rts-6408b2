@@ -107,20 +107,39 @@ export function workingCount(game, s) {
   return n;
 }
 
-// Deterministic spot on one of the settlement's tilled tiles (same hash
-// placement the old decorative farmer sprites used).
-function farmerSpot(game, s, k) {
+// Deterministic spot inside a tilled tile (same hash placement the old
+// decorative farmer sprites used).
+function tilledJitter(game, i, salt) {
   const w = game.map.w;
-  const i = s.tilled.length ? s.tilled[(k * 7 + s.id) % s.tilled.length] : s.y * w + s.x;
-  const h = (i * 31 + k * 137 + s.id * 17) >>> 0;
+  const h = (i * 31 + salt * 137) >>> 0;
   return {
     x: (i % w) + 0.22 + 0.56 * ((h % 13) / 13),
     y: ((i / w) | 0) + 0.22 + 0.56 * (((h >> 4) % 13) / 13),
   };
 }
 
+// Farmers spread out: each new field hand takes the least-crowded tilled
+// cell (walking farmers claim their destination cell) instead of stacking.
+function farmerSpot(game, s) {
+  const w = game.map.w;
+  if (!s.tilled.length) return tilledJitter(game, s.y * w + s.x, s.id);
+  const occ = new Map();
+  for (const b of game.blobs) {
+    if (b.dead || b.working !== s.id) continue;
+    const g = b.pathGoal || b;
+    const i = Math.floor(g.y) * w + Math.floor(g.x);
+    occ.set(i, (occ.get(i) || 0) + total(b));
+  }
+  let best = s.tilled[0], bo = Infinity;
+  for (const i of s.tilled) {
+    const o = occ.get(i) || 0;
+    if (o < bo) { bo = o; best = i; }
+  }
+  return tilledJitter(game, best, workingCount(game, s) + s.id * 17);
+}
+
 function spawnWorkingFarmer(game, s, unit) {
-  const spot = farmerSpot(game, s, workingCount(game, s));
+  const spot = farmerSpot(game, s);
   const b = makeBlob(game, s.owner, spot.x, spot.y, null, [unit || newUnit('farm')]);
   b.working = s.id;
   return b;
@@ -507,6 +526,7 @@ export function step(game) {
 
   if (game.tick % 10 === 0) tickRegen(game);
   if (game.tick % 5 === 0) { tickFarmerSafety(game); tickMerge(game); updateVision(game); }
+  if (game.tick % 25 === 0) tickFarmerSpread(game);
   cleanup(game);
   if (game.fx.length) game.fx = game.fx.filter(f => game.tick - f.t < 15);
   if (game.tick % 10 === 0) checkResult(game);
@@ -602,7 +622,8 @@ function tickOrder(game, b) {
       b.order = null;
       b.pathGoal = null;
       b.noMerge = false; // completed a deliberate move — mergeable again
-      if (o.type === 'move') {
+      // working farmers walking to a new field cell stay in the fields
+      if (o.type === 'move' && b.working == null) {
         const s = game.settlements.find(s2 => s2.owner === b.owner && dist(s2.x + 0.5, s2.y + 0.5, b.x, b.y) < 1.4);
         if (s) { // garrison
           s.garrison.deploy += b.count.deploy;
@@ -788,6 +809,39 @@ function tickFarmerSafety(game) {
   }
 }
 
+// -- farmer spreading: field hands standing on the same cell drift apart
+// so each works its own tilled cell where space allows. The walk order
+// keeps `working` set (see tickOrder), so income and safety still apply.
+
+function tickFarmerSpread(game) {
+  const w = game.map.w;
+  for (const s of game.settlements) {
+    let idle = null; // tileIdx -> working farmers standing there, orderless
+    const claimed = new Set();
+    for (const b of game.blobs) {
+      if (b.dead || b.working !== s.id) continue;
+      if (b.order) {
+        if (b.pathGoal) claimed.add(Math.floor(b.pathGoal.y) * w + Math.floor(b.pathGoal.x));
+        continue;
+      }
+      const i = Math.floor(b.y) * w + Math.floor(b.x);
+      if (!idle) idle = new Map();
+      if (!idle.has(i)) idle.set(i, []);
+      idle.get(i).push(b);
+    }
+    if (!idle) continue;
+    const free = s.tilled.filter(i => !idle.has(i) && !claimed.has(i));
+    for (const stack of idle.values()) {
+      while (stack.length > 1 && free.length) {
+        const b = stack.pop();
+        const spot = tilledJitter(game, free.shift(), b.id);
+        b.order = { type: 'move', x: spot.x, y: spot.y };
+        if (!ensurePath(game, b, spot.x, spot.y)) b.order = null;
+      }
+    }
+  }
+}
+
 // Damage lands on the living unit with the lowest hidden seed first,
 // spilling to the next once it dies. `casualties` is in whole-unit
 // equivalents (1 casualty = UNIT_HP damage).
@@ -828,54 +882,62 @@ function applyGarrisonLosses(game, s, casualties) {
 
 // -- food / pillage / starvation
 
+// Tiles a pillaging blob is stripping right now: only the ground it
+// actually stands on — the tile underfoot, plus neighbours its body
+// circle overlaps (big armies reach further). Shared with the renderer
+// so the on-screen grid highlights match the sim exactly.
+export function pillageCells(game, b) {
+  const cx = Math.floor(b.x), cy = Math.floor(b.y);
+  const { w, h } = game.map;
+  const reach = blobRadius(b);
+  const ui = tileIdx(game, b.x, b.y);
+  const cells = [];
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const tx = cx + dx, ty = cy + dy;
+      if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+      const i = ty * w + tx;
+      if (i !== ui && dist(tx + 0.5, ty + 0.5, b.x, b.y) > reach) continue;
+      if (game.map.mountain[i]) continue;
+      cells.push(i);
+    }
+  }
+  return cells;
+}
+
 function tickFood(game, b) {
   const n = total(b);
   b.food = Math.max(0, b.food - n * C.EAT_PER_SEC * C.DT);
   let gained = 0; // food the land yielded this tick (for stripped-land feedback)
   if (b.pillaging) {
     // scorched earth: every tile entered while pillage-moving instantly
-    // loses 1 fertility level (2 for armies of 10+). Food is credited up
-    // to the blob's capacity; the rest of the fertility is just destroyed.
+    // loses 1 fertility level (2 for armies of 10+). The fertility is
+    // destroyed outright — food only ever comes from the rate-limited
+    // harvest below, so pillaging yields at the same rate whether the
+    // army is walking or standing still.
     const ci = tileIdx(game, b.x, b.y);
     const pi = tileIdx(game, b.prevX, b.prevY);
     if (ci !== pi && !game.map.mountain[ci]) {
       const loss = Math.min(game.map.fert[ci], C.FERT_LEVEL * (n >= 10 ? 2 : 1));
       if (loss > 0.0001) {
         game.map.fert[ci] -= loss;
-        b.food = Math.min(foodCap(b), b.food + loss * C.FOOD_PER_FERT);
-        gained += loss * C.FOOD_PER_FERT;
         game.pillaged.add(ci);
         game.dirty.add(ci);
       }
     }
-  }
-  if (b.pillaging) {
-    let need = foodCap(b) - b.food;
-    let budget = Math.min(need, n * C.PILLAGE_RATE);
+    let budget = Math.min(foodCap(b) - b.food, n * C.PILLAGE_RATE);
     if (budget > 0.0001) {
-      const cx = Math.floor(b.x), cy = Math.floor(b.y);
-      const { w, h } = game.map;
-      // only the ground the blob actually stands on: the tile underfoot,
-      // plus neighbours its body circle overlaps (big armies reach further)
-      const reach = blobRadius(b);
-      const ui = tileIdx(game, b.x, b.y);
-      for (let dy = -1; dy <= 1 && budget > 0.0001; dy++) {
-        for (let dx = -1; dx <= 1 && budget > 0.0001; dx++) {
-          const tx = cx + dx, ty = cy + dy;
-          if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
-          const i = ty * w + tx;
-          if (i !== ui && dist(tx + 0.5, ty + 0.5, b.x, b.y) > reach) continue;
-          if (game.map.mountain[i]) continue;
-          const avail = game.map.fert[i] * C.FOOD_PER_FERT;
-          const take = Math.min(budget, avail, C.PILLAGE_RATE * n / 4);
-          if (take <= 0.0001) continue;
-          game.map.fert[i] -= take / C.FOOD_PER_FERT;
-          b.food += take;
-          gained += take;
-          budget -= take;
-          game.pillaged.add(i);
-          game.dirty.add(i);
-        }
+      for (const i of pillageCells(game, b)) {
+        if (budget <= 0.0001) break;
+        const avail = game.map.fert[i] * C.FOOD_PER_FERT;
+        const take = Math.min(budget, avail, C.PILLAGE_RATE * n / 4);
+        if (take <= 0.0001) continue;
+        game.map.fert[i] -= take / C.FOOD_PER_FERT;
+        b.food += take;
+        gained += take;
+        budget -= take;
+        game.pillaged.add(i);
+        game.dirty.add(i);
       }
     }
     if (gained > 0.001) b.lastYieldT = game.tick;
