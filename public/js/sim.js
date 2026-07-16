@@ -21,7 +21,8 @@ export const C = {
   TRAIN_TICKS: 250,        // 25 s per unit
   TRAIN_COST: 15,
   FARM_BASE: 0.009,        // stockpile per tick per unit of tilled fertility
-  REROLE_CD: 100,          // 10 s
+  FARM_GROW_FLOOR: 50,     // farm-mode settlements grow farmers only above this stockpile
+  FARM_CAP: 12,            // max auto-grown farmers per settlement garrison
   VISION_BLOB: 6,
   VISION_SETT: 8,
   AGGRO: 4,
@@ -83,6 +84,7 @@ export function newGame(seedStr, sizeKey, difficulty) {
     fog: new Uint8Array(map.w * map.h),   // player fog: 0 unseen, 1 explored, 2 visible
     known: {},                             // player memory of enemy settlements {id:{x,y}}
     events: [],
+    fx: [],                                // transient damage-feedback events (not serialized)
     mergeLog: {},                          // oldBlobId -> survivingBlobId (for UI selection)
     result: null,                          // 'win' | 'loss' | 'surrender'
     ai: { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
@@ -102,10 +104,11 @@ export function newGame(seedStr, sizeKey, difficulty) {
 function makeBlob(game, owner, x, y, count) {
   const b = {
     id: game.nextId++, owner, x, y,
+    prevX: x, prevY: y,
     count: { deploy: count.deploy | 0, supply: count.supply | 0, farm: count.farm | 0 },
     food: 0,
     order: null, path: null, pathGoal: null,
-    pillaging: false, reroleCd: 0,
+    pillaging: false,
     lossAcc: 0, engagedT: -999, chaseId: null,
     dead: false, mergedInto: null,
   };
@@ -162,34 +165,41 @@ export function opMove(game, b, x, y, attack) {
   leaveRoute(game, b);
   b.order = { type: attack ? 'attack' : 'move', x, y };
   b.chaseId = null;
-  const p = findPath(game.map, b.x, b.y, x, y);
+  const p = findPath(game.map, b.x, b.y, x, y, b.owner === 0 ? game.fog : null);
   if (!p) { b.order = null; return { err: 'No path there' }; }
   b.path = p; b.pathGoal = { x, y };
   return { ok: true };
 }
 
+// Field blobs may only become farmers at a friendly settlement.
+export function isAtHome(game, b) {
+  return game.settlements.some(s =>
+    s.owner === b.owner && dist(s.x + 0.5, s.y + 0.5, b.x, b.y) <= C.FEED_RADIUS);
+}
+
 export function opSetRole(game, b, role) {
   if (b.dead) return { err: 'Gone' };
-  if (game.tick < b.reroleCd) return { err: 'Changing roles… wait a moment' };
   if (!['deploy', 'supply', 'farm'].includes(role)) return { err: 'Bad role' };
   const n = total(b);
   if (b.count[role] === n) return { err: 'Already in that role' };
+  if (role === 'farm' && !isAtHome(game, b)) {
+    return { err: 'Farmers can only be assigned at a friendly settlement' };
+  }
   if (role !== 'supply') leaveRoute(game, b);
   b.count = { deploy: 0, supply: 0, farm: 0 };
   b.count[role] = n;
-  b.reroleCd = game.tick + C.REROLE_CD;
   return { ok: true };
 }
 
-export function opSplit(game, b, frac) {
+export function opSplit(game, b, takeN) {
   const n = total(b);
   if (n < 2) return { err: 'Too small to split' };
   leaveRoute(game, b);
   b.order = null; b.path = null; b.chaseId = null;
-  let take = Math.max(1, Math.min(n - 1, Math.round(n * frac)));
+  const take = Math.max(1, Math.min(n - 1, Math.round(takeN)));
   const newCount = { deploy: 0, supply: 0, farm: 0 };
   for (const role of ['deploy', 'supply', 'farm']) {
-    const share = Math.min(take, Math.round(b.count[role] * frac));
+    const share = Math.min(take, Math.round(b.count[role] * take / n));
     newCount[role] = share;
   }
   let assigned = newCount.deploy + newCount.supply + newCount.farm;
@@ -204,7 +214,6 @@ export function opSplit(game, b, frac) {
   const spot = nearestPassable(game.map, Math.floor(b.x + 1), Math.floor(b.y), 3) || { x: b.x, y: b.y };
   const nb = makeBlob(game, b.owner, spot.x + 0.5, spot.y + 0.5, newCount);
   nb.food = foodShare;
-  nb.reroleCd = b.reroleCd;
   nb.pillaging = b.pillaging;
   return { ok: true, blob: nb };
 }
@@ -332,6 +341,7 @@ export function step(game) {
 
   for (const b of game.blobs) {
     if (b.dead) continue;
+    b.prevX = b.x; b.prevY = b.y; // for render interpolation
     if (b.order && b.order.type === 'route') tickCarrier(game, b);
     else tickOrder(game, b);
   }
@@ -343,16 +353,36 @@ export function step(game) {
   if (game.tick % 10 === 0) tickRegen(game);
   if (game.tick % 5 === 0) { tickMerge(game); updateVision(game); }
   cleanup(game);
+  if (game.fx.length) game.fx = game.fx.filter(f => game.tick - f.t < 15);
   if (game.tick % 10 === 0) checkResult(game);
+}
+
+function pushFx(game, fx) {
+  game.fx.push(fx);
+  if (game.fx.length > 200) game.fx.splice(0, game.fx.length - 200);
 }
 
 // -- movement / orders
 
 function ensurePath(game, b, x, y) {
-  const p = findPath(game.map, b.x, b.y, x, y);
+  const p = findPath(game.map, b.x, b.y, x, y, b.owner === 0 ? game.fog : null);
   b.path = p;
   b.pathGoal = p ? { x, y } : null;
   return !!p;
+}
+
+// Player paths are planned optimistically through unexplored fog; once an
+// upcoming waypoint's tile is revealed to be a mountain, the path is wrong
+// and the blob must replan with what it now knows.
+function pathBlocked(game, b) {
+  if (b.owner !== 0 || !b.path) return false;
+  const n = Math.min(2, b.path.length);
+  for (let i = 0; i < n; i++) {
+    const wp = b.path[i];
+    const ti = Math.floor(wp.y) * game.map.w + Math.floor(wp.x);
+    if (game.fog[ti] > 0 && game.map.mountain[ti]) return true;
+  }
+  return false;
 }
 
 function moveBlob(game, b) {
@@ -390,7 +420,7 @@ function tickOrder(game, b) {
         b.chaseId = tgt.id;
         const inRange = dist(b.x, b.y, tgt.x, tgt.y) <= blobRadius(b) + blobRadius(tgt) + 0.15;
         if (!inRange) {
-          if (game.tick % 10 === 0 || !b.path || !b.path.length) ensurePath(game, b, tgt.x, tgt.y);
+          if (game.tick % 10 === 0 || !b.path || !b.path.length || pathBlocked(game, b)) ensurePath(game, b, tgt.x, tgt.y);
           moveBlob(game, b);
         }
         return;
@@ -400,6 +430,12 @@ function tickOrder(game, b) {
       if (game.tick - b.engagedT < 5) return;
     }
     if (!b.path && b.pathGoal == null) ensurePath(game, b, o.x, o.y); // resumed save
+    if (pathBlocked(game, b) && !ensurePath(game, b, o.x, o.y)) {
+      // walled in by explored mountains — the optimistic plan was wrong
+      b.order = null; b.pathGoal = null;
+      game.events.push({ msg: '⛰️ No way through — order cancelled', x: b.x, y: b.y });
+      return;
+    }
     const arrived = moveBlob(game, b);
     if (arrived) {
       b.order = null;
@@ -428,6 +464,7 @@ function tickCarrier(game, b) {
   const o = b.order;
   const route = SUP.findRoute(game, o.routeId);
   if (!route) { b.order = null; return; }
+  if (pathBlocked(game, b)) b.path = null; // discovered a mountain; each phase replans below
   const src = SUP.routeSource(game, route);
   const tgt = SUP.routeTarget(game, route);
   if (!src || !tgt) { SUP.dissolveRoute(game, route); return; }
@@ -513,7 +550,15 @@ function tickCombat(game) {
         dmg.set(b, (dmg.get(b) || 0) + gd * gMult * C.K_COMBAT);
         applyGarrisonLosses(game, s, attack * C.K_COMBAT);
       } else {
-        s.hp -= attack * C.K_SIEGE;
+        const hpDmg = attack * C.K_SIEGE;
+        s.hp -= hpDmg;
+        // throttled floating damage numbers: one per whole HP lost
+        s.hpFxAcc = (s.hpFxAcc || 0) + hpDmg;
+        if (s.hpFxAcc >= 1) {
+          const n = Math.floor(s.hpFxAcc);
+          s.hpFxAcc -= n;
+          pushFx(game, { kind: 'hp', x: s.x + 0.5, y: s.y + 0.5, n, t: game.tick });
+        }
       }
       if (s.hp <= 0) { destroySettlement(game, s); break; }
     }
@@ -526,14 +571,16 @@ function applyLosses(game, b, casualties) {
   let whole = Math.floor(b.lossAcc);
   if (whole <= 0) return;
   b.lossAcc -= whole;
+  let removed = 0;
   while (whole > 0 && total(b) > 0) {
     // remove from the largest role — approximately proportional
     let role = 'deploy';
     if (b.count.supply > b.count[role]) role = 'supply';
     if (b.count.farm > b.count[role]) role = 'farm';
     b.count[role]--;
-    whole--;
+    whole--; removed++;
   }
+  if (removed > 0) pushFx(game, { kind: 'loss', x: b.x, y: b.y, n: removed, t: game.tick });
   b.food = Math.min(b.food, foodCap(b));
   if (total(b) === 0) b.dead = true;
 }
@@ -543,13 +590,15 @@ function applyGarrisonLosses(game, s, casualties) {
   let whole = Math.floor(s.garrLoss);
   if (whole <= 0) return;
   s.garrLoss -= whole;
+  let removed = 0;
   while (whole > 0 && garrisonTotal(s) > 0) {
     let role = 'deploy';
     if (s.garrison.supply > s.garrison[role]) role = 'supply';
     if (s.garrison.farm > s.garrison[role]) role = 'farm';
     s.garrison[role]--;
-    whole--;
+    whole--; removed++;
   }
+  if (removed > 0) pushFx(game, { kind: 'loss', x: s.x + 0.5, y: s.y + 0.5, n: removed, t: game.tick });
 }
 
 // -- food / pillage / starvation
@@ -603,6 +652,17 @@ function tickSettlement(game, s) {
     for (const i of s.tilled) fertSum += game.map.fert[i];
     const income = fertSum * C.FARM_BASE * (1 + 0.1 * s.garrison.farm) * aiMult;
     s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + income);
+    // healthy farms grow population: surplus food becomes new farmers
+    if (s.stockpile >= C.FARM_GROW_FLOOR && s.garrison.farm < C.FARM_CAP) {
+      s.trainTicks++;
+      if (s.trainTicks >= C.TRAIN_TICKS) {
+        s.trainTicks = 0;
+        s.stockpile -= C.TRAIN_COST;
+        s.garrison.farm++;
+      }
+    } else {
+      s.trainTicks = 0;
+    }
   } else {
     if (s.stockpile >= C.TRAIN_COST) {
       s.trainTicks++;
@@ -653,7 +713,6 @@ function tickMerge(game) {
       keep.count.supply += gone.count.supply;
       keep.count.farm += gone.count.farm;
       keep.food = Math.min(foodCap(keep), keep.food + gone.food);
-      keep.reroleCd = Math.max(keep.reroleCd, gone.reroleCd);
       gone.dead = true;
       gone.mergedInto = keep.id;
       game.mergeLog[gone.id] = keep.id;
@@ -762,7 +821,7 @@ export function serialize(game) {
     blobs: game.blobs.filter(b => !b.dead).map(b => ({
       id: b.id, owner: b.owner, x: b.x, y: b.y,
       count: b.count, food: b.food, order: b.order,
-      pillaging: b.pillaging, reroleCd: b.reroleCd,
+      pillaging: b.pillaging,
     })),
     settlements: game.settlements.map(s => ({
       id: s.id, owner: s.owner, x: s.x, y: s.y, hp: s.hp,
@@ -792,6 +851,7 @@ export function deserialize(data) {
     fog: b64ToU8(data.fog),
     known: data.known || {},
     events: [],
+    fx: [],
     mergeLog: {},
     result: data.result || null,
     ai: data.ai || { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
@@ -824,9 +884,10 @@ export function deserialize(data) {
   for (const bd of data.blobs) {
     game.blobs.push({
       id: bd.id, owner: bd.owner, x: bd.x, y: bd.y,
+      prevX: bd.x, prevY: bd.y,
       count: bd.count, food: bd.food, order: bd.order,
       path: null, pathGoal: null,
-      pillaging: bd.pillaging, reroleCd: bd.reroleCd,
+      pillaging: bd.pillaging,
       lossAcc: 0, engagedT: -999, chaseId: null, dead: false, mergedInto: null,
     });
   }

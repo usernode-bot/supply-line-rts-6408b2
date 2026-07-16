@@ -146,6 +146,15 @@ export function inBounds(map, x, y) {
 export function passable(map, x, y) {
   return inBounds(map, x, y) && !map.mountain[y * map.w + x];
 }
+// Fog-aware passability: tiles never seen (fog === 0) are optimistically
+// assumed passable; explored tiles use real terrain. `fog` may be null
+// for omniscient callers (the AI knows terrain by design).
+function fogPassable(map, fog, x, y) {
+  if (!inBounds(map, x, y)) return false;
+  const i = y * map.w + x;
+  if (fog && fog[i] === 0) return true;
+  return !map.mountain[i];
+}
 export function dist(ax, ay, bx, by) {
   const dx = ax - bx, dy = ay - by;
   return Math.sqrt(dx * dx + dy * dy);
@@ -153,16 +162,16 @@ export function dist(ax, ay, bx, by) {
 
 // A* on the tile grid, 8-directional with corner-cut prevention.
 // Returns array of {x, y} tile-center waypoints (excluding start), or null.
-export function findPath(map, sx, sy, tx, ty) {
+export function findPath(map, sx, sy, tx, ty, fog) {
   sx = clampT(map, sx); sy = clampT(map, sy); tx = clampT(map, tx); ty = clampT(map, ty);
   const { w, h } = map;
-  if (!passable(map, tx, ty)) {
-    const alt = nearestPassable(map, tx, ty, 6);
+  if (!fogPassable(map, fog, tx, ty)) {
+    const alt = nearestPassable(map, tx, ty, 6, fog);
     if (!alt) return null;
     tx = alt.x; ty = alt.y;
   }
-  if (!passable(map, sx, sy)) {
-    const alt = nearestPassable(map, sx, sy, 6);
+  if (!fogPassable(map, fog, sx, sy)) {
+    const alt = nearestPassable(map, sx, sy, 6, fog);
     if (!alt) return null;
     sx = alt.x; sy = alt.y;
   }
@@ -210,9 +219,9 @@ export function findPath(map, sx, sy, tx, ty) {
     const cx = cur % w, cy = (cur / w) | 0;
     for (const [dx, dy, cost] of DIRS) {
       const nx = cx + dx, ny = cy + dy;
-      if (!passable(map, nx, ny)) continue;
+      if (!fogPassable(map, fog, nx, ny)) continue;
       // no cutting corners past a mountain
-      if (dx && dy && (!passable(map, cx + dx, cy) || !passable(map, cx, cy + dy))) continue;
+      if (dx && dy && (!fogPassable(map, fog, cx + dx, cy) || !fogPassable(map, fog, cx, cy + dy))) continue;
       const ni = ny * w + nx;
       if (closed[ni]) continue;
       const ng = g[cur] + cost;
@@ -252,12 +261,14 @@ function clampT(map, v) {
   return Math.max(0, Math.min(map.w - 1, Math.floor(v)));
 }
 
-export function nearestPassable(map, x, y, r) {
+export function nearestPassable(map, x, y, r, fog) {
   for (let rad = 0; rad <= r; rad++) {
     for (let dy = -rad; dy <= rad; dy++) {
       for (let dx = -rad; dx <= rad; dx++) {
         if (Math.max(Math.abs(dx), Math.abs(dy)) !== rad) continue;
-        if (passable(map, x + dx, y + dy)) return { x: x + dx, y: y + dy };
+        if (fog ? fogPassable(map, fog, x + dx, y + dy) : passable(map, x + dx, y + dy)) {
+          return { x: x + dx, y: y + dy };
+        }
       }
     }
   }
