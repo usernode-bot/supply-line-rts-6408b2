@@ -207,7 +207,7 @@
           <p><b class="text-zinc-200">Goal:</b> destroy every enemy settlement. You lose if all your settlements fall and you have fewer than 5 units left.</p>
           <p><b class="text-zinc-200">Units</b> are all one type; their <b>role</b> is switchable any time from the selection panel: <b>Deploy</b> fights at normal speed, <b>Supply</b> moves 2× but can't fight, <b>Farmer</b> boosts food output while working a settlement's fields — but farmers are only 1/10th as tough, and run into the settlement for shelter when raiders come near.</p>
           <p><b class="text-zinc-200">Settlements</b> cost 5 units to found (build on fertile land!), auto-till the ground around them, and run one production mode: Farm (grow the stockpile), or train Supply / Deploy units. Training pauses automatically when the settlement's food income only just covers what its people eat.</p>
-          <p><b class="text-zinc-200">Food:</b> every unit eats. Land comes in five fertility tiers (Barren → Lush). Feed armies by keeping them inside a settlement's solid team-colored <b>territory border</b>, toggling <b>Pillage</b> (strips only the highlighted cells the army stands on — it recovers very slowly; the rate is the same moving or standing), or running a <b>Supply route</b>: select a supply blob, tap "Supply route", tap the army. Routes draw color-coded: green = fed, amber = falling behind, red = starving. Roughly 1 supply unit feeds 5 fighters at a quarter of the map's distance.</p>
+          <p><b class="text-zinc-200">Food:</b> every unit eats. Land comes in five fertility tiers (Barren → Lush). Feed armies by keeping them inside a settlement's solid team-colored <b>territory border</b>, toggling <b>Pillage</b> (forages the highlighted area around the army — wasteful foraging that degrades fertility tiers even while standing still, spreading out from the center; Barren tiles yield nothing, so stripped land recovers very slowly and a parked army will eventually starve), or running a <b>Supply route</b>: select a supply blob, tap "Supply route", tap the army. Routes draw color-coded: green = fed, amber = falling behind, red = starving. Roughly 1 supply unit feeds 5 fighters at a quarter of the map's distance.</p>
           <p><b class="text-zinc-200">Hunger and combat:</b> above ¾ fed fights best; below ½ worse; below ¼ famished (weakest), and at zero food units die within about 20 seconds.</p>
           <p><b class="text-zinc-200">Touch:</b> drag to pan, pinch to zoom, tap to select. With a blob selected, tap a destination to choose Move / Pillage-move / Attack-move right there — or use the panel buttons, then tap the target.</p>
           <p><b class="text-zinc-200">Desktop:</b> right-click = move (hold Shift for attack-move), left-drag = box select, WASD/edge/middle-drag = pan, wheel = zoom, Esc = cancel.</p>
@@ -225,6 +225,17 @@
           <div id="history-recent-rows" class="space-y-1 text-sm text-zinc-400">Loading…</div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- ============ In-app confirm dialog ============ -->
+  <!-- Native confirm() is blocked inside the sandboxed platform iframe, so all
+       confirmations go through this tap-first modal instead. -->
+  <div id="confirm-modal" class="hidden fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+    <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-5 max-w-sm w-full">
+      <h2 id="confirm-title" class="text-lg font-bold mb-1"></h2>
+      <p id="confirm-text" class="text-zinc-400 text-sm mb-4"></p>
+      <div id="confirm-actions" class="flex flex-col gap-2"></div>
     </div>
   </div>
 
