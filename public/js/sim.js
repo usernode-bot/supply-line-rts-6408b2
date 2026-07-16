@@ -499,6 +499,105 @@ export function opGarrisonRole(game, s, role) {
   return { ok: true };
 }
 
+// -- back to work: round up idle farmers (garrisoned farm units and
+// farm-role units in orderless non-working blobs) and put them back on
+// the fields. The plan is shared by the HUD badge (idleFarmers) and the
+// op (opBackToWork) so the count always matches what a click does.
+
+function backToWorkPlan(game, owner) {
+  const setts = game.settlements.filter(s => s.owner === owner);
+  // field slots left per *safe* settlement; unsafe ones take no farmers
+  const room = new Map();
+  for (const s of setts) {
+    if (!settlementInDanger(game, s)) {
+      room.set(s.id, Math.max(0, C.FARM_CAP - workingCount(game, s)));
+    }
+  }
+  const plan = { garrison: [], home: [], walk: [], sawIdle: false, sawDanger: false };
+  for (const s of setts) {
+    if (s.garrison.farm <= 0) continue;
+    plan.sawIdle = true;
+    if (!room.has(s.id)) { plan.sawDanger = true; continue; }
+    const n = Math.min(s.garrison.farm, room.get(s.id));
+    if (n > 0) { plan.garrison.push({ s, n }); room.set(s.id, room.get(s.id) - n); }
+  }
+  for (const b of game.blobs) {
+    if (b.dead || b.owner !== owner || b.working != null || b.order || b.count.farm <= 0) continue;
+    // nearest safe settlement with room, at home and anywhere
+    let homeSett = null, hd = Infinity, atHomeOfAny = false;
+    let walkSett = null, wd = Infinity;
+    for (const s of setts) {
+      const d = dist(s.x + 0.5, s.y + 0.5, b.x, b.y);
+      if (d <= C.TERRITORY) atHomeOfAny = true;
+      if (!(room.get(s.id) > 0)) continue;
+      if (d <= C.TERRITORY && d < hd) { hd = d; homeSett = s; }
+      if (d < wd) { wd = d; walkSett = s; }
+    }
+    const pure = b.count.farm === total(b);
+    if (homeSett) {
+      plan.sawIdle = true;
+      const n = Math.min(b.count.farm, room.get(homeSett.id));
+      plan.home.push({ b, s: homeSett, n });
+      room.set(homeSett.id, room.get(homeSett.id) - n);
+    } else if (pure && walkSett) {
+      plan.sawIdle = true;
+      plan.walk.push({ b, s: walkSett });
+    } else if (pure || atHomeOfAny) {
+      // idle farmers with nowhere to go right now — remember why
+      plan.sawIdle = true;
+      if (setts.length > room.size) plan.sawDanger = true;
+    }
+  }
+  return plan;
+}
+
+export function idleFarmers(game, owner) {
+  const plan = backToWorkPlan(game, owner);
+  let field = 0, walk = 0;
+  for (const g of plan.garrison) field += g.n;
+  for (const h of plan.home) field += h.n;
+  for (const w of plan.walk) walk += w.b.count.farm;
+  return { field, walk };
+}
+
+// Peel only the farm-role units out of an idle blob onto a settlement's
+// fields — mixed blobs keep their soldiers/suppliers where they stand.
+function peelFarmersToFields(game, b, s, n) {
+  const tot = total(b);
+  const foodShare = tot > 0 ? b.food / tot : 0;
+  let moved = 0;
+  for (let i = b.units.length - 1; i >= 0 && moved < n; i--) {
+    if (b.units[i].role !== 'farm') continue;
+    const u = b.units.splice(i, 1)[0];
+    const f = spawnWorkingFarmer(game, s, u);
+    f.food = Math.min(foodCap(f), foodShare);
+    b.food = Math.max(0, b.food - foodShare);
+    moved++;
+  }
+  recount(b);
+  if (b.units.length === 0) b.dead = true;
+  else b.food = Math.min(b.food, foodCap(b));
+  return moved;
+}
+
+export function opBackToWork(game, owner) {
+  const plan = backToWorkPlan(game, owner);
+  let fielded = 0, walking = 0;
+  for (const { s, n } of plan.garrison) {
+    if (opFieldRole(game, s, 'farm', n).ok) fielded += n;
+  }
+  for (const { b, s, n } of plan.home) {
+    if (!b.dead) fielded += peelFarmersToFields(game, b, s, n);
+  }
+  for (const { b, s } of plan.walk) {
+    if (!b.dead && opMove(game, b, s.x + 0.5, s.y + 0.5, false).ok) walking += b.count.farm;
+  }
+  if (fielded + walking === 0) {
+    return { fielded, walking, reason: plan.sawIdle ? (plan.sawDanger ? 'danger' : 'cap') : 'none' };
+  }
+  return { fielded, walking };
+}
+
 function leaveRoute(game, b) {
   if (b.order && b.order.type === 'route') {
     const r = SUP.findRoute(game, b.order.routeId);
@@ -816,6 +915,16 @@ function tickCombat(game) {
 // -- farmer safety: working farmers shelter in their settlement when
 // threatened, then walk back out to the fields once the area is quiet.
 
+// An enemy war party close enough that fielded farmers would immediately
+// re-shelter — shared by the auto-return tick and opBackToWork.
+function settlementInDanger(game, s) {
+  for (const e of game.blobs) {
+    if (e.dead || e.owner === s.owner || e.count.deploy === 0) continue;
+    if (dist(e.x, e.y, s.x + 0.5, s.y + 0.5) <= C.TERRITORY + C.AGGRO) return true;
+  }
+  return false;
+}
+
 function shelterFarmers(game, s) {
   let any = false;
   for (const b of game.blobs) {
@@ -853,12 +962,7 @@ function tickFarmerSafety(game) {
       if (s.garrison.farm <= 0 || game.tick - s.lastHitT <= 300) continue;
       const capLeft = C.FARM_CAP - workingCount(game, s);
       if (capLeft <= 0) continue;
-      let danger = false;
-      for (const e of game.blobs) {
-        if (e.dead || e.owner === s.owner || e.count.deploy === 0) continue;
-        if (dist(e.x, e.y, s.x + 0.5, s.y + 0.5) <= C.TERRITORY + C.AGGRO) { danger = true; break; }
-      }
-      if (!danger) opFieldRole(game, s, 'farm', Math.min(s.garrison.farm, capLeft));
+      if (!settlementInDanger(game, s)) opFieldRole(game, s, 'farm', Math.min(s.garrison.farm, capLeft));
     }
   }
 }
