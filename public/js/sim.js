@@ -181,6 +181,7 @@ export function newGame(seedStr, sizeKey, difficulty) {
     known: {},                             // player memory of enemy settlements {id:{x,y}}
     events: [],
     fx: [],                                // transient damage-feedback events (not serialized)
+    combat: [],                            // this tick's engagement links (not serialized)
     mergeLog: {},                          // oldBlobId -> survivingBlobId (for UI selection)
     result: null,                          // 'win' | 'loss' | 'surrender'
     farmAlarmT: -999,                      // last "farmers ran to shelter" toast (transient)
@@ -706,6 +707,7 @@ function tickCarrier(game, b) {
 // -- combat
 
 function tickCombat(game) {
+  game.combat = []; // rebuilt every tick — engaged pairs re-register while in contact
   const alive = game.blobs.filter(b => !b.dead);
   const dmg = new Map();
   for (let i = 0; i < alive.length; i++) {
@@ -715,6 +717,7 @@ function tickCombat(game) {
       const d = dist(a.x, a.y, b.x, b.y);
       if (d > blobRadius(a) + blobRadius(b) + 0.2) continue;
       a.engagedT = game.tick; b.engagedT = game.tick;
+      game.combat.push({ kind: 'bb', a: a.id, b: b.id });
       dmg.set(a, (dmg.get(a) || 0) + b.count.deploy * fedMult(fedMeter(b)) * C.K_COMBAT);
       dmg.set(b, (dmg.get(b) || 0) + a.count.deploy * fedMult(fedMeter(a)) * C.K_COMBAT);
     }
@@ -727,6 +730,7 @@ function tickCombat(game) {
       if (d > blobRadius(b) + 1.4) continue;
       b.engagedT = game.tick;
       s.lastHitT = game.tick;
+      game.combat.push({ kind: 'bs', b: b.id, s: s.id });
       const attack = b.count.deploy * fedMult(fedMeter(b));
       const gd = s.garrison.deploy;
       if (garrisonTotal(s) > 0) {
@@ -1224,6 +1228,7 @@ export function deserialize(data) {
     known: data.known || {},
     events: [],
     fx: [],
+    combat: [],
     mergeLog: {},
     result: data.result || null,
     farmAlarmT: -999,
