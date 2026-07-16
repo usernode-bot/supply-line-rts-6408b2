@@ -78,8 +78,7 @@ function refreshMenu() {
   $('btn-resume').classList.toggle('hidden', !loadSaveData());
 }
 
-$('btn-new').addEventListener('click', () => {
-  if (loadSaveData() && !confirm('Starting a new match discards your saved match. Continue?')) return;
+function startNewMatch() {
   localStorage.removeItem(SAVE_KEY);
   const seed = $('inp-seed').value.trim() || Math.random().toString(36).slice(2, 10);
   const size = $('sel-mapsize').value;
@@ -89,6 +88,18 @@ $('btn-new').addEventListener('click', () => {
   } catch (e) {
     showMenuError('Could not start the match: ' + (e && e.message || e));
   }
+}
+
+$('btn-new').addEventListener('click', () => {
+  if (loadSaveData()) {
+    showConfirm('Match already in progress',
+      'You have a match in progress. You can resume it, or discard it and start a new one.', [
+      { label: '▶ Resume that match', cls: 'bg-emerald-700 hover:bg-emerald-600 text-white', fn: () => $('btn-resume').click() },
+      { label: '🗑️ Discard & start new', cls: 'bg-red-700 hover:bg-red-600 text-white', fn: startNewMatch },
+    ]);
+    return;
+  }
+  startNewMatch();
 });
 
 $('btn-resume').addEventListener('click', () => {
@@ -102,6 +113,34 @@ $('btn-resume').addEventListener('click', () => {
     showMenuError('Saved match could not be loaded — it was discarded.');
   }
 });
+
+// In-app confirm dialog — native confirm() is blocked inside the sandboxed
+// platform iframe (it silently returns false), so never use it.
+const confirmModal = $('confirm-modal');
+
+function showConfirm(title, text, actions) {
+  $('confirm-title').textContent = title;
+  $('confirm-text').textContent = text;
+  const box = $('confirm-actions');
+  box.innerHTML = '';
+  for (const a of actions) {
+    const b = document.createElement('button');
+    b.className = `btn w-full py-3 rounded-xl font-semibold ${a.cls}`;
+    b.textContent = a.label;
+    b.addEventListener('click', () => { hideConfirm(); a.fn(); });
+    box.appendChild(b);
+  }
+  const cancel = document.createElement('button');
+  cancel.className = 'btn w-full py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', hideConfirm);
+  box.appendChild(cancel);
+  confirmModal.classList.remove('hidden');
+}
+function hideConfirm() {
+  confirmModal.classList.add('hidden');
+}
+confirmModal.addEventListener('click', (e) => { if (e.target === confirmModal) hideConfirm(); });
 
 function showMenuError(msg) {
   const el = $('menu-error');
@@ -179,8 +218,9 @@ function endMatch(result) {
 $('btn-end-menu').addEventListener('click', backToMenu);
 $('btn-surrender').addEventListener('click', () => {
   if (!game || game.result) return;
-  if (!confirm('Surrender this match?')) return;
-  game.result = 'surrender';
+  showConfirm('Surrender this match?', 'The match ends immediately and counts as a loss.', [
+    { label: '🏳️ Surrender', cls: 'bg-red-700 hover:bg-red-600 text-white', fn: () => { if (game && !game.result) game.result = 'surrender'; } },
+  ]);
 });
 $('btn-pause').addEventListener('click', () => {
   paused = !paused;
