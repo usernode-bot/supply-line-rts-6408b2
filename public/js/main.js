@@ -1028,7 +1028,13 @@ function toast(msg) {
 
 const panel = $('panel');
 panel.addEventListener('pointerdown', () => { panelHeld = true; });
-window.addEventListener('pointerup', () => { panelHeld = false; });
+window.addEventListener('pointerup', () => {
+  panelHeld = false;
+  // Don't let a slider keep focus after the drag ends — a focused range
+  // input would make arrow keys nudge its value instead of panning.
+  const ae = document.activeElement;
+  if (ae && ae.tagName === 'INPUT' && ae.type === 'range') ae.blur();
+});
 
 panel.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-act]');

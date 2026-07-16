@@ -44,6 +44,10 @@ export function createInput({ canvas, minimap, view, handlers }) {
   // -- canvas pointer events ------------------------------------------
 
   canvas.addEventListener('pointerdown', (e) => {
+    // Reclaim keyboard focus from any UI control (e.g. a panel slider);
+    // preventDefault() below suppresses the browser's native focus
+    // transfer, so without this a focused slider would swallow keys.
+    canvas.focus({ preventScroll: true });
     if (e.button === 2) return; // handled via contextmenu
     canvas.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY });
@@ -167,6 +171,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
     clampView();
   }
   minimap.addEventListener('pointerdown', (e) => {
+    canvas.focus({ preventScroll: true });
     minimap.setPointerCapture(e.pointerId);
     if (handlers.gesture) handlers.gesture();
     minimapJump(e);
@@ -181,13 +186,25 @@ export function createInput({ canvas, minimap, view, handlers }) {
 
   // Keys are tracked by KeyboardEvent.code (physical position), so WASD
   // panning works the same on AZERTY / Dvorak / remapped layouts.
+  // Only genuine text-entry contexts swallow keys; non-text controls
+  // (range sliders, checkboxes, buttons) must never block WASD/Esc.
+  const TEXT_INPUT_TYPES = new Set(['text', 'search', 'password', 'email', 'number', 'url', 'tel']);
+  function isTextEntry(el) {
+    if (!el || !el.tagName) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    // missing/unknown type attribute defaults to text-like
+    return tag === 'INPUT' && TEXT_INPUT_TYPES.has((el.type || 'text').toLowerCase());
+  }
   window.addEventListener('keydown', (e) => {
-    if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    if (isTextEntry(e.target)) return;
     keys.add(e.code);
     if (e.code === 'Escape') handlers.cancel();
   });
   window.addEventListener('keyup', (e) => keys.delete(e.code));
   window.addEventListener('blur', () => keys.clear());
+  document.addEventListener('visibilitychange', () => { if (document.hidden) keys.clear(); });
 
   // attack-move modifier: hold Shift while right-clicking
   function isAttackHeld() { return keys.has('ShiftLeft') || keys.has('ShiftRight'); }

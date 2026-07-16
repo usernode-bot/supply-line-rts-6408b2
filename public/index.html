@@ -70,6 +70,7 @@
   <style>
     html, body { height: 100%; overscroll-behavior: none; }
     #game-canvas { touch-action: none; user-select: none; -webkit-user-select: none; display: block; }
+    #game-canvas:focus { outline: none; }
     #minimap { touch-action: none; }
     .btn { min-height: 44px; min-width: 44px; }
     .btn-sm { min-height: 40px; }
@@ -79,7 +80,7 @@
 
   <!-- ============ Game screen ============ -->
   <div id="game-ui" class="hidden fixed inset-0">
-    <canvas id="game-canvas" class="absolute inset-0 w-full h-full"></canvas>
+    <canvas id="game-canvas" tabindex="-1" class="absolute inset-0 w-full h-full"></canvas>
 
     <!-- top bar -->
     <div class="absolute top-0 inset-x-0 flex items-center gap-2 px-2 py-1.5 bg-zinc-950/80 backdrop-blur text-sm select-none">
