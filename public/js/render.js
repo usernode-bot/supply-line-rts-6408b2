@@ -32,6 +32,11 @@ function tileRGB(game, i) {
     const v = 108 + ((i * 2654435761) % 24);
     return [v, v + 4, v + 10];
   }
+  // built-over settlement ground: a flat stone/earth plaza, not farmland
+  if (game.settAt && game.settAt[i]) {
+    const v = (i * 2654435761) % 10;
+    return [148 + v, 131 + v, 104 + v];
+  }
   // five flat shades, one per fertility tier
   const f = fertTier(game.map.fert[i]) / 4;
   let c = f < 0.5 ? mix(BARREN, MID, f * 2) : mix(MID, LUSH, (f - 0.5) * 2);
@@ -42,15 +47,17 @@ function tileRGB(game, i) {
 function fogTarget(v) { return v === 2 ? 0 : v === 1 ? 150 : 255; }
 
 // Grid-aligned territory outline: the border edges of the disc of tiles
-// whose centers lie within TERRITORY of a settlement's center, as segment
-// endpoints in tile offsets from the settlement's tile. Computed once —
-// the shape is identical for every settlement.
+// whose centers lie within TERRITORY of a settlement's 2×2 footprint
+// center (anchor + (1, 1)), as segment endpoints in tile offsets from
+// the settlement's anchor tile. Computed once — the shape is identical
+// for every settlement.
 const TERRITORY_EDGES = (() => {
   const R = S.C.TERRITORY;
-  const inSet = (dx, dy) => dx * dx + dy * dy <= R * R;
+  // tile (dx, dy) center relative to the footprint center is (dx - 0.5, dy - 0.5)
+  const inSet = (dx, dy) => (dx - 0.5) * (dx - 0.5) + (dy - 0.5) * (dy - 0.5) <= R * R;
   const segs = [];
-  for (let dy = -R; dy <= R; dy++) {
-    for (let dx = -R; dx <= R; dx++) {
+  for (let dy = -R; dy <= R + 1; dy++) {
+    for (let dx = -R; dx <= R + 1; dx++) {
       if (!inSet(dx, dy)) continue;
       if (!inSet(dx, dy - 1)) segs.push([dx, dy, dx + 1, dy]);
       if (!inSet(dx, dy + 1)) segs.push([dx, dy + 1, dx + 1, dy + 1]);
@@ -173,9 +180,9 @@ export function createRenderer(canvas, minimap) {
       const src = SUP.routeSource(game, r);
       const tgt = SUP.routeTarget(game, r);
       if (!src || !tgt) continue;
-      const tp = r.targetKind === 'blob' ? { x: bx(tgt), y: by(tgt) } : { x: tgt.x + 0.5, y: tgt.y + 0.5 };
+      const tp = r.targetKind === 'blob' ? { x: bx(tgt), y: by(tgt) } : S.settCenter(tgt);
       if (r.owner !== viewer(game)) {
-        const seen = S.isVisible(game, src.x, src.y) || S.isVisible(game, tp.x, tp.y);
+        const seen = S.settVisible(game, src) || S.isVisible(game, tp.x, tp.y);
         if (!seen) continue;
       }
       const health = SUP.routeHealth(game, r);
@@ -184,7 +191,7 @@ export function createRenderer(canvas, minimap) {
       ctx.lineWidth = 2;
       ctx.setLineDash(r.owner !== viewer(game) ? [6, 5] : [10, 4]);
       ctx.beginPath();
-      ctx.moveTo(wx(src.x + 0.5), wy(src.y + 0.5));
+      ctx.moveTo(wx(src.x + 1), wy(src.y + 1));
       ctx.lineTo(wx(tp.x), wy(tp.y));
       ctx.stroke();
       ctx.setLineDash([]);
@@ -202,13 +209,13 @@ export function createRenderer(canvas, minimap) {
     }
     ctx.lineWidth = 2;
     for (const st of game.settlements) {
-      if (st.owner !== viewer(game) && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
+      if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
       ctx.strokeStyle = ownerColor(game, st.owner);
       ctx.globalAlpha = 0.55;
       strokeTerritory(st.x, st.y);
     }
     for (const k of Object.values(knownOf(game))) {
-      if (S.isVisible(game, k.x + 0.5, k.y + 0.5)) continue;
+      if (S.settVisible(game, k)) continue;
       ctx.strokeStyle = OWNER_COLOR[1];
       ctx.globalAlpha = 0.25;
       strokeTerritory(k.x, k.y);
@@ -230,7 +237,7 @@ export function createRenderer(canvas, minimap) {
 
     // ghost settlements (remembered but not visible)
     for (const [id, k] of Object.entries(knownOf(game))) {
-      if (S.isVisible(game, k.x + 0.5, k.y + 0.5)) continue;
+      if (S.settVisible(game, k)) continue;
       const gsel = ui.selected && ui.selected.kind === 'enemy-settlement' && ui.selected.id === +id;
       drawSettlement(game, { x: k.x, y: k.y, owner: 1 - viewer(game), hp: S.C.SETT_HP }, wx, wy, s, true, gsel, 0);
     }
@@ -249,7 +256,7 @@ export function createRenderer(canvas, minimap) {
       if (!b.dead && b.working != null) workingBy.set(b.working, (workingBy.get(b.working) || 0) + S.total(b));
     }
     for (const st of game.settlements) {
-      if (st.owner !== viewer(game) && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
+      if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
       const sel = ui.selected && (ui.selected.kind === 'settlement' || ui.selected.kind === 'enemy-settlement') && ui.selected.id === st.id;
       drawSettlement(game, st, wx, wy, s, false, sel, workingBy.get(st.id) || 0);
     }
@@ -357,7 +364,7 @@ export function createRenderer(canvas, minimap) {
       const settById = new Map();
       for (const st of game.settlements) settById.set(st.id, st);
       const blobSeen = b => b.owner !== 1 || S.isVisible(game, b.x, b.y);
-      const settSeen = st => st.owner !== 1 || S.isVisible(game, st.x + 0.5, st.y + 0.5);
+      const settSeen = st => st.owner !== 1 || S.settVisible(game, st);
       const blobPxR = b => b.working != null ? Math.max(2, s * 0.13) * 2 : Math.max(10, S.blobRadius(b) * s);
       const pulse = 0.55 + 0.45 * Math.sin((game.tick + alpha) * 2.2);
       const arrowAt = (x, y, ang, size) => {
@@ -430,7 +437,7 @@ export function createRenderer(canvas, minimap) {
       }
 
       // sieges: solid line from attacker edge to the settlement's box edge
-      const half = Math.max(8, 0.85 * s);
+      const half = Math.max(8, 1.0 * s);
       ctx.strokeStyle = 'rgba(248,113,113,0.85)';
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -439,7 +446,7 @@ export function createRenderer(canvas, minimap) {
         if (l.kind !== 'bs') continue;
         const b = blobById.get(l.b), st = settById.get(l.s);
         if (!b || !st || !blobSeen(b) || !settSeen(st)) continue;
-        const x1 = wx(bx(b)), y1 = wy(by(b)), x2 = wx(st.x + 0.5), y2 = wy(st.y + 0.5);
+        const x1 = wx(bx(b)), y1 = wy(by(b)), x2 = wx(st.x + 1), y2 = wy(st.y + 1);
         const ang = Math.atan2(y2 - y1, x2 - x1);
         const ex = x2 - Math.cos(ang) * (half + 3), ey = y2 - Math.sin(ang) * (half + 3);
         ctx.moveTo(x1 + Math.cos(ang) * blobPxR(b), y1 + Math.sin(ang) * blobPxR(b));
@@ -520,8 +527,9 @@ export function createRenderer(canvas, minimap) {
   }
 
   function drawSettlement(game, st, wx, wy, s, ghost, sel, workingN) {
-    const px = wx(st.x + 0.5), py = wy(st.y + 0.5);
-    const half = Math.max(8, 0.85 * s);
+    // centered on the 2×2 footprint, sized to cover it
+    const px = wx(st.x + 1), py = wy(st.y + 1);
+    const half = Math.max(8, 1.0 * s);
     const hit = !ghost && st.lastHitT != null && game.tick - st.lastHitT < 3;
     ctx.globalAlpha = ghost ? 0.4 : 1;
     ctx.fillStyle = ownerDark(game, st.owner);
@@ -579,13 +587,13 @@ export function createRenderer(canvas, minimap) {
     mctx.drawImage(fogCanvas, 0, 0, mw, mh);
     const sx = mw / game.map.w, sy = mh / game.map.h;
     for (const st of game.settlements) {
-      if (st.owner !== viewer(game) && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
+      if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
       mctx.fillStyle = ownerColor(game, st.owner);
-      mctx.fillRect(st.x * sx - 2, st.y * sy - 2, 5, 5);
+      mctx.fillRect((st.x + 1) * sx - 3, (st.y + 1) * sy - 3, 6, 6);
     }
     for (const k of Object.values(knownOf(game))) {
       mctx.fillStyle = 'rgba(239,68,68,0.5)';
-      mctx.fillRect(k.x * sx - 2, k.y * sy - 2, 5, 5);
+      mctx.fillRect((k.x + 1) * sx - 3, (k.y + 1) * sy - 3, 6, 6);
     }
     for (const b of game.blobs) {
       if (b.dead) continue;

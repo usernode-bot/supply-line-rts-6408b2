@@ -32,7 +32,8 @@ export function nearestSettlement(game, owner, x, y) {
   let best = null, bd = Infinity;
   for (const s of game.settlements) {
     if (s.owner !== owner) continue;
-    const dx = s.x - x, dy = s.y - y, d = dx * dx + dy * dy;
+    // measure from the 2×2 footprint center
+    const dx = s.x + 1 - x, dy = s.y + 1 - y, d = dx * dx + dy * dy;
     if (d < bd) { bd = d; best = s; }
   }
   return best;

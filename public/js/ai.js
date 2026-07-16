@@ -30,7 +30,7 @@ export function aiTick(game, S) {
 // -- memory: what the AI has actually seen ----------------------------
 
 function canSee(mine, setts, x, y, S) {
-  for (const s of setts) if (dist(s.x, s.y, x, y) <= S.C.VISION_SETT) return true;
+  for (const s of setts) if (dist(s.x + 1, s.y + 1, x, y) <= S.C.VISION_SETT) return true;
   for (const b of mine) if (dist(b.x, b.y, x, y) <= S.C.VISION_BLOB) return true;
   return false;
 }
@@ -75,7 +75,7 @@ function rallyPoint(game, setts) {
   const cx = game.map.w / 2, cy = game.map.h / 2;
   const dx = cx - best.x, dy = cy - best.y;
   const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-  return { x: best.x + 0.5 + (dx / d) * 2.2, y: best.y + 0.5 + (dy / d) * 2.2 };
+  return { x: best.x + 1 + (dx / d) * 2.6, y: best.y + 1 + (dy / d) * 2.6 };
 }
 
 function sendToRally(game, S, setts, b) {
@@ -117,21 +117,21 @@ function expand(game, S, setts, mine, ai, diff) {
     if (!r.ok) return;
     b = r.blob;
   }
-  const site = pickSite(game, setts, ai);
+  const site = pickSite(game, S, setts, ai);
   if (!site) return;
-  if (S.opMove(game, b, site.x + 0.5, site.y + 0.5, false).ok) {
-    ai.expand = { blobId: b.id, x: site.x + 0.5, y: site.y + 0.5 };
+  if (S.opMove(game, b, site.x + 1, site.y + 1, false).ok) {
+    ai.expand = { blobId: b.id, x: site.x + 1, y: site.y + 1 };
     ai.lastExpand = game.tick;
   }
 }
 
-function pickSite(game, setts, ai) {
-  const { w, h, orig, mountain } = game.map;
+function pickSite(game, S, setts, ai) {
+  const { w, h, orig } = game.map;
   let best = null, bestScore = -Infinity;
   for (let y = 4; y < h - 4; y += 3) {
     for (let x = 4; x < w - 4; x += 3) {
-      const i = y * w + x;
-      if (mountain[i] || game.tilledBy[i]) continue;
+      // the whole 2×2 footprint anchored here must be buildable
+      if (!S.footprintFits(game, x, y)) continue;
       let ok = true, nearest = Infinity;
       for (const s of game.settlements) {
         const d = dist(s.x, s.y, x, y);
@@ -139,10 +139,13 @@ function pickSite(game, setts, ai) {
         if (s.owner === 1 && d < nearest) nearest = d;
       }
       if (!ok || nearest > 26) continue;
+      // score the farmland ring around the footprint center
       let fert = 0;
-      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      for (let dy = -2; dy <= 3; dy++) for (let dx = -2; dx <= 3; dx++) {
         const tx = x + dx, ty = y + dy;
         if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+        if (dist(tx + 0.5, ty + 0.5, x + 1, y + 1) > 2.7) continue;
+        if (dx >= 0 && dx <= 1 && dy >= 0 && dy <= 1) continue; // footprint
         fert += orig[ty * w + tx];
       }
       let danger = 0;
@@ -214,14 +217,14 @@ function attack(game, S, setts, mine, ai, diff) {
       // starving offensive: retreat home
       const home = setts[0];
       S.opPillage(game, army, false);
-      S.opMove(game, army, home.x + 1.5, home.y + 0.5, false);
+      S.opMove(game, army, home.x + 2.5, home.y + 1, false);
       ai.armyId = null; ai.attacking = false;
       return;
     }
     if (!army.order) {
       // arrived / target gone — pick the next known target or head home
       const t = nearestKnown(ai, army.x, army.y, game);
-      if (t) S.opMove(game, army, t.x + 0.5, t.y + 0.5, true);
+      if (t) S.opMove(game, army, t.x + 1, t.y + 1, true);
       else { ai.attacking = false; ai.armyId = null; }
     }
     return;
@@ -236,7 +239,7 @@ function attack(game, S, setts, mine, ai, diff) {
   const army = candidates[0];
   const t = nearestKnown(ai, army.x, army.y, game);
   if (!t) return; // scouts haven't found the player yet
-  if (!S.opMove(game, army, t.x + 0.5, t.y + 0.5, true).ok) return;
+  if (!S.opMove(game, army, t.x + 1, t.y + 1, true).ok) return;
   ai.armyId = army.id;
   ai.attacking = true;
   ai.lastAttack = game.tick;
@@ -275,11 +278,11 @@ function defend(game, S, setts, mine, ai) {
   let best = null, bd = Infinity;
   for (const b of mine) {
     if (b.count.deploy < 4) continue;
-    const d = dist(b.x, b.y, hit.x, hit.y);
+    const d = dist(b.x, b.y, hit.x + 1, hit.y + 1);
     if (d < bd) { bd = d; best = b; }
   }
   if (best && bd > 3) {
-    S.opMove(game, best, hit.x + 0.5, hit.y + 0.5, true);
+    S.opMove(game, best, hit.x + 1, hit.y + 1, true);
     if (best.id === ai.armyId) { ai.armyId = null; ai.attacking = false; }
   }
 }
