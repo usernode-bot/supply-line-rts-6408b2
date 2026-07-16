@@ -179,6 +179,17 @@
     </div>
   </div>
 
+  <!-- ============ In-app confirm dialog ============ -->
+  <!-- Native confirm() is blocked inside the sandboxed platform iframe, so all
+       confirmations go through this tap-first modal instead. -->
+  <div id="confirm-modal" class="hidden fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+    <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-5 max-w-sm w-full">
+      <h2 id="confirm-title" class="text-lg font-bold mb-1"></h2>
+      <p id="confirm-text" class="text-zinc-400 text-sm mb-4"></p>
+      <div id="confirm-actions" class="flex flex-col gap-2"></div>
+    </div>
+  </div>
+
   <!-- ============ End-of-match modal ============ -->
   <div id="end-modal" class="hidden fixed inset-0 z-40 bg-black/70 flex items-center justify-center p-4">
     <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 max-w-sm w-full text-center">
