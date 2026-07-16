@@ -16,7 +16,7 @@ let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1;
 let paused = false;
-let ui = { selected: null, pending: null, splitCount: null, orderTarget: null };
+let ui = { selected: null, pending: null, splitCount: null, orderTarget: null, fieldCounts: {} };
 let renderer = null, input = null;
 let lastFrame = 0, acc = 0, lastSaveTick = 0, lastPanel = 0;
 let resultPosted = false;
@@ -67,7 +67,8 @@ function loadSaveData() {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    if (data.v !== 1 || data.result) return null;
+    // v1 saves predate per-unit health and are not migratable — discard
+    if (data.v !== 2 || data.result) return null;
     return data;
   } catch { return null; }
 }
@@ -113,7 +114,7 @@ function showMenuError(msg) {
 function startMatch(g) {
   game = g;
   resultPosted = false;
-  ui = { selected: null, pending: null, splitCount: null, orderTarget: null };
+  ui = { selected: null, pending: null, splitCount: null, orderTarget: null, fieldCounts: {} };
   hideOrderPopup();
   acc = 0; speed = 1; paused = false; lastSaveTick = g.tick;
   $('btn-speed').textContent = '1×';
@@ -235,6 +236,18 @@ function onTap(world, pointerType, screen) {
   if (st && st.owner === 0) { ui.selected = { kind: 'settlement', id: st.id }; renderPanel(true); return; }
   // tap elsewhere with blobs selected → inline order popup at the tap point
   if (selectedBlobs().length > 0) { showOrderPopup(world, screen); return; }
+  // nothing selected → inspect what was tapped
+  if (st && st.owner !== 0 && (S.isVisible(game, st.x + 0.5, st.y + 0.5) || game.known[st.id])) {
+    ui.selected = { kind: 'enemy-settlement', id: st.id };
+    renderPanel(true);
+    return;
+  }
+  const tx = Math.floor(world.x), ty = Math.floor(world.y);
+  if (tx >= 0 && ty >= 0 && tx < game.map.w && ty < game.map.h && game.fog[ty * game.map.w + tx] >= 1) {
+    ui.selected = { kind: 'tile', i: ty * game.map.w + tx };
+    renderPanel(true);
+    return;
+  }
   ui.selected = null;
   renderPanel(true);
 }
@@ -385,12 +398,13 @@ panel.addEventListener('click', (e) => {
   switch (act) {
     case 'role': {
       const role = btn.dataset.role;
-      let err = null, okCount = 0;
+      let err = null, okCount = 0, partial = false;
       for (const b of blobs) {
         const res = S.opSetRole(game, b, role);
-        if (res.err) err = res.err; else okCount++;
+        if (res.err) err = res.err; else { okCount++; if (res.partial) partial = true; }
       }
       if (err && !okCount) toast(err);
+      else if (partial) toast(`Farm at capacity (${S.C.FARM_CAP}) — some units stayed behind`);
       break;
     }
     case 'move': ui.pending = 'move'; updateHint(); break;
@@ -431,6 +445,27 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'grole': if (st) { r = S.opGarrisonRole(game, st, btn.dataset.role); if (r.err) toast(r.err); } break;
+    case 'fieldn': {
+      if (st) {
+        const role = btn.dataset.role;
+        const n = Math.max(1, Math.min(st.garrison[role], ui.fieldCounts[role] || 1));
+        r = S.opFieldRole(game, st, role, n);
+        if (r.err) toast(r.err);
+      }
+      break;
+    }
+    case 'recall': {
+      if (st) {
+        let c = 0;
+        for (const b of [...game.blobs]) {
+          if (!b.dead && b.owner === 0 && b.working === st.id) {
+            if (S.opMove(game, b, st.x + 0.5, st.y + 0.5, false).ok) c++;
+          }
+        }
+        toast(c ? `🏠 Recalling ${c} farmer${c === 1 ? '' : 's'}` : 'No farmers working the fields');
+      }
+      break;
+    }
   }
   renderPanel(true);
 });
@@ -440,6 +475,12 @@ panel.addEventListener('input', (e) => {
     ui.splitCount = Math.max(1, e.target.value | 0);
     const lbl = $('split-label');
     if (lbl) lbl.textContent = `${ui.splitCount} / ${(e.target.max | 0) + 1}`;
+  } else if (e.target.id && e.target.id.startsWith('field-count-')) {
+    const role = e.target.id.slice('field-count-'.length);
+    const v = Math.max(1, e.target.value | 0);
+    ui.fieldCounts[role] = v;
+    const btn = $(`field-btn-${role}`);
+    if (btn) btn.textContent = `Field ${v}`;
   }
 });
 
@@ -457,6 +498,52 @@ function setPanelHTML(html) {
 function renderPanel(force) {
   if (!game) { panel.classList.add('hidden'); lastPanelHTML = ''; return; }
   if (!force && panelHeld) return;
+
+  // read-only inspection cards
+  if (ui.selected && ui.selected.kind === 'enemy-settlement') {
+    const est = game.settlements.find(s => s.id === ui.selected.id);
+    if (!est) { ui.selected = null; panel.classList.add('hidden'); lastPanelHTML = ''; return; }
+    panel.classList.remove('hidden');
+    if (S.isVisible(game, est.x + 0.5, est.y + 0.5)) {
+      const pct = Math.max(0, Math.min(100, Math.round(100 * est.hp / S.C.SETT_HP)));
+      setPanelHTML(`
+        <div class="flex items-center justify-between mb-1">
+          <span class="font-semibold text-red-300">🏠 Enemy settlement</span>
+          <span class="text-xs ${est.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-400'}">HP ${Math.ceil(est.hp)}/${S.C.SETT_HP}</span>
+        </div>
+        <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-red-500" style="width:${pct}%"></div></div>
+        <div class="text-xs text-zinc-400">${est.hp >= S.C.SETT_HP ? 'Walls intact.' : est.hp > S.C.SETT_HP / 2 ? 'Damaged.' : 'Heavily damaged!'} Attack-move deploy units onto it to lay siege.</div>`);
+    } else {
+      setPanelHTML(`
+        <div class="font-semibold text-red-300 mb-1">🏠 Enemy settlement <span class="text-zinc-500 font-normal">(last seen)</span></div>
+        <div class="text-xs text-zinc-400">Hidden in the fog — condition unknown. Send a scout to see its health.</div>`);
+    }
+    return;
+  }
+  if (ui.selected && ui.selected.kind === 'tile') {
+    const i = ui.selected.i;
+    panel.classList.remove('hidden');
+    if (game.map.mountain[i]) {
+      setPanelHTML(`
+        <div class="font-semibold mb-1">⛰️ Mountain</div>
+        <div class="text-xs text-zinc-400">Impassable terrain. Nothing grows here.</div>`);
+    } else {
+      const f = game.map.fert[i], o = game.map.orig[i];
+      const pct = Math.round(f * 100), opct = Math.round(o * 100);
+      const label = f >= 0.75 ? 'Lush' : f >= 0.5 ? 'Fertile' : f >= 0.25 ? 'Poor' : 'Barren';
+      const tb = game.tilledBy[i] ? game.settlements.find(s => s.id === game.tilledBy[i]) : null;
+      setPanelHTML(`
+        <div class="flex items-center justify-between mb-1">
+          <span class="font-semibold">🟩 ${label} land</span>
+          <span class="text-xs text-zinc-400">Fertility <b class="text-emerald-300">${pct}%</b>${pct < opct ? ` <span class="text-zinc-500">of ${opct}%</span>` : ''}</span>
+        </div>
+        <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-emerald-500" style="width:${pct}%"></div></div>
+        ${tb ? `<div class="text-xs ${tb.owner === 0 ? 'text-amber-300' : 'text-red-400'} mb-1">🌾 ${tb.owner === 0 ? 'Farmland of your settlement' : 'Enemy farmland'}</div>` : ''}
+        ${game.pillaged.has(i) ? '<div class="text-xs text-orange-400">🔥 Scorched — recovering very slowly</div>' : ''}`);
+    }
+    return;
+  }
+
   const blobs = selectedBlobs();
   const st = selectedSettlement();
   if (!blobs.length && !st) {
@@ -471,12 +558,30 @@ function renderPanel(force) {
   if (st) {
     const g = st.garrison;
     const gTot = S.garrisonTotal(st);
+    const wc = S.workingCount(game, st);
     const pct = Math.round(100 * st.trainTicks / S.C.TRAIN_TICKS);
-    const prog = st.mode === 'farm'
-      ? (st.garrison.farm >= S.C.FARM_CAP
-        ? `<div class="text-xs text-zinc-500 mt-1">Farmer cap reached (${S.C.FARM_CAP})</div>`
-        : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% ${st.stockpile < S.C.FARM_GROW_FLOOR ? `<span class="text-red-400">(needs ${S.C.FARM_GROW_FLOOR} food)</span>` : ''}</div>`)
-      : `<div class="text-xs text-zinc-400 mt-1">Training ${st.mode === 'supply' ? 'supply' : 'deploy'} unit: ${pct}% ${st.stockpile < S.C.TRAIN_COST ? '<span class="text-red-400">(needs food)</span>' : ''}</div>`;
+    let prog;
+    if (st.mode === 'off') {
+      prog = '<div class="text-xs text-zinc-500 mt-1">⏹ Production stopped — stockpiling food.</div>';
+    } else if (st.mode === 'farm') {
+      const hungry = st.stockpile < S.C.FARM_GROW_FLOOR ? `<span class="text-red-400">(needs ${S.C.FARM_GROW_FLOOR} food)</span>` : '';
+      prog = wc >= S.C.FARM_CAP
+        ? `<div class="text-xs text-zinc-400 mt-1">Farmer cap reached — training ⚔️ deploy unit: ${pct}% ${hungry}</div>`
+        : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% ${hungry}</div>`;
+    } else {
+      prog = `<div class="text-xs text-zinc-400 mt-1">Training ${st.mode === 'supply' ? 'supply' : 'deploy'} unit: ${pct}% ${st.stockpile < S.C.TRAIN_COST ? '<span class="text-red-400">(needs food)</span>' : ''}</div>`;
+    }
+    const fieldRows = ['deploy', 'supply', 'farm'].filter(role => g[role] >= 1).map(role => {
+      const max = g[role];
+      const cur = Math.max(1, Math.min(max, ui.fieldCounts[role] || Math.max(1, Math.floor(max / 2))));
+      ui.fieldCounts[role] = cur;
+      const icon = role === 'deploy' ? '⚔️' : role === 'supply' ? '🚚' : '🌱';
+      return `<div class="flex items-center gap-2 mb-1">
+        <span class="text-xs w-5 text-center">${icon}</span>
+        <input id="field-count-${role}" type="range" min="1" max="${max}" step="1" value="${cur}" class="flex-1">
+        <button data-act="fieldn" data-role="${role}" id="field-btn-${role}" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Field ${cur}</button>
+      </div>`;
+    }).join('');
     setPanelHTML(`
       <div class="flex items-center justify-between mb-1">
         <span class="font-semibold">🏠 Settlement</span>
@@ -485,17 +590,22 @@ function renderPanel(force) {
       <div class="text-xs text-zinc-400 mb-2">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾</div>
       <div class="text-xs text-zinc-500 mb-1">Production mode (sets new units' role)</div>
       <div class="flex gap-1 mb-2">
-        ${['farm', 'supply', 'deploy'].map(m => `<button data-act="mode" data-mode="${m}"
-          class="btn-sm flex-1 px-2 rounded ${st.mode === m ? 'bg-emerald-700 text-white' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}">${m === 'farm' ? '🌾 Farm' : m === 'supply' ? '🚚 Supply' : '⚔️ Deploy'}</button>`).join('')}
+        ${[['farm', '🌾 Farm'], ['supply', '🚚 Supply'], ['deploy', '⚔️ Deploy'], ['off', '⏹ Stop']].map(([m, lbl]) => `<button data-act="mode" data-mode="${m}"
+          class="btn-sm flex-1 px-1 rounded ${st.mode === m ? (m === 'off' ? 'bg-zinc-600 text-white' : 'bg-emerald-700 text-white') : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}">${lbl}</button>`).join('')}
       </div>
       ${prog}
+      <div class="mt-2 pt-2 border-t border-zinc-800 flex items-center justify-between">
+        <span class="text-xs text-zinc-500">🌱 ${wc}/${S.C.FARM_CAP} farmers working the fields</span>
+        ${wc > 0 ? '<button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall farmers</button>' : ''}
+      </div>
       <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}</div>
         ${gTot > 0 ? `
           <div class="flex gap-1 mb-2">
             ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
           </div>
-          <button data-act="field" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600">Field garrison (${gTot})</button>
+          ${fieldRows}
+          <button data-act="field" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>
         `.replaceAll('data-act="role"', 'data-act="grole"') : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the settlement.</div>'}
       </div>`);
     return;
@@ -514,6 +624,9 @@ function renderPanel(force) {
   const atHome = blobs.some(b => S.isAtHome(game, b));
   const fedColor = meter >= 0.75 ? 'text-emerald-400' : meter >= 0.5 ? 'text-lime-400' : meter >= 0.25 ? 'text-amber-400' : 'text-red-400';
   const onRoute = !multi && b0.order && b0.order.type === 'route';
+  const hpSum = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + u.hp, 0), 0);
+  const hpPct = Math.round(100 * hpSum / Math.max(1, tot * S.C.UNIT_HP));
+  const hpColor = hpPct >= 75 ? 'text-emerald-400' : hpPct >= 40 ? 'text-amber-400' : 'text-red-400';
   if (!multi && tot >= 2) {
     ui.splitCount = Math.max(1, Math.min(tot - 1, ui.splitCount || Math.floor(tot / 2)));
   }
@@ -521,9 +634,9 @@ function renderPanel(force) {
   setPanelHTML(`
     <div class="flex items-center justify-between mb-1">
       <span class="font-semibold">${multi ? `${blobs.length} blobs` : 'Blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
-      <span class="text-xs ${fedColor}">${S.fedLabel(meter)} · ${Math.round(meter * 100)}%</span>
+      <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span></span>
     </div>
-    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ' · <span class="text-sky-300">on supply route</span>' : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}</div>
+    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ' · <span class="text-sky-300">on supply route</span>' : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
     <div class="text-xs text-zinc-500 mb-1">Role ${!atHome ? '<span class="text-zinc-600">(farmers need a settlement)</span>' : ''}</div>
     <div class="flex gap-1 mb-2">
       ${roleBtn('deploy', '⚔️ Deploy', cnt.deploy === tot, false)}

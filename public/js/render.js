@@ -177,29 +177,22 @@ export function createRenderer(canvas, minimap) {
     // ghost settlements (remembered but not visible)
     for (const [id, k] of Object.entries(game.known)) {
       if (S.isVisible(game, k.x + 0.5, k.y + 0.5)) continue;
-      drawSettlement(game, { x: k.x, y: k.y, owner: 1, hp: S.C.SETT_HP }, wx, wy, s, true, false);
+      const gsel = ui.selected && ui.selected.kind === 'enemy-settlement' && ui.selected.id === +id;
+      drawSettlement(game, { x: k.x, y: k.y, owner: 1, hp: S.C.SETT_HP }, wx, wy, s, true, gsel);
     }
 
     // settlements
     for (const st of game.settlements) {
       if (st.owner === 1 && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
-      const sel = ui.selected && ui.selected.kind === 'settlement' && ui.selected.id === st.id;
+      const sel = ui.selected && (ui.selected.kind === 'settlement' || ui.selected.kind === 'enemy-settlement') && ui.selected.id === st.id;
       drawSettlement(game, st, wx, wy, s, false, sel);
-    }
-
-    // garrisoned farmers working the tilled land around their settlement
-    if (s >= 8) {
-      for (const st of game.settlements) {
-        if (st.garrison.farm <= 0 || !st.tilled || !st.tilled.length) continue;
-        if (st.owner === 1 && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
-        drawFarmers(game, st, wx, wy, s, alpha);
-      }
     }
 
     // blobs
     for (const b of game.blobs) {
       if (b.dead) continue;
       if (b.owner === 1 && !S.isVisible(game, b.x, b.y)) continue;
+      if (b.working != null) { drawWorkingFarmer(game, b, wx, wy, s, alpha, ui); continue; }
       const r = Math.max(10, S.blobRadius(b) * s);
       const px = wx(bx(b)), py = wy(by(b));
       const isSupply = b.count.supply > 0 && b.count.deploy === 0 && b.count.farm === 0;
@@ -278,32 +271,51 @@ export function createRenderer(canvas, minimap) {
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(fogCanvas, ox, oy, game.map.w * s, game.map.h * s);
 
+    // inspected-tile outline (above fog so it stays crisp)
+    if (ui.selected && ui.selected.kind === 'tile') {
+      const ti = ui.selected.i;
+      const tx = ti % game.map.w, ty = (ti / game.map.w) | 0;
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(wx(tx) + 1, wy(ty) + 1, s - 2, s - 2);
+    }
+
     drawMinimap(game, view);
   }
 
-  function drawFarmers(game, st, wx, wy, s, alpha) {
-    const w = game.map.w;
-    const n = Math.min(st.garrison.farm, st.tilled.length);
+  // Working farmers are real 1-unit blobs standing in the fields — drawn
+  // as the little farmer figure, but selectable and attackable.
+  function drawWorkingFarmer(game, b, wx, wy, s, alpha, ui) {
     const t = game.tick + alpha;
-    for (let k = 0; k < n; k++) {
-      const i = st.tilled[(k * 7 + st.id) % st.tilled.length];
-      const h = (i * 31 + k * 137 + st.id * 17) >>> 0;
-      const cx = (i % w) + 0.22 + 0.56 * ((h % 13) / 13);
-      const cy = ((i / w) | 0) + 0.22 + 0.56 * (((h >> 4) % 13) / 13);
-      const bob = Math.abs(Math.sin(t * 0.14 + k * 1.7)) * 0.1;
-      const px = wx(cx), py = wy(cy - bob);
-      const r = Math.max(1.5, s * 0.12);
-      // body
+    const bob = Math.abs(Math.sin(t * 0.14 + (b.id % 7) * 1.7)) * 0.1;
+    const px = wx(b.x), py = wy(b.y - bob);
+    const r = Math.max(2, s * 0.13);
+    // taking-damage flash
+    if (game.tick - b.engagedT < 3) {
+      const pulse = 0.55 + 0.45 * Math.sin(t * 2.2);
       ctx.beginPath();
-      ctx.arc(px, py, r, 0, Math.PI * 2);
-      ctx.fillStyle = st.owner === 0 ? '#166534' : '#7f1d1d';
-      ctx.fill();
-      // head
-      ctx.beginPath();
-      ctx.arc(px, py - r * 1.1, r * 0.55, 0, Math.PI * 2);
-      ctx.fillStyle = st.owner === 0 ? '#86efac' : '#fca5a5';
-      ctx.fill();
+      ctx.arc(px, py - r * 0.5, r * 2.4, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(248,113,113,${pulse.toFixed(2)})`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
     }
+    if (ui.selected && ui.selected.kind === 'blob' && ui.selected.id === b.id) {
+      ctx.beginPath();
+      ctx.arc(px, py - r * 0.5, r * 2.2, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    // body
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.fillStyle = b.owner === 0 ? '#166534' : '#7f1d1d';
+    ctx.fill();
+    // head
+    ctx.beginPath();
+    ctx.arc(px, py - r * 1.1, r * 0.55, 0, Math.PI * 2);
+    ctx.fillStyle = b.owner === 0 ? '#86efac' : '#fca5a5';
+    ctx.fill();
   }
 
   function drawSettlement(game, st, wx, wy, s, ghost, sel) {
