@@ -231,6 +231,7 @@ function onTap(world, pointerType, screen) {
   if (!orderPopup.classList.contains('hidden')) { hideOrderPopup(); return; }
   // prefer own blob, then own settlement
   let b = S.blobAt(game, world.x, world.y, hitR);
+  const eb = b && b.owner !== 0 ? b : null;
   if (b && b.owner !== 0) b = null;
   if (b) { ui.selected = { kind: 'blob', id: b.id }; renderPanel(true); return; }
   const st = S.settlementAt(game, world.x, world.y, Math.max(1.4, hitR));
@@ -238,6 +239,11 @@ function onTap(world, pointerType, screen) {
   // tap elsewhere with blobs selected → inline order popup at the tap point
   if (selectedBlobs().length > 0) { showOrderPopup(world, screen); return; }
   // nothing selected → inspect what was tapped
+  if (eb && S.isVisible(game, eb.x, eb.y)) {
+    ui.selected = { kind: 'enemy-blob', id: eb.id };
+    renderPanel(true);
+    return;
+  }
   if (st && st.owner !== 0 && (S.isVisible(game, st.x + 0.5, st.y + 0.5) || game.known[st.id])) {
     ui.selected = { kind: 'enemy-settlement', id: st.id };
     renderPanel(true);
@@ -501,6 +507,25 @@ function renderPanel(force) {
   if (!force && panelHeld) return;
 
   // read-only inspection cards
+  if (ui.selected && ui.selected.kind === 'enemy-blob') {
+    const eb = game.blobs.find(b => b.id === ui.selected.id && !b.dead);
+    if (!eb || !S.isVisible(game, eb.x, eb.y)) {
+      ui.selected = null; panel.classList.add('hidden'); lastPanelHTML = ''; return;
+    }
+    panel.classList.remove('hidden');
+    const tot = S.total(eb);
+    const c = eb.count;
+    const hpPct = Math.round(100 * S.blobHealth(eb));
+    const hpColor = hpPct >= 75 ? 'text-emerald-400' : hpPct >= 40 ? 'text-amber-400' : 'text-red-400';
+    setPanelHTML(`
+      <div class="flex items-center justify-between mb-1">
+        <span class="font-semibold text-red-300">${eb.working != null ? '🌱 Enemy farmer' : '👥 Enemy blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
+        <span class="text-xs ${hpColor}">❤️ ${hpPct}%</span>
+      </div>
+      <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-red-500" style="width:${hpPct}%"></div></div>
+      <div class="text-xs text-zinc-400">⚔️ ${c.deploy} deploy · 🚚 ${c.supply} supply · 🌱 ${c.farm} farmer${eb.pillaging ? ' · <span class="text-orange-400">pillaging</span>' : ''}${eb.working != null ? ' · working the fields' : ''}</div>`);
+    return;
+  }
   if (ui.selected && ui.selected.kind === 'enemy-settlement') {
     const est = game.settlements.find(s => s.id === ui.selected.id);
     if (!est) { ui.selected = null; panel.classList.add('hidden'); lastPanelHTML = ''; return; }
