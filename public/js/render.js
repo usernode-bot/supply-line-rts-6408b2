@@ -346,6 +346,111 @@ export function createRenderer(canvas, minimap) {
       ctx.stroke();
     }
 
+    // combat links: chase/targeting lines while attack-movers close in,
+    // ⚔️ markers on engaged pairs, siege lines onto settlements. Drawn
+    // above the unit circles, below damage numbers and fog. Fog rule is
+    // per-entity, same as when drawing the entities themselves — a link
+    // never reveals a fogged unit.
+    {
+      const blobById = new Map();
+      for (const b of game.blobs) if (!b.dead) blobById.set(b.id, b);
+      const settById = new Map();
+      for (const st of game.settlements) settById.set(st.id, st);
+      const blobSeen = b => b.owner !== 1 || S.isVisible(game, b.x, b.y);
+      const settSeen = st => st.owner !== 1 || S.isVisible(game, st.x + 0.5, st.y + 0.5);
+      const blobPxR = b => b.working != null ? Math.max(2, s * 0.13) * 2 : Math.max(10, S.blobRadius(b) * s);
+      const pulse = 0.55 + 0.45 * Math.sin((game.tick + alpha) * 2.2);
+      const arrowAt = (x, y, ang, size) => {
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x - Math.cos(ang - 0.45) * size, y - Math.sin(ang - 0.45) * size);
+        ctx.lineTo(x - Math.cos(ang + 0.45) * size, y - Math.sin(ang + 0.45) * size);
+        ctx.closePath();
+        ctx.fill();
+      };
+
+      // chase/targeting: attack-movers locked onto an enemy, not yet in contact
+      const arrows = [], reticles = [];
+      ctx.strokeStyle = 'rgba(248,113,113,0.8)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([2, 4]);
+      ctx.beginPath();
+      for (const b of game.blobs) {
+        if (b.dead || !b.order || b.order.type !== 'attack' || b.chaseId == null) continue;
+        const t = blobById.get(b.chaseId);
+        if (!t || !blobSeen(b) || !blobSeen(t)) continue;
+        if (Math.hypot(t.x - b.x, t.y - b.y) <= S.blobRadius(b) + S.blobRadius(t) + 0.2) continue;
+        const x1 = wx(bx(b)), y1 = wy(by(b)), x2 = wx(bx(t)), y2 = wy(by(t));
+        const ang = Math.atan2(y2 - y1, x2 - x1);
+        const r1 = blobPxR(b), r2 = blobPxR(t);
+        const ex = x2 - Math.cos(ang) * (r2 + 2), ey = y2 - Math.sin(ang) * (r2 + 2);
+        ctx.moveTo(x1 + Math.cos(ang) * r1, y1 + Math.sin(ang) * r1);
+        ctx.lineTo(ex, ey);
+        arrows.push([ex, ey, ang]);
+        reticles.push([x2, y2, r2 + 5]);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(248,113,113,0.8)';
+      for (const [ax, ay, ang] of arrows) arrowAt(ax, ay, ang, 5);
+      // corner-bracket reticle on each chased target
+      ctx.strokeStyle = 'rgba(248,113,113,0.7)';
+      ctx.beginPath();
+      for (const [cx2, cy2, rr] of reticles) {
+        for (let q = 0; q < 4; q++) {
+          const a0 = q * Math.PI / 2 + Math.PI / 4 - 0.35;
+          ctx.moveTo(cx2 + Math.cos(a0) * rr, cy2 + Math.sin(a0) * rr);
+          ctx.arc(cx2, cy2, rr, a0, a0 + 0.7);
+        }
+      }
+      ctx.stroke();
+
+      // engaged blob pairs: bright pulsing link + ⚔️ at the midpoint
+      const swords = [];
+      ctx.strokeStyle = `rgba(248,113,113,${pulse.toFixed(2)})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (const l of game.combat || []) {
+        if (l.kind !== 'bb') continue;
+        const a = blobById.get(l.a), b = blobById.get(l.b);
+        if (!a || !b || !blobSeen(a) || !blobSeen(b)) continue;
+        const x1 = wx(bx(a)), y1 = wy(by(a)), x2 = wx(bx(b)), y2 = wy(by(b));
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        swords.push([(x1 + x2) / 2, (y1 + y2) / 2]);
+      }
+      ctx.stroke();
+      if (swords.length) {
+        ctx.globalAlpha = pulse;
+        ctx.font = `${Math.max(11, s * 0.7)}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        for (const [mx, my] of swords) ctx.fillText('⚔️', mx, my);
+        ctx.globalAlpha = 1;
+      }
+
+      // sieges: solid line from attacker edge to the settlement's box edge
+      const half = Math.max(8, 0.85 * s);
+      ctx.strokeStyle = 'rgba(248,113,113,0.85)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      arrows.length = 0;
+      for (const l of game.combat || []) {
+        if (l.kind !== 'bs') continue;
+        const b = blobById.get(l.b), st = settById.get(l.s);
+        if (!b || !st || !blobSeen(b) || !settSeen(st)) continue;
+        const x1 = wx(bx(b)), y1 = wy(by(b)), x2 = wx(st.x + 0.5), y2 = wy(st.y + 0.5);
+        const ang = Math.atan2(y2 - y1, x2 - x1);
+        const ex = x2 - Math.cos(ang) * (half + 3), ey = y2 - Math.sin(ang) * (half + 3);
+        ctx.moveTo(x1 + Math.cos(ang) * blobPxR(b), y1 + Math.sin(ang) * blobPxR(b));
+        ctx.lineTo(ex, ey);
+        arrows.push([ex, ey, ang]);
+      }
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(248,113,113,0.85)';
+      for (const [ax, ay, ang] of arrows) arrowAt(ax, ay, ang, 6);
+    }
+
     // floating damage numbers
     if (game.fx && game.fx.length) {
       ctx.textAlign = 'center';
