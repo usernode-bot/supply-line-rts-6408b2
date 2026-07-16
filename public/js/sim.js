@@ -578,13 +578,22 @@ function ensurePath(game, b, x, y) {
 function pathBlocked(game, b) {
   if (!b.path) return false;
   const blocked = blockedTiles(game, b.owner);
+  const w = game.map.w;
   const fog = pathFog(game, b.owner);
-  const n = Math.min(2, b.path.length);
+  // a mountain the mover knows about: the player (or pvp side) sees explored
+  // terrain only; the AI is omniscient (its paths never contain one anyway)
+  const knownMountain = ti => game.map.mountain[ti] && (!fog || fog[ti] > 0);
+  let px = Math.floor(b.x), py = Math.floor(b.y);
+  const n = Math.min(3, b.path.length);
   for (let i = 0; i < n; i++) {
     const wp = b.path[i];
-    const ti = Math.floor(wp.y) * game.map.w + Math.floor(wp.x);
+    const x = Math.floor(wp.x), y = Math.floor(wp.y);
+    const ti = y * w + x;
     if (blocked.has(ti)) return true;
-    if (fog && fog[ti] > 0 && game.map.mountain[ti]) return true;
+    if (knownMountain(ti)) return true;
+    // diagonal step that would cut past a revealed mountain corner
+    if (x !== px && y !== py && (knownMountain(py * w + x) || knownMountain(y * w + px))) return true;
+    px = x; py = y;
   }
   return false;
 }
@@ -595,9 +604,11 @@ function moveBlob(game, b) {
   let remaining = blobSpeed(b) * C.DT;
   while (remaining > 0 && b.path.length) {
     const wp = b.path[0];
-    // never step onto a known enemy settlement tile; stall and let the
-    // pathBlocked replan route around it next tick
-    if (blocked.has(Math.floor(wp.y) * game.map.w + Math.floor(wp.x))) return false;
+    // never step onto a known enemy settlement tile or any mountain tile
+    // (mountains are static — no unit may ever occupy one, fog or not);
+    // stall and let the pathBlocked replan route around it next tick
+    const wi = Math.floor(wp.y) * game.map.w + Math.floor(wp.x);
+    if (blocked.has(wi) || game.map.mountain[wi]) return false;
     const d = dist(b.x, b.y, wp.x, wp.y);
     if (d <= remaining) {
       b.x = wp.x; b.y = wp.y;
@@ -670,6 +681,16 @@ function targetPos(tgt, kind) {
   return kind === 'blob' ? { x: tgt.x, y: tgt.y } : { x: tgt.x + 0.5, y: tgt.y + 0.5 };
 }
 
+// No way through to this leg's destination (revealed mountains walled it
+// off) — release the carrier instead of pacing at the wall forever. It
+// keeps as much of its cargo as it can carry as its own food.
+function releaseBlockedCarrier(game, b, route) {
+  b.food = Math.min(foodCap(b), b.food + (b.order.cargo || 0));
+  SUP.removeCarrier(game, route, b.id);
+  b.order = null;
+  game.events.push({ msg: '⛰️ Supply route blocked', x: b.x, y: b.y });
+}
+
 function tickCarrier(game, b) {
   const o = b.order;
   const route = SUP.findRoute(game, o.routeId);
@@ -702,7 +723,7 @@ function tickCarrier(game, b) {
     if (dist(b.x, b.y, tp.x, tp.y) <= 2.0) { o.phase = 'unload'; b.path = null; return; }
     const stale = b.pathGoal && dist(b.pathGoal.x, b.pathGoal.y, tp.x, tp.y) > 2.5;
     if (!b.path || !b.path.length || (stale && game.tick % 20 === 0)) {
-      if (!ensurePath(game, b, tp.x, tp.y)) return;
+      if (!ensurePath(game, b, tp.x, tp.y)) { releaseBlockedCarrier(game, b, route); return; }
     }
     moveBlob(game, b);
   } else if (o.phase === 'unload') {
@@ -725,7 +746,9 @@ function tickCarrier(game, b) {
     if (o.cargo <= 0.01 || taken <= 0.001) { o.phase = 'return'; b.path = null; }
   } else { // return
     if (dist(b.x, b.y, src.x + 0.5, src.y + 0.5) <= 2.2) { o.phase = 'load'; o.wait = 0; b.path = null; return; }
-    if (!b.path || !b.path.length) { if (!ensurePath(game, b, src.x, src.y)) return; }
+    if (!b.path || !b.path.length) {
+      if (!ensurePath(game, b, src.x, src.y)) { releaseBlockedCarrier(game, b, route); return; }
+    }
     moveBlob(game, b);
   }
 }
