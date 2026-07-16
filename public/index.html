@@ -87,6 +87,7 @@
       <span id="stat-units" class="text-zinc-300"></span>
       <span id="stat-setts" class="text-zinc-300"></span>
       <span id="stat-time" class="text-zinc-400 font-mono"></span>
+      <span id="stat-opp" class="hidden text-red-300 truncate max-w-[30vw]"></span>
       <span class="flex-1"></span>
       <button id="btn-pause" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">⏸</button>
       <button id="btn-speed" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700 font-mono">1×</button>
@@ -101,6 +102,12 @@
 
     <!-- toast -->
     <div id="toast" class="hidden absolute top-12 inset-x-0 mx-auto w-fit max-w-[90%] px-4 py-2 rounded-lg bg-zinc-800/95 text-zinc-100 text-sm shadow-lg z-30"></div>
+
+    <!-- multiplayer disconnect banner -->
+    <div id="mp-banner" class="hidden absolute top-24 inset-x-0 mx-auto w-fit max-w-[90%] px-4 py-2 rounded-lg bg-amber-900/95 text-amber-100 text-sm shadow-lg z-20 flex items-center gap-3">
+      <span id="mp-banner-text">Opponent connection lost — waiting…</span>
+      <button id="btn-claim" class="hidden btn-sm px-3 rounded bg-emerald-700 hover:bg-emerald-600 text-white">Claim victory</button>
+    </div>
 
     <!-- inline order popup (tap a blob, then tap a destination) -->
     <div id="order-popup" class="hidden absolute z-20 w-44 flex flex-col gap-1 p-1.5 rounded-xl bg-zinc-900/95 backdrop-blur border border-zinc-700 shadow-lg text-sm"></div>
@@ -150,6 +157,48 @@
           <input id="inp-seed" placeholder="random" class="bg-zinc-800 rounded px-3 py-2 w-36 text-zinc-100 placeholder-zinc-600">
         </label>
         <button id="btn-new" class="btn w-full py-3 rounded-xl bg-violet-600 hover:bg-violet-500 font-semibold text-lg">Start Match</button>
+      </div>
+
+      <div id="mp-section" class="bg-zinc-900 rounded-xl p-4 flex flex-col gap-3 border border-zinc-800">
+        <h2 class="font-semibold text-zinc-200">Multiplayer</h2>
+
+        <!-- incoming challenges (hidden container is always present) -->
+        <div id="challenge-inbox" class="flex flex-col gap-2"></div>
+
+        <button id="btn-mp-rejoin" class="hidden btn w-full py-3 rounded-xl bg-emerald-700 hover:bg-emerald-600 font-semibold">⚔️ Rejoin match</button>
+
+        <div id="mp-waiting" class="hidden bg-zinc-800/60 rounded-lg p-3 flex items-center justify-between gap-3">
+          <span class="flex items-center gap-2 text-sm text-zinc-300">
+            <span class="inline-block animate-pulse">⏳</span>
+            <span id="mp-waiting-text">Waiting for an opponent…</span>
+          </span>
+          <button id="btn-mp-cancel" class="btn-sm px-3 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200">Cancel</button>
+        </div>
+
+        <div id="mp-forms" class="flex flex-col gap-3">
+          <label class="flex items-center justify-between gap-2 text-zinc-300">Map size
+            <select id="mp-size" class="bg-zinc-800 rounded px-3 py-2 text-zinc-100">
+              <option value="small">Small</option>
+              <option value="medium" selected>Medium</option>
+              <option value="large">Large</option>
+            </select>
+          </label>
+          <button id="btn-mp-create" class="btn w-full py-3 rounded-xl bg-sky-700 hover:bg-sky-600 font-semibold">Create open lobby</button>
+
+          <div class="relative">
+            <div class="flex gap-2">
+              <input id="challenge-input" placeholder="Challenge a username…" autocomplete="off"
+                class="bg-zinc-800 rounded px-3 py-2 flex-1 min-w-0 text-zinc-100 placeholder-zinc-600">
+              <button id="btn-mp-challenge" class="btn px-4 rounded-xl bg-violet-600 hover:bg-violet-500 font-semibold">Challenge</button>
+            </div>
+            <div id="challenge-suggest" class="hidden absolute left-0 right-0 top-full mt-1 z-20 bg-zinc-800 border border-zinc-700 rounded-lg overflow-hidden shadow-lg"></div>
+          </div>
+
+          <div>
+            <h3 class="text-xs uppercase tracking-wide text-zinc-500 mb-1">Open lobbies</h3>
+            <div id="lobby-list" class="space-y-1 text-sm text-zinc-400">Loading…</div>
+          </div>
+        </div>
       </div>
 
       <details class="bg-zinc-900 rounded-xl border border-zinc-800">
