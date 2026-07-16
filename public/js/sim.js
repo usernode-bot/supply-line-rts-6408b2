@@ -35,6 +35,8 @@ export const C = {
   TERRITORY: 5,            // settlement territory radius: feeds friendly blobs, farmer reach, drawn ring
   UNIT_HP: 100,            // individual unit health (deploy / supply)
   UNIT_HP_FARM: 10,        // farmers are 1/10th as tough
+  SEP_PUSH: 1.2,           // max separation push speed, tiles/sec (= SPEED_DEPLOY)
+  SEP_SLACK: 0.03,         // minimum overlap before separation acts (damps jitter)
 };
 
 export const DIFF = {
@@ -646,6 +648,7 @@ export function step(game) {
     else tickOrder(game, b);
   }
 
+  tickSeparation(game);
   tickCombat(game);
   for (const b of game.blobs) if (!b.dead) tickFood(game, b);
   for (const s of [...game.settlements]) tickSettlement(game, s);
@@ -850,6 +853,85 @@ function tickCarrier(game, b) {
       if (!ensurePath(game, b, src.x, src.y)) { releaseBlockedCarrier(game, b, route); return; }
     }
     moveBlob(game, b);
+  }
+}
+
+// -- separation: soft push-apart so blobs never rest overlapped (#28).
+// Stateless per tick; runs after movement, before combat. Pairs whose
+// overlap is load-bearing are exempt: working farmers (one per tilled
+// cell by design), a carrier unloading onto its own route's target blob
+// (touching distance can exceed the 2.0 unload radius), and potentially
+// mergeable same-owner pairs (merge fires at ≤0.8, well inside touching).
+
+function sepExempt(game, a, b) {
+  if (a.working != null || b.working != null) return true;
+  const aRoute = a.order && a.order.type === 'route';
+  const bRoute = b.order && b.order.type === 'route';
+  if (aRoute) {
+    const r = SUP.findRoute(game, a.order.routeId);
+    if (r && r.targetKind === 'blob' && r.targetId === b.id) return true;
+  }
+  if (bRoute) {
+    const r = SUP.findRoute(game, b.order.routeId);
+    if (r && r.targetKind === 'blob' && r.targetId === a.id) return true;
+  }
+  return a.owner === b.owner && a.pillaging === b.pillaging
+    && !(a.noMerge && b.noMerge) && !aRoute && !bRoute;
+}
+
+function tickSeparation(game) {
+  const alive = game.blobs.filter(b => !b.dead);
+  if (alive.length < 2) return;
+  const push = new Map(); // blob -> accumulated displacement {x, y}
+  for (let i = 0; i < alive.length; i++) {
+    for (let j = i + 1; j < alive.length; j++) {
+      const a = alive[i], b = alive[j];
+      if (sepExempt(game, a, b)) continue;
+      const d = dist(a.x, a.y, b.x, b.y);
+      const ov = blobRadius(a) + blobRadius(b) - d;
+      if (ov <= C.SEP_SLACK) continue;
+      let nx, ny;
+      if (d < 0.001) {
+        // coincident centers: deterministic axis from the pair's ids
+        // (no Math.random(), so host/guest dead-reckoning stays aligned)
+        const ang = ((a.id * 31 + b.id * 131) % 1024) / 1024 * Math.PI * 2;
+        nx = Math.cos(ang); ny = Math.sin(ang);
+      } else {
+        nx = (a.x - b.x) / d; ny = (a.y - b.y) / d;
+      }
+      // mass-weighted: the heavier blob gives ground more slowly
+      const ma = total(a), mb = total(b);
+      const wa = mb / (ma + mb), wb = ma / (ma + mb);
+      const pa = push.get(a) || push.set(a, { x: 0, y: 0 }).get(a);
+      const pb = push.get(b) || push.set(b, { x: 0, y: 0 }).get(b);
+      pa.x += nx * ov * wa; pa.y += ny * ov * wa;
+      pb.x -= nx * ov * wb; pb.y -= ny * ov * wb;
+    }
+  }
+  if (!push.size) return;
+  const settOwner = new Map(); // settlement tile -> owner
+  for (const s of game.settlements) settOwner.set(s.y * game.map.w + s.x, s.owner);
+  const okTile = (b, x, y) => {
+    const tx = Math.floor(x), ty = Math.floor(y);
+    if (!passable(game.map, tx, ty)) return false;
+    const so = settOwner.get(ty * game.map.w + tx);
+    return so === undefined || so === b.owner;
+  };
+  const max = C.SEP_PUSH * C.DT;
+  for (const [b, v] of push) {
+    // final approach: an ordered blob one waypoint from its goal has
+    // right-of-way — it pushes others but is never pushed itself, so a
+    // squatter can't stall garrisoning / field walks / AI settle parties
+    if (b.order && (b.order.type === 'move' || b.order.type === 'attack')
+      && b.path && b.path.length <= 1) continue;
+    let vx = v.x, vy = v.y;
+    const m = Math.sqrt(vx * vx + vy * vy);
+    if (m < 1e-6) continue;
+    if (m > max) { vx = vx / m * max; vy = vy / m * max; }
+    if (okTile(b, b.x + vx, b.y + vy)) { b.x += vx; b.y += vy; }
+    else if (okTile(b, b.x + vx, b.y)) b.x += vx;
+    else if (okTile(b, b.x, b.y + vy)) b.y += vy;
+    // all three blocked (pinned against terrain): drop the push this tick
   }
 }
 
