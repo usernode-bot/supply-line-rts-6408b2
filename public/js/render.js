@@ -13,6 +13,13 @@ const FOG_T = 4;  // fog layer px per tile (tighter edge gradient)
 const OWNER_COLOR = ['#8b5cf6', '#ef4444'];
 const OWNER_DARK = ['#4c1d95', '#7f1d1d'];
 
+// Viewer-relative palette: on your own screen YOU are always violet and
+// the opponent red, whichever raw owner index you play in PvP.
+function viewer(game) { return game.me || 0; }
+function ownerColor(game, o) { return OWNER_COLOR[o === viewer(game) ? 0 : 1]; }
+function ownerDark(game, o) { return OWNER_DARK[o === viewer(game) ? 0 : 1]; }
+function knownOf(game) { return game.pvp ? game.knowns[viewer(game)] : game.known; }
+
 function lerp(a, b, t) { return a + (b - a) * t; }
 function mix(c1, c2, t) {
   return [lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t)];
@@ -167,7 +174,7 @@ export function createRenderer(canvas, minimap) {
       const tgt = SUP.routeTarget(game, r);
       if (!src || !tgt) continue;
       const tp = r.targetKind === 'blob' ? { x: bx(tgt), y: by(tgt) } : { x: tgt.x + 0.5, y: tgt.y + 0.5 };
-      if (r.owner === 1) {
+      if (r.owner !== viewer(game)) {
         const seen = S.isVisible(game, src.x, src.y) || S.isVisible(game, tp.x, tp.y);
         if (!seen) continue;
       }
@@ -175,7 +182,7 @@ export function createRenderer(canvas, minimap) {
       ctx.strokeStyle = health >= 0.9 ? 'rgba(74,222,128,0.8)'
         : health >= 0.5 ? 'rgba(251,191,36,0.8)' : 'rgba(248,113,113,0.85)';
       ctx.lineWidth = 2;
-      ctx.setLineDash(r.owner === 1 ? [6, 5] : [10, 4]);
+      ctx.setLineDash(r.owner !== viewer(game) ? [6, 5] : [10, 4]);
       ctx.beginPath();
       ctx.moveTo(wx(src.x + 0.5), wy(src.y + 0.5));
       ctx.lineTo(wx(tp.x), wy(tp.y));
@@ -195,12 +202,12 @@ export function createRenderer(canvas, minimap) {
     }
     ctx.lineWidth = 2;
     for (const st of game.settlements) {
-      if (st.owner === 1 && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
-      ctx.strokeStyle = OWNER_COLOR[st.owner];
+      if (st.owner !== viewer(game) && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
+      ctx.strokeStyle = ownerColor(game, st.owner);
       ctx.globalAlpha = 0.55;
       strokeTerritory(st.x, st.y);
     }
-    for (const k of Object.values(game.known)) {
+    for (const k of Object.values(knownOf(game))) {
       if (S.isVisible(game, k.x + 0.5, k.y + 0.5)) continue;
       ctx.strokeStyle = OWNER_COLOR[1];
       ctx.globalAlpha = 0.25;
@@ -222,17 +229,17 @@ export function createRenderer(canvas, minimap) {
     }
 
     // ghost settlements (remembered but not visible)
-    for (const [id, k] of Object.entries(game.known)) {
+    for (const [id, k] of Object.entries(knownOf(game))) {
       if (S.isVisible(game, k.x + 0.5, k.y + 0.5)) continue;
       const gsel = ui.selected && ui.selected.kind === 'enemy-settlement' && ui.selected.id === +id;
-      drawSettlement(game, { x: k.x, y: k.y, owner: 1, hp: S.C.SETT_HP }, wx, wy, s, true, gsel, 0);
+      drawSettlement(game, { x: k.x, y: k.y, owner: 1 - viewer(game), hp: S.C.SETT_HP }, wx, wy, s, true, gsel, 0);
     }
 
     // working farmers — drawn before settlements so they can never cover
     // the garrison readouts
     for (const b of game.blobs) {
       if (b.dead || b.working == null) continue;
-      if (b.owner === 1 && !S.isVisible(game, b.x, b.y)) continue;
+      if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
       drawWorkingFarmer(game, b, wx, wy, s, alpha, ui);
     }
 
@@ -242,7 +249,7 @@ export function createRenderer(canvas, minimap) {
       if (!b.dead && b.working != null) workingBy.set(b.working, (workingBy.get(b.working) || 0) + S.total(b));
     }
     for (const st of game.settlements) {
-      if (st.owner === 1 && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
+      if (st.owner !== viewer(game) && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
       const sel = ui.selected && (ui.selected.kind === 'settlement' || ui.selected.kind === 'enemy-settlement') && ui.selected.id === st.id;
       drawSettlement(game, st, wx, wy, s, false, sel, workingBy.get(st.id) || 0);
     }
@@ -250,13 +257,13 @@ export function createRenderer(canvas, minimap) {
     // blobs
     for (const b of game.blobs) {
       if (b.dead || b.working != null) continue;
-      if (b.owner === 1 && !S.isVisible(game, b.x, b.y)) continue;
+      if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
       const r = Math.max(10, S.blobRadius(b) * s);
       const px = wx(bx(b)), py = wy(by(b));
       const isSupply = b.count.supply > 0 && b.count.deploy === 0 && b.count.farm === 0;
       ctx.beginPath();
       ctx.arc(px, py, r, 0, Math.PI * 2);
-      ctx.fillStyle = OWNER_COLOR[b.owner];
+      ctx.fillStyle = ownerColor(game, b.owner);
       ctx.globalAlpha = isSupply ? 0.75 : 0.92;
       ctx.fill();
       ctx.globalAlpha = 1;
@@ -316,7 +323,7 @@ export function createRenderer(canvas, minimap) {
     // boundary around the group, faint interior grid lines.
     for (const b of game.blobs) {
       if (b.dead || !b.pillaging) continue;
-      if (b.owner === 1 && !S.isVisible(game, b.x, b.y)) continue;
+      if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
       const cells = S.pillageCells(game, b);
       const set = new Set(cells);
       const w = game.map.w;
@@ -398,12 +405,12 @@ export function createRenderer(canvas, minimap) {
     // body
     ctx.beginPath();
     ctx.arc(px, py, r, 0, Math.PI * 2);
-    ctx.fillStyle = b.owner === 0 ? '#166534' : '#7f1d1d';
+    ctx.fillStyle = b.owner === viewer(game) ? '#166534' : '#7f1d1d';
     ctx.fill();
     // head
     ctx.beginPath();
     ctx.arc(px, py - r * 1.1, r * 0.55, 0, Math.PI * 2);
-    ctx.fillStyle = b.owner === 0 ? '#86efac' : '#fca5a5';
+    ctx.fillStyle = b.owner === viewer(game) ? '#86efac' : '#fca5a5';
     ctx.fill();
   }
 
@@ -412,8 +419,8 @@ export function createRenderer(canvas, minimap) {
     const half = Math.max(8, 0.85 * s);
     const hit = !ghost && st.lastHitT != null && game.tick - st.lastHitT < 3;
     ctx.globalAlpha = ghost ? 0.4 : 1;
-    ctx.fillStyle = OWNER_DARK[st.owner];
-    ctx.strokeStyle = hit ? '#f87171' : sel ? '#ffffff' : OWNER_COLOR[st.owner];
+    ctx.fillStyle = ownerDark(game, st.owner);
+    ctx.strokeStyle = hit ? '#f87171' : sel ? '#ffffff' : ownerColor(game, st.owner);
     ctx.lineWidth = sel || hit ? 3 : 2;
     ctx.beginPath();
     ctx.rect(px - half, py - half * 0.7, half * 2, half * 1.5);
@@ -424,7 +431,7 @@ export function createRenderer(canvas, minimap) {
     ctx.lineTo(px, py - half * 1.5);
     ctx.lineTo(px + half * 1.15, py - half * 0.7);
     ctx.closePath();
-    ctx.fillStyle = hit ? '#f87171' : OWNER_COLOR[st.owner];
+    ctx.fillStyle = hit ? '#f87171' : ownerColor(game, st.owner);
     ctx.fill();
     let barY = py + half * 0.95;
     if (!ghost && st.hp < S.C.SETT_HP) {
@@ -435,7 +442,7 @@ export function createRenderer(canvas, minimap) {
       barY += 5;
     }
     // production progress (own settlements only)
-    if (!ghost && st.owner === 0 && st.trainTicks > 0) {
+    if (!ghost && st.owner === viewer(game) && st.trainTicks > 0) {
       ctx.fillStyle = '#111827';
       ctx.fillRect(px - half, barY, half * 2, 3);
       ctx.fillStyle = '#fbbf24';
@@ -467,18 +474,18 @@ export function createRenderer(canvas, minimap) {
     mctx.drawImage(fogCanvas, 0, 0, mw, mh);
     const sx = mw / game.map.w, sy = mh / game.map.h;
     for (const st of game.settlements) {
-      if (st.owner === 1 && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
-      mctx.fillStyle = OWNER_COLOR[st.owner];
+      if (st.owner !== viewer(game) && !S.isVisible(game, st.x + 0.5, st.y + 0.5)) continue;
+      mctx.fillStyle = ownerColor(game, st.owner);
       mctx.fillRect(st.x * sx - 2, st.y * sy - 2, 5, 5);
     }
-    for (const k of Object.values(game.known)) {
+    for (const k of Object.values(knownOf(game))) {
       mctx.fillStyle = 'rgba(239,68,68,0.5)';
       mctx.fillRect(k.x * sx - 2, k.y * sy - 2, 5, 5);
     }
     for (const b of game.blobs) {
       if (b.dead) continue;
-      if (b.owner === 1 && !S.isVisible(game, b.x, b.y)) continue;
-      mctx.fillStyle = OWNER_COLOR[b.owner];
+      if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
+      mctx.fillStyle = ownerColor(game, b.owner);
       mctx.fillRect(b.x * sx - 1, b.y * sy - 1, 3, 3);
     }
     // view rectangle

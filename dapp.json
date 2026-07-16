@@ -4,6 +4,8 @@
   "secrets": [],
   "tests": [
     { "name": "Main menu renders", "path": "/?demo=1", "expectSelector": "#main-menu" },
-    { "name": "Match history panel renders", "path": "/?demo=1", "expectSelector": "#match-history" }
+    { "name": "Match history panel renders", "path": "/?demo=1", "expectSelector": "#match-history" },
+    { "name": "Multiplayer lobby section renders", "path": "/?demo=1", "expectSelector": "#mp-section" },
+    { "name": "Challenge inbox container present", "path": "/?demo=1", "expectSelector": "#challenge-inbox" }
   ]
 }

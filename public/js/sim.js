@@ -147,13 +147,16 @@ function spawnWorkingFarmer(game, s, unit) {
 
 // Enemy settlement tiles a mover of `owner` knows about — impassable.
 // Player blocks on visible + remembered settlements; the AI on the ones
-// it has scouted (no fog cheating on player entities).
+// it has scouted (no fog cheating on player entities). In PvP each side
+// has its own fog + memory.
 function blockedTiles(game, owner) {
   const set = new Set();
   for (const s of game.settlements) {
     if (s.owner === owner) continue;
     const i = s.y * game.map.w + s.x;
-    if (owner === 0) {
+    if (game.pvp) {
+      if (game.fogs[owner][i] === 2 || game.knowns[owner][s.id]) set.add(i);
+    } else if (owner === 0) {
       if (game.fog[i] === 2 || game.known[s.id]) set.add(i);
     } else if (game.ai.known[s.id]) {
       set.add(i);
@@ -162,9 +165,16 @@ function blockedTiles(game, owner) {
   return set;
 }
 
+// Fog array used for pathfinding by `owner` (null = omniscient pathing,
+// which is how the solo AI behaves today).
+function pathFog(game, owner) {
+  if (game.pvp) return game.fogs[owner];
+  return owner === 0 ? game.fog : null;
+}
+
 // ---------------------------------------------------------------- setup
 
-export function newGame(seedStr, sizeKey, difficulty) {
+export function newGame(seedStr, sizeKey, difficulty, pvp) {
   const map = generateMap(seedStr, sizeKey);
   const game = {
     seed: seedStr, sizeKey, difficulty,
@@ -187,6 +197,14 @@ export function newGame(seedStr, sizeKey, difficulty) {
     pillageAlarmT: -999,                   // last "land stripped bare" toast (transient)
     ai: { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
+  if (pvp) {
+    game.pvp = true;
+    game.me = 0;
+    game.fogs = [new Uint8Array(map.w * map.h), new Uint8Array(map.w * map.h)];
+    game.knowns = [{}, {}];
+    game.fog = game.fogs[0];
+    game.resultReason = null;
+  }
   for (let side = 0; side < 2; side++) {
     const s = map.starts[side];
     const sett = foundSettlement(game, side, s.x, s.y);
@@ -200,6 +218,13 @@ export function newGame(seedStr, sizeKey, difficulty) {
   }
   updateVision(game);
   return game;
+}
+
+// Which side this client plays. In PvP, `game.fog` stays aliased to the
+// viewer's own fog array so all render/UI fog reads are viewer-relative.
+export function setViewer(game, me) {
+  game.me = me;
+  if (game.pvp) game.fog = game.fogs[me];
 }
 
 function makeBlob(game, owner, x, y, count, units) {
@@ -271,10 +296,9 @@ function destroySettlement(game, s, why) {
   }
   delete game.known[s.id];
   delete game.ai.known[s.id];
-  game.events.push({
-    msg: s.owner === 0 ? '💥 Your settlement was destroyed!' : '🔥 Enemy settlement destroyed!',
-    x: s.x, y: s.y,
-  });
+  if (game.pvp) { delete game.knowns[0][s.id]; delete game.knowns[1][s.id]; }
+  game.events.push({ owner: s.owner, msg: '💥 Your settlement was destroyed!', x: s.x, y: s.y });
+  game.events.push({ owner: 1 - s.owner, msg: '🔥 Enemy settlement destroyed!', x: s.x, y: s.y });
 }
 
 // ---------------------------------------------------------------- ops (player + AI share these)
@@ -285,7 +309,7 @@ export function opMove(game, b, x, y, attack) {
   b.working = null;
   b.order = { type: attack ? 'attack' : 'move', x, y };
   b.chaseId = null;
-  const p = findPath(game.map, b.x, b.y, x, y, b.owner === 0 ? game.fog : null, blockedTiles(game, b.owner));
+  const p = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), blockedTiles(game, b.owner));
   if (!p) { b.order = null; return { err: 'No path there' }; }
   b.path = p; b.pathGoal = { x, y };
   return { ok: true };
@@ -540,7 +564,7 @@ function pushFx(game, fx) {
 // -- movement / orders
 
 function ensurePath(game, b, x, y) {
-  const p = findPath(game.map, b.x, b.y, x, y, b.owner === 0 ? game.fog : null, blockedTiles(game, b.owner));
+  const p = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), blockedTiles(game, b.owner));
   b.path = p;
   b.pathGoal = p ? { x, y } : null;
   return !!p;
@@ -552,12 +576,13 @@ function ensurePath(game, b, x, y) {
 function pathBlocked(game, b) {
   if (!b.path) return false;
   const blocked = blockedTiles(game, b.owner);
+  const fog = pathFog(game, b.owner);
   const n = Math.min(2, b.path.length);
   for (let i = 0; i < n; i++) {
     const wp = b.path[i];
     const ti = Math.floor(wp.y) * game.map.w + Math.floor(wp.x);
     if (blocked.has(ti)) return true;
-    if (b.owner === 0 && game.fog[ti] > 0 && game.map.mountain[ti]) return true;
+    if (fog && fog[ti] > 0 && game.map.mountain[ti]) return true;
   }
   return false;
 }
@@ -614,7 +639,7 @@ function tickOrder(game, b) {
     if (pathBlocked(game, b) && !ensurePath(game, b, o.x, o.y)) {
       // walled in by explored mountains — the optimistic plan was wrong
       b.order = null; b.pathGoal = null;
-      game.events.push({ msg: '⛰️ No way through — order cancelled', x: b.x, y: b.y });
+      game.events.push({ owner: b.owner, msg: '⛰️ No way through — order cancelled', x: b.x, y: b.y });
       return;
     }
     const arrived = moveBlob(game, b);
@@ -769,9 +794,9 @@ function shelterFarmers(game, s) {
     if (opMove(game, b, s.x + 0.5, s.y + 0.5, false).ok) any = true;
     else b.working = null; // no path home — at least stop working
   }
-  if (any && s.owner === 0 && game.tick - game.farmAlarmT > 100) {
+  if (any && game.tick - game.farmAlarmT > 100) {
     game.farmAlarmT = game.tick;
-    game.events.push({ msg: '🌱 Your farmers ran to shelter!', x: s.x + 0.5, y: s.y + 0.5 });
+    game.events.push({ owner: s.owner, msg: '🌱 Your farmers ran to shelter!', x: s.x + 0.5, y: s.y + 0.5 });
   }
 }
 
@@ -941,16 +966,16 @@ function tickFood(game, b) {
       }
     }
     if (gained > 0.001) b.lastYieldT = game.tick;
-    else if (b.owner === 0 && fedMeter(b) < 0.5
+    else if (fedMeter(b) < 0.5
       && game.tick - (b.lastYieldT || 0) > 100 && game.tick - game.pillageAlarmT > 100) {
       game.pillageAlarmT = game.tick;
-      game.events.push({ msg: '🍂 The land here is stripped bare!', x: b.x, y: b.y });
+      game.events.push({ owner: b.owner, msg: '🍂 The land here is stripped bare!', x: b.x, y: b.y });
     }
   }
   if (b.food <= 0.0001) {
     if (!b.starving) {
       b.starving = true;
-      if (b.owner === 0) game.events.push({ msg: '💀 Your army is starving!', x: b.x, y: b.y });
+      game.events.push({ owner: b.owner, msg: '💀 Your army is starving!', x: b.x, y: b.y });
     }
     applyStarvation(game, b);
   } else if (b.starving && fedMeter(b) > 0.1) {
@@ -992,7 +1017,7 @@ export function trainGated(s) { return s.flow < C.EAT_PER_SEC * C.DT; }
 
 function tickSettlement(game, s) {
   if (!game.settlements.includes(s)) return;
-  const aiMult = s.owner === 1 ? DIFF[game.difficulty].income : 1;
+  const aiMult = (!game.pvp && s.owner === 1) ? DIFF[game.difficulty].income : 1;
   // farmland income accrues in every mode (boosted by farmers actually
   // working the fields) — training modes pick what the surplus becomes
   let fertSum = 0;
@@ -1118,40 +1143,49 @@ function cleanup(game) {
   game.blobs = game.blobs.filter(b => !b.dead);
 }
 
-function markCircle(game, cx, cy, r) {
-  const { w, h } = game.map;
+function markCircle(fog, map, cx, cy, r) {
+  const { w, h } = map;
   const r2 = r * r;
   const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(w - 1, Math.ceil(cx + r));
   const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(h - 1, Math.ceil(cy + r));
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
       const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
-      if (dx * dx + dy * dy <= r2) game.fog[y * w + x] = 2;
+      if (dx * dx + dy * dy <= r2) fog[y * w + x] = 2;
+    }
+  }
+}
+
+// Recompute vision + settlement memory for one side into (fog, known).
+function updateVisionFor(game, owner, fog, known) {
+  for (let i = 0; i < fog.length; i++) if (fog[i] === 2) fog[i] = 1;
+  for (const b of game.blobs) {
+    if (!b.dead && b.owner === owner) markCircle(fog, game.map, b.x, b.y, C.VISION_BLOB);
+  }
+  for (const s of game.settlements) {
+    if (s.owner === owner) markCircle(fog, game.map, s.x + 0.5, s.y + 0.5, C.VISION_SETT);
+  }
+  // remember enemy settlements we can currently see; forget destroyed ones
+  for (const s of game.settlements) {
+    if (s.owner !== owner && fog[s.y * game.map.w + s.x] === 2) {
+      known[s.id] = { x: s.x, y: s.y };
+    }
+  }
+  for (const id of Object.keys(known)) {
+    const k = known[id];
+    if (fog[k.y * game.map.w + k.x] === 2 && !game.settlements.some(s => s.id === +id)) {
+      delete known[id];
     }
   }
 }
 
 function updateVision(game) {
-  const fog = game.fog;
-  for (let i = 0; i < fog.length; i++) if (fog[i] === 2) fog[i] = 1;
-  for (const b of game.blobs) {
-    if (!b.dead && b.owner === 0) markCircle(game, b.x, b.y, C.VISION_BLOB);
+  if (game.pvp) {
+    updateVisionFor(game, 0, game.fogs[0], game.knowns[0]);
+    updateVisionFor(game, 1, game.fogs[1], game.knowns[1]);
+    return;
   }
-  for (const s of game.settlements) {
-    if (s.owner === 0) markCircle(game, s.x + 0.5, s.y + 0.5, C.VISION_SETT);
-  }
-  // remember enemy settlements we can currently see; forget destroyed ones
-  for (const s of game.settlements) {
-    if (s.owner === 1 && fog[s.y * game.map.w + s.x] === 2) {
-      game.known[s.id] = { x: s.x, y: s.y };
-    }
-  }
-  for (const id of Object.keys(game.known)) {
-    const k = game.known[id];
-    if (fog[k.y * game.map.w + k.x] === 2 && !game.settlements.some(s => s.id === +id)) {
-      delete game.known[id];
-    }
-  }
+  updateVisionFor(game, 0, game.fog, game.known);
 }
 
 export function isVisible(game, x, y) {
@@ -1161,6 +1195,15 @@ export function isVisible(game, x, y) {
 function checkResult(game) {
   const p = unitCounts(game, 0);
   const e = unitCounts(game, 1);
+  if (game.pvp) {
+    // symmetric: a side is out at 0 settlements and too few units to rebuild
+    const pOut = p.setts === 0 && p.units < C.SETT_COST;
+    const eOut = e.setts === 0 && e.units < C.SETT_COST;
+    if (pOut && eOut) game.result = p.units >= e.units ? 'p0-win' : 'p1-win';
+    else if (pOut) game.result = 'p1-win';
+    else if (eOut) game.result = 'p0-win';
+    return;
+  }
   if (e.setts === 0) { game.result = 'win'; return; }
   if (p.setts === 0 && p.units < C.SETT_COST) game.result = 'loss';
 }
@@ -1184,7 +1227,7 @@ function b64ToU8(b64) {
 export function serialize(game) {
   const fertDelta = {};
   for (const i of game.pillaged) fertDelta[i] = game.map.fert[i];
-  return {
+  const data = {
     v: 3,
     seed: game.seed, sizeKey: game.sizeKey, difficulty: game.difficulty,
     tick: game.tick, nextId: game.nextId, result: game.result,
@@ -1204,14 +1247,37 @@ export function serialize(game) {
       targetKind: r.targetKind, targetId: r.targetId, carrierIds: r.carrierIds,
     })),
     fertDelta,
-    fog: u8ToB64(game.fog),
-    known: game.known,
-    ai: game.ai,
   };
+  if (game.pvp) {
+    // PvP snapshot: both sides' fog + memory (rejoiners recover their
+    // explored map), plus the mergeLog so the guest's selections survive
+    // merges across snapshot applications.
+    data.pvp = true;
+    data.fogs = [u8ToB64(game.fogs[0]), u8ToB64(game.fogs[1])];
+    data.knowns = game.knowns;
+    data.mergeLog = game.mergeLog;
+    data.resultReason = game.resultReason || null;
+  } else {
+    data.fog = u8ToB64(game.fog);
+    data.known = game.known;
+    data.ai = game.ai;
+  }
+  return data;
 }
 
-export function deserialize(data) {
-  const map = generateMap(data.seed, data.sizeKey);
+// Rebuild a game from serialized data. Pass `prev` (the current game for
+// the same match) to reuse its map object — the renderer keys its terrain
+// layer on map identity, so PvP snapshot applications must NOT regenerate
+// the map. Fertility, dirty-tile and blob-interpolation state carry over.
+export function deserialize(data, prev) {
+  const reuse = prev && prev.seed === data.seed && prev.sizeKey === data.sizeKey;
+  const map = reuse ? prev.map : generateMap(data.seed, data.sizeKey);
+  const dirty = new Set(reuse ? prev.dirty : []);
+  if (reuse) {
+    // reset tiles our local dead-reckoning may have pillaged; the
+    // snapshot's fertDelta below re-applies the authoritative values
+    for (const i of prev.pillaged) { map.fert[i] = map.orig[i]; dirty.add(i); }
+  }
   const game = {
     seed: data.seed, sizeKey: data.sizeKey, difficulty: data.difficulty,
     map,
@@ -1219,20 +1285,30 @@ export function deserialize(data) {
     blobs: [], settlements: [], routes: [],
     tilledBy: new Int32Array(map.w * map.h),
     pillaged: new Set(),
-    dirty: new Set(),
-    fog: b64ToU8(data.fog),
+    dirty,
+    fog: data.fog ? b64ToU8(data.fog) : new Uint8Array(map.w * map.h),
     known: data.known || {},
     events: [],
-    fx: [],
+    fx: reuse ? prev.fx : [],
     mergeLog: {},
     result: data.result || null,
     farmAlarmT: -999,
     pillageAlarmT: -999,
     ai: data.ai || { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
+  if (data.pvp) {
+    game.pvp = true;
+    game.fogs = [b64ToU8(data.fogs[0]), b64ToU8(data.fogs[1])];
+    game.knowns = data.knowns || [{}, {}];
+    game.mergeLog = data.mergeLog || {};
+    game.resultReason = data.resultReason || null;
+    game.me = prev && prev.me != null ? prev.me : 0;
+    game.fog = game.fogs[game.me];
+  }
   for (const [i, f] of Object.entries(data.fertDelta || {})) {
     map.fert[+i] = f;
     if (f < map.orig[+i] - 0.0001) game.pillaged.add(+i);
+    if (reuse) dirty.add(+i);
   }
   for (const sd of data.settlements) {
     const s = {
@@ -1277,6 +1353,19 @@ export function deserialize(data) {
   }
   for (const rd of data.routes) {
     game.routes.push({ ...rd, window: [] });
+  }
+  if (reuse) {
+    // repaint tiles whose tilled state changed (settlements founded/lost)
+    for (let i = 0; i < game.tilledBy.length; i++) {
+      if (game.tilledBy[i] !== prev.tilledBy[i]) dirty.add(i);
+    }
+    // carry interpolation anchors so blobs glide instead of teleporting
+    const prevById = new Map();
+    for (const ob of prev.blobs) if (!ob.dead) prevById.set(ob.id, ob);
+    for (const b of game.blobs) {
+      const ob = prevById.get(b.id);
+      if (ob && dist(ob.x, ob.y, b.x, b.y) < 3) { b.prevX = ob.x; b.prevY = ob.y; }
+    }
   }
   return game;
 }
