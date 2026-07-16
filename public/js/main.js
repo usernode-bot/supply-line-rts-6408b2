@@ -230,6 +230,20 @@ $('btn-speed').addEventListener('click', () => {
   speed = speed === 1 ? 2 : 1;
   $('btn-speed').textContent = speed + '×';
 });
+$('btn-backtowork').addEventListener('click', () => {
+  if (!game || game.result) return;
+  const r = S.opBackToWork(game, 0);
+  if (r.fielded + r.walking > 0) {
+    const parts = [];
+    if (r.fielded > 0) parts.push(`${r.fielded} farmer${r.fielded === 1 ? '' : 's'} back in the fields`);
+    if (r.walking > 0) parts.push(`${r.walking} walking home`);
+    toast('🌱 ' + parts.join(' · '));
+  } else if (r.reason === 'danger') toast('⚠️ Enemies nearby — farmers stay sheltered');
+  else if (r.reason === 'cap') toast(`Farms at capacity (${S.C.FARM_CAP})`);
+  else toast('No idle farmers');
+  updateHUD();
+  renderPanel(true);
+});
 $('btn-cancel-order').addEventListener('click', onCancel);
 
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveGame(); });
@@ -737,6 +751,11 @@ function updateHUD() {
   $('stat-units').textContent = `👥 ${p.units}`;
   $('stat-setts').textContent = `🏠 ${p.setts}`;
   $('stat-time').textContent = fmtDur(game.tick / 10);
+  const idle = S.idleFarmers(game, 0);
+  const idleN = idle.field + idle.walk;
+  const btw = $('btn-backtowork');
+  btw.classList.toggle('hidden', idleN === 0 || !!game.result);
+  if (idleN > 0) btw.textContent = `🌱 Back to work (${idleN})`;
   for (const ev of game.events) toast(ev.msg);
   game.events.length = 0;
 }
