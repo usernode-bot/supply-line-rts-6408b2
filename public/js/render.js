@@ -125,28 +125,24 @@ export function createRenderer(canvas, minimap) {
     const [r, g, b] = tileRGB(game, i);
     tctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
     tctx.fillRect(px, py, T, T);
-    // farmland: plough-furrow stripes in a darker shade of the same tier
-    // color. Stripe phase is locked to terrain-layer coordinates (lines of
-    // constant x − y at a fixed period), so contiguous fields read as one
-    // continuous striped area across tile boundaries (#43).
+    // farmland: vertical plough-furrow stripes in a darker shade of the
+    // same tier color. Spacing, furrow width, phase, and shade depth are
+    // hashed from the tile's x column, so tiles stacked in one column join
+    // into a continuous strip while neighboring strips differ slightly —
+    // reading as separately worked plots (#45). A small per-tile jitter on
+    // the shade breaks up uniformity along each strip.
     if (game.tilledBy[i]) {
-      const [dr, dg, db] = mix([r, g, b], [0, 0, 0], 0.25);
-      tctx.save();
-      tctx.beginPath();
-      tctx.rect(px, py, T, T);
-      tctx.clip();
-      tctx.strokeStyle = `rgb(${dr | 0},${dg | 0},${db | 0})`;
-      tctx.lineWidth = 3;
-      const period = 8;
-      const c0 = Math.floor((px - py - T) / period) * period;
-      tctx.beginPath();
-      for (let c = c0; c <= px - py + 2 * T; c += period) {
-        // 45° line x − y = c, extended past the tile so the clip trims it
-        tctx.moveTo(c + py - 4, py - 4);
-        tctx.lineTo(c + py + T + 4, py + T + 4);
+      const tx = i % w;
+      const hash = (tx * 2654435761) >>> 0;
+      const period = 5 + (hash & 3);            // 5–8 px between furrows
+      const lw = 2 + ((hash >> 2) & 1);         // 2 or 3 px furrow width
+      const phase = (hash >> 3) % period;
+      const depth = 0.18 + ((hash >> 5) & 3) * 0.04 + ((i * 40503) & 3) * 0.015;
+      const [dr, dg, db] = mix([r, g, b], [0, 0, 0], depth);
+      tctx.fillStyle = `rgb(${dr | 0},${dg | 0},${db | 0})`;
+      for (let x = phase; x < T; x += period) {
+        tctx.fillRect(px + x, py, Math.min(lw, T - x), T);
       }
-      tctx.stroke();
-      tctx.restore();
     }
   }
 
