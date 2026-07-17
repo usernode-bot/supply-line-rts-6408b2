@@ -25,7 +25,6 @@ function mix(c1, c2, t) {
   return [lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t)];
 }
 const BARREN = [192, 172, 126], MID = [127, 160, 84], LUSH = [42, 110, 48];
-const TILL = [217, 193, 79];
 
 function tileRGB(game, i) {
   if (game.map.mountain[i]) {
@@ -37,11 +36,10 @@ function tileRGB(game, i) {
     const v = (i * 2654435761) % 10;
     return [148 + v, 131 + v, 104 + v];
   }
-  // five flat shades, one per fertility tier
+  // five flat shades, one per fertility tier; farmland keeps the plain
+  // tier color and is marked by the stripe overlay in paintTile (#43)
   const f = fertTier(game.map.fert[i]) / 4;
-  let c = f < 0.5 ? mix(BARREN, MID, f * 2) : mix(MID, LUSH, (f - 0.5) * 2);
-  if (game.tilledBy[i]) c = mix(c, TILL, 0.45);
-  return c;
+  return f < 0.5 ? mix(BARREN, MID, f * 2) : mix(MID, LUSH, (f - 0.5) * 2);
 }
 
 function fogTarget(v) { return v === 2 ? 0 : v === 1 ? 150 : 255; }
@@ -123,9 +121,33 @@ export function createRenderer(canvas, minimap) {
 
   function paintTile(game, i) {
     const { w } = game.map;
+    const px = (i % w) * T, py = ((i / w) | 0) * T;
     const [r, g, b] = tileRGB(game, i);
     tctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
-    tctx.fillRect((i % w) * T, ((i / w) | 0) * T, T, T);
+    tctx.fillRect(px, py, T, T);
+    // farmland: plough-furrow stripes in a darker shade of the same tier
+    // color. Stripe phase is locked to terrain-layer coordinates (lines of
+    // constant x − y at a fixed period), so contiguous fields read as one
+    // continuous striped area across tile boundaries (#43).
+    if (game.tilledBy[i]) {
+      const [dr, dg, db] = mix([r, g, b], [0, 0, 0], 0.25);
+      tctx.save();
+      tctx.beginPath();
+      tctx.rect(px, py, T, T);
+      tctx.clip();
+      tctx.strokeStyle = `rgb(${dr | 0},${dg | 0},${db | 0})`;
+      tctx.lineWidth = 3;
+      const period = 8;
+      const c0 = Math.floor((px - py - T) / period) * period;
+      tctx.beginPath();
+      for (let c = c0; c <= px - py + 2 * T; c += period) {
+        // 45° line x − y = c, extended past the tile so the clip trims it
+        tctx.moveTo(c + py - 4, py - 4);
+        tctx.lineTo(c + py + T + 4, py + T + 4);
+      }
+      tctx.stroke();
+      tctx.restore();
+    }
   }
 
   // Ease each tile's fog alpha toward its target so vision-circle edges
@@ -527,54 +549,65 @@ export function createRenderer(canvas, minimap) {
   }
 
   function drawSettlement(game, st, wx, wy, s, ghost, sel, workingN) {
-    // centered on the 2×2 footprint, sized to cover it
-    const px = wx(st.x + 1), py = wy(st.y + 1);
-    const half = Math.max(8, 1.0 * s);
+    // fills the 2×2 footprint exactly: roof in the top ~30% of the plot,
+    // body below, unit counts inside in a loose triangle (#40)
+    const x0 = wx(st.x), y0 = wy(st.y);
+    const size = 2 * s;
+    const cx = x0 + size / 2, cy = y0 + size / 2;
+    const roofY = y0 + size * 0.3;
     const hit = !ghost && st.lastHitT != null && game.tick - st.lastHitT < 3;
     ctx.globalAlpha = ghost ? 0.4 : 1;
+    // body (lower 70% of the plot)
     ctx.fillStyle = ownerDark(game, st.owner);
-    ctx.strokeStyle = hit ? '#f87171' : sel ? '#ffffff' : ownerColor(game, st.owner);
-    ctx.lineWidth = sel || hit ? 3 : 2;
+    ctx.fillRect(x0, roofY, size, y0 + size - roofY);
+    // roof (top 30%, apex at top-center, no overhang past the plot)
     ctx.beginPath();
-    ctx.rect(px - half, py - half * 0.7, half * 2, half * 1.5);
-    ctx.fill(); ctx.stroke();
-    // roof
-    ctx.beginPath();
-    ctx.moveTo(px - half * 1.15, py - half * 0.7);
-    ctx.lineTo(px, py - half * 1.5);
-    ctx.lineTo(px + half * 1.15, py - half * 0.7);
+    ctx.moveTo(x0, roofY);
+    ctx.lineTo(cx, y0);
+    ctx.lineTo(x0 + size, roofY);
     ctx.closePath();
     ctx.fillStyle = hit ? '#f87171' : ownerColor(game, st.owner);
     ctx.fill();
-    let barY = py + half * 0.95;
+    // outline around the full plot (white when selected, red when hit)
+    ctx.strokeStyle = hit ? '#f87171' : sel ? '#ffffff' : ownerColor(game, st.owner);
+    ctx.lineWidth = sel || hit ? 3 : 2;
+    ctx.strokeRect(x0, y0, size, size);
+    // unit counts inside, loose triangle: ⚔️ upper-left, 🚚 upper-right,
+    // 🌱 (garrisoned + working the fields) bottom-center
+    if (!ghost && st.garrison && s >= 8) {
+      const fs = Math.max(9, Math.min(12, s * 0.55));
+      ctx.font = `600 ${fs}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const chips = [
+        [`⚔️${st.garrison.deploy}`, cx - 0.45 * s, cy - 0.05 * s],
+        [`🚚${st.garrison.supply}`, cx + 0.45 * s, cy + 0.10 * s],
+        [`🌱${st.garrison.farm + (workingN || 0)}`, cx, cy + 0.60 * s],
+      ];
+      for (const [label, lx, ly] of chips) {
+        const tw = ctx.measureText(label).width;
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(lx - tw / 2 - 2, ly - fs * 0.7, tw + 4, fs * 1.4);
+        ctx.fillStyle = '#e4e4e7';
+        ctx.fillText(label, lx, ly);
+      }
+    }
+    // health / production bars just below the plot
+    let barY = y0 + size + 2;
     if (!ghost && st.hp < S.C.SETT_HP) {
       ctx.fillStyle = '#111827';
-      ctx.fillRect(px - half, barY, half * 2, 4);
+      ctx.fillRect(x0, barY, size, 4);
       ctx.fillStyle = '#f87171';
-      ctx.fillRect(px - half, barY, half * 2 * (st.hp / S.C.SETT_HP), 4);
+      ctx.fillRect(x0, barY, size * (st.hp / S.C.SETT_HP), 4);
       barY += 5;
     }
     // production progress (own settlements only)
     if (!ghost && st.owner === viewer(game) && st.trainTicks > 0) {
       ctx.fillStyle = '#111827';
-      ctx.fillRect(px - half, barY, half * 2, 3);
+      ctx.fillRect(x0, barY, size, 3);
       ctx.fillStyle = '#fbbf24';
-      ctx.fillRect(px - half, barY, half * 2 * (st.trainTicks / S.C.TRAIN_TICKS), 3);
+      ctx.fillRect(x0, barY, size * (st.trainTicks / S.C.TRAIN_TICKS), 3);
       barY += 4;
-    }
-    // unit counts: garrison ⚔️/🚚 plus farmers (garrisoned + in the fields)
-    if (!ghost && st.garrison && s >= 8) {
-      const label = `⚔️${st.garrison.deploy} 🚚${st.garrison.supply} 🌱${st.garrison.farm + (workingN || 0)}`;
-      const fs = Math.max(9, Math.min(12, s * 0.75));
-      ctx.font = `600 ${fs}px system-ui`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const tw = ctx.measureText(label).width;
-      const ty = barY + fs * 0.8;
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fillRect(px - tw / 2 - 3, ty - fs * 0.7, tw + 6, fs * 1.4);
-      ctx.fillStyle = '#e4e4e7';
-      ctx.fillText(label, px, ty);
     }
     ctx.globalAlpha = 1;
   }

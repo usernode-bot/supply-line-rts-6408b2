@@ -26,11 +26,12 @@ export const C = {
   VISION_BLOB: 6,
   VISION_SETT: 8,
   AGGRO: 4,
-  PILLAGE_RATE: 0.02,      // max food per unit per tick
   PILLAGE_RADIUS: 2.5,     // pillage harvest reach in tiles (half a territory ring)
-  PILLAGE_WASTE: 4,        // fertility destroyed per food pillaged, vs the farmed value
-  FOOD_PER_FERT: 100,      // food extracted per 1.0 fertility
-  FERT_LEVEL: 0.25,        // one visible fertility level; scorched per tile entered while pillage-moving
+  PILLAGE_YIELD: 0.8,      // food per 1.0 fertility destroyed by pillaging — one full
+                           // level off the whole ~21-tile disc (21 × 0.25 × 0.8 ≈ 4.2
+                           // food) feeds the reference 10-unit army for ~5 s (#42)
+  PILLAGE_INTAKE_MULT: 3,  // pillage intake cap per tick, × the army's eating rate
+  FERT_LEVEL: 0.25,        // one visible fertility level (of four above zero)
   FERT_REGEN: 0.01 / 600,  // fertility per tick (0.01/min)
   TERRITORY: 5,            // settlement territory radius: feeds friendly blobs, farmer reach, drawn ring
   UNIT_HP: 100,            // individual unit health (deploy / supply)
@@ -1202,10 +1203,9 @@ function applyGarrisonLosses(game, s, casualties) {
 
 // Tiles a pillaging blob is stripping right now: a fixed camp-sized
 // disc around the army (every non-mountain tile whose center lies
-// within PILLAGE_RADIUS), the same for all army sizes. Sorted
-// nearest-first so the per-cell-capped harvest drains the land
-// center-out. Shared with the renderer so the on-screen grid
-// highlights match the sim exactly.
+// within PILLAGE_RADIUS), the same for all army sizes. Every cell
+// degrades together (see tickFood). Shared with the renderer so the
+// on-screen grid highlights match the sim exactly.
 export function pillageCells(game, b) {
   const cx = Math.floor(b.x), cy = Math.floor(b.y);
   const { w, h } = game.map;
@@ -1216,15 +1216,13 @@ export function pillageCells(game, b) {
     for (let dx = -span; dx <= span; dx++) {
       const tx = cx + dx, ty = cy + dy;
       if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
-      const d = dist(tx + 0.5, ty + 0.5, b.x, b.y);
-      if (d > reach) continue;
+      if (dist(tx + 0.5, ty + 0.5, b.x, b.y) > reach) continue;
       const i = ty * w + tx;
       if (game.map.mountain[i] || game.settAt[i]) continue;
-      cells.push({ i, d });
+      cells.push(i);
     }
   }
-  cells.sort((a, c) => a.d - c.d || a.i - c.i);
-  return cells.map(c => c.i);
+  return cells;
 }
 
 function tickFood(game, b) {
@@ -1232,39 +1230,29 @@ function tickFood(game, b) {
   b.food = Math.max(0, b.food - n * C.EAT_PER_SEC * C.DT);
   let gained = 0; // food the land yielded this tick (for stripped-land feedback)
   if (b.pillaging) {
-    // scorched earth: every tile entered while pillage-moving instantly
-    // loses 1 fertility level (2 for armies of 10+). The fertility is
-    // destroyed outright — food only ever comes from the rate-limited
-    // harvest below, so pillaging yields at the same rate whether the
-    // army is walking or standing still.
-    const ci = tileIdx(game, b.x, b.y);
-    const pi = tileIdx(game, b.prevX, b.prevY);
-    if (ci !== pi && !game.map.mountain[ci] && !game.settAt[ci]) {
-      const loss = Math.min(game.map.fert[ci], C.FERT_LEVEL * (n >= 10 ? 2 : 1));
-      if (loss > 0.0001) {
-        game.map.fert[ci] -= loss;
-        game.pillaged.add(ci);
-        game.dirty.add(ci);
-      }
-    }
-    let budget = Math.min(foodCap(b) - b.food, n * C.PILLAGE_RATE);
-    if (budget > 0.0001) {
-      // Foraging is wasteful (PILLAGE_WASTE× the fertility a farm would
-      // spend per food), and tiles below half a level — the point where
-      // they display as Barren — yield nothing, so stripped land really
-      // stops feeding the army.
-      for (const i of pillageCells(game, b)) {
-        if (budget <= 0.0001) break;
-        const avail = Math.max(0, game.map.fert[i] - C.FERT_LEVEL / 2)
-          * C.FOOD_PER_FERT / C.PILLAGE_WASTE;
-        const take = Math.min(budget, avail, C.PILLAGE_RATE * n / 4);
-        if (take <= 0.0001) continue;
-        game.map.fert[i] -= take * C.PILLAGE_WASTE / C.FOOD_PER_FERT;
-        b.food += take;
-        gained += take;
-        budget -= take;
-        game.pillaged.add(i);
-        game.dirty.add(i);
+    // Demand-driven foraging (#41, #42): every harvestable cell in the
+    // disc degrades together each tick, whether the army is marching or
+    // standing still. The army takes only what it needs — the meter
+    // deficit, capped at PILLAGE_INTAKE_MULT× its eating rate so a
+    // hungry blob refills steadily instead of instantly — split evenly
+    // across the cells. Tiles at or below half a level (displayed as
+    // Barren) yield nothing, so stripped land really stops feeding the
+    // army and recovers only via the slow regen tick.
+    const floor = C.FERT_LEVEL / 2;
+    const need = Math.min(foodCap(b) - b.food, C.PILLAGE_INTAKE_MULT * n * C.EAT_PER_SEC * C.DT);
+    if (need > 0.0001) {
+      const cells = pillageCells(game, b).filter(i => game.map.fert[i] > floor);
+      if (cells.length) {
+        const share = need / cells.length / C.PILLAGE_YIELD; // fertility taken per cell
+        for (const i of cells) {
+          const loss = Math.min(share, game.map.fert[i] - floor);
+          if (loss <= 0) continue;
+          game.map.fert[i] -= loss;
+          gained += loss * C.PILLAGE_YIELD;
+          game.pillaged.add(i);
+          game.dirty.add(i);
+        }
+        b.food = Math.min(foodCap(b), b.food + gained);
       }
     }
     if (gained > 0.001) b.lastYieldT = game.tick;
