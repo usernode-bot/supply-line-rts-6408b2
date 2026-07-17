@@ -880,7 +880,7 @@ function onTap(world, pointerType, screen) {
   const eb = b && b.owner !== me ? b : null;
   if (b && b.owner !== me) b = null;
   if (b) { ui.selected = { kind: 'blob', id: b.id }; renderPanel(true); return; }
-  const st = S.settlementAt(game, world.x, world.y, Math.max(1.4, hitR));
+  const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
   if (st && st.owner === me) { ui.selected = { kind: 'settlement', id: st.id }; renderPanel(true); return; }
   // tap elsewhere with blobs selected → inline order popup at the tap point
   if (selectedBlobs().length > 0) { showOrderPopup(world, screen); return; }
@@ -891,7 +891,7 @@ function onTap(world, pointerType, screen) {
     return;
   }
   const known = game.pvp ? game.knowns[me] : game.known;
-  if (st && st.owner !== me && (S.isVisible(game, st.x + 0.5, st.y + 0.5) || known[st.id])) {
+  if (st && st.owner !== me && (S.settVisible(game, st) || known[st.id])) {
     ui.selected = { kind: 'enemy-settlement', id: st.id };
     renderPanel(true);
     return;
@@ -1123,7 +1123,7 @@ panel.addEventListener('click', (e) => {
         let c = 0;
         for (const b of [...game.blobs]) {
           if (!b.dead && b.owner === me && b.working === st.id) {
-            if (doMove(b, st.x + 0.5, st.y + 0.5, false).ok) c++;
+            if (doMove(b, st.x + 1, st.y + 1, false).ok) c++;
           }
         }
         toast(c ? `🏠 Recalling ${c} farmer${c === 1 ? '' : 's'}` : 'No farmers working the fields');
@@ -1187,7 +1187,7 @@ function renderPanel(force) {
     const est = game.settlements.find(s => s.id === ui.selected.id);
     if (!est) { ui.selected = null; panel.classList.add('hidden'); lastPanelHTML = ''; return; }
     panel.classList.remove('hidden');
-    if (S.isVisible(game, est.x + 0.5, est.y + 0.5)) {
+    if (S.settVisible(game, est)) {
       const pct = Math.max(0, Math.min(100, Math.round(100 * est.hp / S.C.SETT_HP)));
       setPanelHTML(`
         <div class="flex items-center justify-between mb-1">
@@ -1210,6 +1210,12 @@ function renderPanel(force) {
       setPanelHTML(`
         <div class="font-semibold mb-1">⛰️ Mountain</div>
         <div class="text-xs text-zinc-400">Impassable terrain. Nothing grows here.</div>`);
+    } else if (game.settAt[i]) {
+      const so = game.settlements.find(s => s.id === game.settAt[i]);
+      const mine2 = so && so.owner === me;
+      setPanelHTML(`
+        <div class="font-semibold mb-1 ${mine2 ? 'text-violet-300' : 'text-red-300'}">🏠 Settlement grounds</div>
+        <div class="text-xs text-zinc-400">Built over — not farmland. ${mine2 ? 'Part of your settlement.' : 'Part of an enemy settlement.'}</div>`);
     } else {
       const f = game.map.fert[i], o = game.map.orig[i];
       const tier = fertTier(f), otier = fertTier(o);

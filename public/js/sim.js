@@ -73,6 +73,27 @@ export function garrisonTotal(s) { return s.garrison.deploy + s.garrison.supply 
 
 function tileIdx(game, x, y) { return Math.floor(y) * game.map.w + Math.floor(x); }
 
+// -- settlement footprint: every settlement occupies a 2×2 block of
+// tiles anchored at (s.x, s.y) top-left. The footprint center is the
+// grid corner (s.x + 1, s.y + 1). Works for anything with {x, y}
+// anchor coords (live settlements and fog-memory entries alike).
+export function settCenter(s) { return { x: s.x + 1, y: s.y + 1 }; }
+export function settTiles(map, s) {
+  const tiles = [];
+  for (let dy = 0; dy <= 1; dy++) {
+    for (let dx = 0; dx <= 1; dx++) {
+      const tx = s.x + dx, ty = s.y + dy;
+      if (tx >= 0 && ty >= 0 && tx < map.w && ty < map.h) tiles.push(ty * map.w + tx);
+    }
+  }
+  return tiles;
+}
+// A settlement counts as visible when any of its footprint tiles is.
+export function settVisible(game, s) {
+  for (const i of settTiles(game.map, s)) if (game.fog[i] === 2) return true;
+  return false;
+}
+
 // -- per-unit records: each unit has its own hp plus a hidden seed that
 // fixes the (invisible) order units absorb damage in. Max HP depends on
 // role: farmers are 1/10th as tough as deploy/supply units.
@@ -126,7 +147,13 @@ function tilledJitter(game, i, salt) {
 // cell (walking farmers claim their destination cell) instead of stacking.
 function farmerSpot(game, s) {
   const w = game.map.w;
-  if (!s.tilled.length) return tilledJitter(game, s.y * w + s.x, s.id);
+  if (!s.tilled.length) {
+    // no fields at all — stand just outside the footprint, never on it
+    const foot = new Set(settTiles(game.map, s));
+    const spot = nearestPassable(game.map, s.x + 2, s.y + 1, 4, null, foot)
+      || { x: s.x + 2, y: s.y + 1 };
+    return tilledJitter(game, spot.y * w + spot.x, s.id);
+  }
   const occ = new Map();
   for (const b of game.blobs) {
     if (b.dead || b.working !== s.id) continue;
@@ -157,14 +184,16 @@ function blockedTiles(game, owner) {
   const set = new Set();
   for (const s of game.settlements) {
     if (s.owner === owner) continue;
-    const i = s.y * game.map.w + s.x;
+    const tiles = settTiles(game.map, s);
+    let knows = false;
     if (game.pvp) {
-      if (game.fogs[owner][i] === 2 || game.knowns[owner][s.id]) set.add(i);
+      knows = !!game.knowns[owner][s.id] || tiles.some(i => game.fogs[owner][i] === 2);
     } else if (owner === 0) {
-      if (game.fog[i] === 2 || game.known[s.id]) set.add(i);
-    } else if (game.ai.known[s.id]) {
-      set.add(i);
+      knows = !!game.known[s.id] || tiles.some(i => game.fog[i] === 2);
+    } else {
+      knows = !!game.ai.known[s.id];
     }
+    if (knows) for (const i of tiles) set.add(i);
   }
   return set;
 }
@@ -189,6 +218,7 @@ export function newGame(seedStr, sizeKey, difficulty, pvp) {
     settlements: [],
     routes: [],
     tilledBy: new Int32Array(map.w * map.h),
+    settAt: new Int32Array(map.w * map.h),
     pillaged: new Set(),
     dirty: new Set(),
     fog: new Uint8Array(map.w * map.h),   // player fog: 0 unseen, 1 explored, 2 visible
@@ -253,6 +283,36 @@ function makeBlob(game, owner, x, y, count, units) {
   return b;
 }
 
+// Claim the 2×2 footprint as built-over settlement ground.
+function claimFootprint(game, s) {
+  for (const i of settTiles(game.map, s)) {
+    game.settAt[i] = s.id;
+    game.dirty.add(i);
+  }
+}
+
+// Farmland ring: every non-mountain, unclaimed, un-tilled tile whose
+// center lies within FARM_RING of the footprint center — 20 tiles on
+// open ground, closely matching the old 21-tile disc so income holds.
+// The footprint itself is never tilled (it's not farmland anymore).
+const FARM_RING = 2.7;
+function tillFields(game, s) {
+  const { w, h } = game.map;
+  const c = settCenter(s);
+  const span = Math.ceil(FARM_RING);
+  for (let ty = s.y - span; ty <= s.y + 1 + span; ty++) {
+    for (let tx = s.x - span; tx <= s.x + 1 + span; tx++) {
+      if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+      if (dist(tx + 0.5, ty + 0.5, c.x, c.y) > FARM_RING) continue;
+      const i = ty * w + tx;
+      if (game.map.mountain[i] || game.tilledBy[i] || game.settAt[i]) continue;
+      game.tilledBy[i] = s.id;
+      s.tilled.push(i);
+      game.dirty.add(i);
+    }
+  }
+}
+
 function foundSettlement(game, owner, x, y) {
   const s = {
     id: game.nextId++, owner,
@@ -264,26 +324,15 @@ function foundSettlement(game, owner, x, y) {
     flow: 0,       // EMA of net stockpile flow (food/tick) — gates training
     flowAcc: 0,    // this tick's flow components (transient)
   };
-  const { w, h } = game.map;
-  for (let dy = -2; dy <= 2; dy++) {
-    for (let dx = -2; dx <= 2; dx++) {
-      const tx = s.x + dx, ty = s.y + dy;
-      if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
-      if (dx * dx + dy * dy > 5.5) continue;
-      const i = ty * w + tx;
-      if (game.map.mountain[i] || game.tilledBy[i]) continue;
-      game.tilledBy[i] = s.id;
-      s.tilled.push(i);
-      game.dirty.add(i);
-    }
-  }
+  claimFootprint(game, s);
+  tillFields(game, s);
   game.settlements.push(s);
   // units can't share a square with an enemy settlement — nudge them off
-  const ti = s.y * w + s.x;
+  const foot = new Set(settTiles(game.map, s));
   for (const b of game.blobs) {
     if (b.dead || b.owner === owner) continue;
-    if (Math.floor(b.x) === s.x && Math.floor(b.y) === s.y) {
-      const spot = nearestPassable(game.map, s.x, s.y, 3, null, new Set([ti]));
+    if (foot.has(tileIdx(game, b.x, b.y))) {
+      const spot = nearestPassable(game.map, s.x + 1, s.y + 1, 4, null, foot);
       if (spot) { b.x = spot.x + 0.5; b.y = spot.y + 0.5; b.path = null; b.pathGoal = null; }
     }
   }
@@ -292,6 +341,11 @@ function foundSettlement(game, owner, x, y) {
 
 function destroySettlement(game, s, why) {
   for (const i of s.tilled) { game.tilledBy[i] = 0; game.dirty.add(i); }
+  // the footprint reverts to ordinary land with its natural fertility
+  for (const i of settTiles(game.map, s)) {
+    if (game.settAt[i] === s.id) game.settAt[i] = 0;
+    game.dirty.add(i);
+  }
   for (const b of game.blobs) if (b.working === s.id) b.working = null;
   game.settlements = game.settlements.filter(x => x.id !== s.id);
   for (const r of [...game.routes]) {
@@ -302,8 +356,8 @@ function destroySettlement(game, s, why) {
   delete game.known[s.id];
   delete game.ai.known[s.id];
   if (game.pvp) { delete game.knowns[0][s.id]; delete game.knowns[1][s.id]; }
-  game.events.push({ owner: s.owner, msg: '💥 Your settlement was destroyed!', x: s.x, y: s.y });
-  game.events.push({ owner: 1 - s.owner, msg: '🔥 Enemy settlement destroyed!', x: s.x, y: s.y });
+  game.events.push({ owner: s.owner, msg: '💥 Your settlement was destroyed!', x: s.x + 1, y: s.y + 1 });
+  game.events.push({ owner: 1 - s.owner, msg: '🔥 Enemy settlement destroyed!', x: s.x + 1, y: s.y + 1 });
 }
 
 // ---------------------------------------------------------------- ops (player + AI share these)
@@ -323,7 +377,7 @@ export function opMove(game, b, x, y, attack) {
 // Field blobs may only become farmers at a friendly settlement.
 export function isAtHome(game, b) {
   return game.settlements.some(s =>
-    s.owner === b.owner && dist(s.x + 0.5, s.y + 0.5, b.x, b.y) <= C.TERRITORY);
+    s.owner === b.owner && dist(s.x + 1, s.y + 1, b.x, b.y) <= C.TERRITORY);
 }
 
 export function opSetRole(game, b, role) {
@@ -337,7 +391,7 @@ export function opSetRole(game, b, role) {
     let s = null, bd = Infinity;
     for (const st of game.settlements) {
       if (st.owner !== b.owner) continue;
-      const d = dist(st.x + 0.5, st.y + 0.5, b.x, b.y);
+      const d = dist(st.x + 1, st.y + 1, b.x, b.y);
       if (d <= C.TERRITORY && d < bd) { bd = d; s = st; }
     }
     if (!s) return { err: 'Farmers can only be assigned at a friendly settlement' };
@@ -407,14 +461,36 @@ export function opSplit(game, b, takeN) {
   return { ok: true, blob: nb };
 }
 
+// A 2×2 footprint anchored at (ax, ay) fits when all four tiles are in
+// bounds, non-mountain, not another settlement's farmland, and not under
+// another settlement.
+export function footprintFits(game, ax, ay) {
+  const { w, h } = game.map;
+  for (let dy = 0; dy <= 1; dy++) {
+    for (let dx = 0; dx <= 1; dx++) {
+      const cx = ax + dx, cy = ay + dy;
+      if (cx < 0 || cy < 0 || cx >= w || cy >= h) return false;
+      const i = cy * w + cx;
+      if (game.map.mountain[i] || game.tilledBy[i] || game.settAt[i]) return false;
+    }
+  }
+  return true;
+}
+
 export function canBuildAt(game, b) {
   const tx = Math.floor(b.x), ty = Math.floor(b.y);
-  if (!passable(game.map, tx, ty)) return { err: 'Can\'t build on mountains' };
-  if (game.tilledBy[ty * game.map.w + tx]) return { err: 'Too close to farmland' };
-  for (const s of game.settlements) {
-    if (dist(s.x, s.y, tx, ty) < C.SETT_MIN_DIST) return { err: 'Too close to another settlement' };
+  // try the four 2×2 placements that include the builder's tile
+  let anchor = null;
+  for (const [ax, ay] of [[tx, ty], [tx - 1, ty], [tx, ty - 1], [tx - 1, ty - 1]]) {
+    if (footprintFits(game, ax, ay)) { anchor = { x: ax, y: ay }; break; }
   }
-  return { ok: true, x: tx, y: ty };
+  if (!anchor) return { err: 'No room for a settlement here — needs a clear 2×2 area' };
+  for (const s of game.settlements) {
+    if (dist(s.x + 1, s.y + 1, anchor.x + 1, anchor.y + 1) < C.SETT_MIN_DIST) {
+      return { err: 'Too close to another settlement' };
+    }
+  }
+  return { ok: true, x: anchor.x, y: anchor.y };
 }
 
 export function opBuild(game, b) {
@@ -453,7 +529,8 @@ export function opSetMode(game, s, mode) {
 export function opFieldGarrison(game, s) {
   const g = garrisonTotal(s);
   if (g === 0) return { err: 'No garrison' };
-  const spot = nearestPassable(game.map, s.x + 1, s.y, 3) || { x: s.x, y: s.y };
+  const spot = nearestPassable(game.map, s.x + 2, s.y + 1, 4, null, new Set(settTiles(game.map, s)))
+    || { x: s.x + 2, y: s.y + 1 };
   const b = makeBlob(game, s.owner, spot.x + 0.5, spot.y + 0.5, s.garrison);
   const give = Math.min(s.stockpile, foodCap(b));
   s.stockpile -= give;
@@ -482,7 +559,8 @@ export function opFieldRole(game, s, role, n) {
     }
     return { ok: true, blob: first };
   }
-  const spot = nearestPassable(game.map, s.x + 1, s.y, 3) || { x: s.x, y: s.y };
+  const spot = nearestPassable(game.map, s.x + 2, s.y + 1, 4, null, new Set(settTiles(game.map, s)))
+    || { x: s.x + 2, y: s.y + 1 };
   const count = { deploy: 0, supply: 0, farm: 0 };
   count[role] = n;
   const b = makeBlob(game, s.owner, spot.x + 0.5, spot.y + 0.5, count);
@@ -529,7 +607,7 @@ function backToWorkPlan(game, owner) {
     let homeSett = null, hd = Infinity, atHomeOfAny = false;
     let walkSett = null, wd = Infinity;
     for (const s of setts) {
-      const d = dist(s.x + 0.5, s.y + 0.5, b.x, b.y);
+      const d = dist(s.x + 1, s.y + 1, b.x, b.y);
       if (d <= C.TERRITORY) atHomeOfAny = true;
       if (!(room.get(s.id) > 0)) continue;
       if (d <= C.TERRITORY && d < hd) { hd = d; homeSett = s; }
@@ -592,7 +670,7 @@ export function opBackToWork(game, owner) {
     if (!b.dead) fielded += peelFarmersToFields(game, b, s, n);
   }
   for (const { b, s } of plan.walk) {
-    if (!b.dead && opMove(game, b, s.x + 0.5, s.y + 0.5, false).ok) walking += b.count.farm;
+    if (!b.dead && opMove(game, b, s.x + 1, s.y + 1, false).ok) walking += b.count.farm;
   }
   if (fielded + walking === 0) {
     return { fielded, walking, reason: plan.sawIdle ? (plan.sawDanger ? 'danger' : 'cap') : 'none' };
@@ -623,7 +701,7 @@ export function blobAt(game, wx, wy, maxD) {
 export function settlementAt(game, wx, wy, maxD) {
   let best = null, bd = maxD;
   for (const s of game.settlements) {
-    const d = dist(s.x + 0.5, s.y + 0.5, wx, wy);
+    const d = dist(s.x + 1, s.y + 1, wx, wy);
     if (d < bd) { bd = d; best = s; }
   }
   return best;
@@ -765,7 +843,7 @@ function tickOrder(game, b) {
       b.noMerge = false; // completed a deliberate move — mergeable again
       // working farmers walking to a new field cell stay in the fields
       if (o.type === 'move' && b.working == null) {
-        const s = game.settlements.find(s2 => s2.owner === b.owner && dist(s2.x + 0.5, s2.y + 0.5, b.x, b.y) < 1.4);
+        const s = game.settlements.find(s2 => s2.owner === b.owner && dist(s2.x + 1, s2.y + 1, b.x, b.y) < 1.9);
         if (s) { // garrison
           s.garrison.deploy += b.count.deploy;
           s.garrison.supply += b.count.supply;
@@ -781,7 +859,7 @@ function tickOrder(game, b) {
 // -- supply carriers
 
 function targetPos(tgt, kind) {
-  return kind === 'blob' ? { x: tgt.x, y: tgt.y } : { x: tgt.x + 0.5, y: tgt.y + 0.5 };
+  return kind === 'blob' ? { x: tgt.x, y: tgt.y } : settCenter(tgt);
 }
 
 // No way through to this leg's destination (revealed mountains walled it
@@ -805,8 +883,8 @@ function tickCarrier(game, b) {
   const cap = total(b) * SUP.CARRY_PER_UNIT;
 
   if (o.phase === 'load') {
-    if (dist(b.x, b.y, src.x + 0.5, src.y + 0.5) > 2.2) {
-      if (!b.path || !b.path.length) { if (!ensurePath(game, b, src.x, src.y)) { SUP.removeCarrier(game, route, b.id); b.order = null; return; } }
+    if (dist(b.x, b.y, src.x + 1, src.y + 1) > 2.7) {
+      if (!b.path || !b.path.length) { if (!ensurePath(game, b, src.x + 1, src.y + 1)) { SUP.removeCarrier(game, route, b.id); b.order = null; return; } }
       moveBlob(game, b);
       return;
     }
@@ -823,7 +901,7 @@ function tickCarrier(game, b) {
     }
   } else if (o.phase === 'go') {
     const tp = targetPos(tgt, route.targetKind);
-    if (dist(b.x, b.y, tp.x, tp.y) <= 2.0) { o.phase = 'unload'; b.path = null; return; }
+    if (dist(b.x, b.y, tp.x, tp.y) <= 2.5) { o.phase = 'unload'; b.path = null; return; }
     const stale = b.pathGoal && dist(b.pathGoal.x, b.pathGoal.y, tp.x, tp.y) > 2.5;
     if (!b.path || !b.path.length || (stale && game.tick % 20 === 0)) {
       if (!ensurePath(game, b, tp.x, tp.y)) { releaseBlockedCarrier(game, b, route); return; }
@@ -831,7 +909,7 @@ function tickCarrier(game, b) {
     moveBlob(game, b);
   } else if (o.phase === 'unload') {
     const tp = targetPos(tgt, route.targetKind);
-    if (dist(b.x, b.y, tp.x, tp.y) > 2.6) { o.phase = 'go'; return; }
+    if (dist(b.x, b.y, tp.x, tp.y) > 3.1) { o.phase = 'go'; return; }
     const give = Math.min(o.cargo, cap / 20);
     let taken = 0;
     if (route.targetKind === 'blob') {
@@ -848,9 +926,9 @@ function tickCarrier(game, b) {
     if (taken > 0) SUP.recordDelivery(game, route, taken);
     if (o.cargo <= 0.01 || taken <= 0.001) { o.phase = 'return'; b.path = null; }
   } else { // return
-    if (dist(b.x, b.y, src.x + 0.5, src.y + 0.5) <= 2.2) { o.phase = 'load'; o.wait = 0; b.path = null; return; }
+    if (dist(b.x, b.y, src.x + 1, src.y + 1) <= 2.7) { o.phase = 'load'; o.wait = 0; b.path = null; return; }
     if (!b.path || !b.path.length) {
-      if (!ensurePath(game, b, src.x, src.y)) { releaseBlockedCarrier(game, b, route); return; }
+      if (!ensurePath(game, b, src.x + 1, src.y + 1)) { releaseBlockedCarrier(game, b, route); return; }
     }
     moveBlob(game, b);
   }
@@ -957,8 +1035,8 @@ function tickCombat(game) {
   for (const s of [...game.settlements]) {
     for (const b of alive) {
       if (b.dead || b.owner === s.owner || b.count.deploy === 0) continue;
-      const d = dist(b.x, b.y, s.x + 0.5, s.y + 0.5);
-      if (d > blobRadius(b) + 1.4) continue;
+      const d = dist(b.x, b.y, s.x + 1, s.y + 1);
+      if (d > blobRadius(b) + 1.9) continue;
       b.engagedT = game.tick;
       s.lastHitT = game.tick;
       game.combat.push({ kind: 'bs', b: b.id, s: s.id });
@@ -977,7 +1055,7 @@ function tickCombat(game) {
         if (s.hpFxAcc >= 1) {
           const n = Math.floor(s.hpFxAcc);
           s.hpFxAcc -= n;
-          pushFx(game, { kind: 'hp', x: s.x + 0.5, y: s.y + 0.5, n, t: game.tick });
+          pushFx(game, { kind: 'hp', x: s.x + 1, y: s.y + 1, n, t: game.tick });
         }
       }
       if (s.hp <= 0) { destroySettlement(game, s); break; }
@@ -1002,7 +1080,7 @@ function tickCombat(game) {
 function settlementInDanger(game, s) {
   for (const e of game.blobs) {
     if (e.dead || e.owner === s.owner || e.count.deploy === 0) continue;
-    if (dist(e.x, e.y, s.x + 0.5, s.y + 0.5) <= C.TERRITORY + C.AGGRO) return true;
+    if (dist(e.x, e.y, s.x + 1, s.y + 1) <= C.TERRITORY + C.AGGRO) return true;
   }
   return false;
 }
@@ -1011,12 +1089,12 @@ function shelterFarmers(game, s) {
   let any = false;
   for (const b of game.blobs) {
     if (b.dead || b.working !== s.id) continue;
-    if (opMove(game, b, s.x + 0.5, s.y + 0.5, false).ok) any = true;
+    if (opMove(game, b, s.x + 1, s.y + 1, false).ok) any = true;
     else b.working = null; // no path home — at least stop working
   }
   if (any && game.tick - game.farmAlarmT > 100) {
     game.farmAlarmT = game.tick;
-    game.events.push({ owner: s.owner, msg: '🌱 Your farmers ran to shelter!', x: s.x + 0.5, y: s.y + 0.5 });
+    game.events.push({ owner: s.owner, msg: '🌱 Your farmers ran to shelter!', x: s.x + 1, y: s.y + 1 });
   }
 }
 
@@ -1117,7 +1195,7 @@ function applyGarrisonLosses(game, s, casualties) {
     s.garrison[role]--;
     whole--; removed++;
   }
-  if (removed > 0) pushFx(game, { kind: 'loss', x: s.x + 0.5, y: s.y + 0.5, n: removed, t: game.tick });
+  if (removed > 0) pushFx(game, { kind: 'loss', x: s.x + 1, y: s.y + 1, n: removed, t: game.tick });
 }
 
 // -- food / pillage / starvation
@@ -1141,7 +1219,7 @@ export function pillageCells(game, b) {
       const d = dist(tx + 0.5, ty + 0.5, b.x, b.y);
       if (d > reach) continue;
       const i = ty * w + tx;
-      if (game.map.mountain[i]) continue;
+      if (game.map.mountain[i] || game.settAt[i]) continue;
       cells.push({ i, d });
     }
   }
@@ -1161,7 +1239,7 @@ function tickFood(game, b) {
     // army is walking or standing still.
     const ci = tileIdx(game, b.x, b.y);
     const pi = tileIdx(game, b.prevX, b.prevY);
-    if (ci !== pi && !game.map.mountain[ci]) {
+    if (ci !== pi && !game.map.mountain[ci] && !game.settAt[ci]) {
       const loss = Math.min(game.map.fert[ci], C.FERT_LEVEL * (n >= 10 ? 2 : 1));
       if (loss > 0.0001) {
         game.map.fert[ci] -= loss;
@@ -1297,7 +1375,7 @@ function tickSettlement(game, s) {
   if (s.stockpile > 0.01) {
     for (const b of game.blobs) {
       if (b.dead || b.owner !== s.owner) continue;
-      if (dist(b.x, b.y, s.x + 0.5, s.y + 0.5) > C.TERRITORY) continue;
+      if (dist(b.x, b.y, s.x + 1, s.y + 1) > C.TERRITORY) continue;
       const need = foodCap(b) - b.food;
       if (need <= 0) continue;
       const give = Math.min(need, s.stockpile, total(b) * 0.1);
@@ -1387,17 +1465,17 @@ function updateVisionFor(game, owner, fog, known) {
     if (!b.dead && b.owner === owner) markCircle(fog, game.map, b.x, b.y, C.VISION_BLOB);
   }
   for (const s of game.settlements) {
-    if (s.owner === owner) markCircle(fog, game.map, s.x + 0.5, s.y + 0.5, C.VISION_SETT);
+    if (s.owner === owner) markCircle(fog, game.map, s.x + 1, s.y + 1, C.VISION_SETT);
   }
   // remember enemy settlements we can currently see; forget destroyed ones
   for (const s of game.settlements) {
-    if (s.owner !== owner && fog[s.y * game.map.w + s.x] === 2) {
+    if (s.owner !== owner && settTiles(game.map, s).some(i => fog[i] === 2)) {
       known[s.id] = { x: s.x, y: s.y };
     }
   }
   for (const id of Object.keys(known)) {
     const k = known[id];
-    if (fog[k.y * game.map.w + k.x] === 2 && !game.settlements.some(s => s.id === +id)) {
+    if (settTiles(game.map, k).some(i => fog[i] === 2) && !game.settlements.some(s => s.id === +id)) {
       delete known[id];
     }
   }
@@ -1452,7 +1530,7 @@ export function serialize(game) {
   const fertDelta = {};
   for (const i of game.pillaged) fertDelta[i] = game.map.fert[i];
   const data = {
-    v: 3,
+    v: 4,
     seed: game.seed, sizeKey: game.sizeKey, difficulty: game.difficulty,
     tick: game.tick, nextId: game.nextId, result: game.result,
     blobs: game.blobs.filter(b => !b.dead).map(b => ({
@@ -1508,6 +1586,7 @@ export function deserialize(data, prev) {
     tick: data.tick, nextId: data.nextId,
     blobs: [], settlements: [], routes: [],
     tilledBy: new Int32Array(map.w * map.h),
+    settAt: new Int32Array(map.w * map.h),
     pillaged: new Set(),
     dirty,
     fog: data.fog ? b64ToU8(data.fog) : new Uint8Array(map.w * map.h),
@@ -1543,18 +1622,27 @@ export function deserialize(data, prev) {
       garrLoss: 0, lastHitT: -999, tilled: [],
       flow: sd.flow || 0, flowAcc: 0,
     };
+    // pre-v4 saves stored a single-tile settlement; the same (x, y) now
+    // anchors a 2×2 footprint. If that footprint runs off the map or
+    // onto a mountain, try the other anchors that still contain the
+    // original tile; failing that, clamp into bounds and accept the
+    // blocked tile (mountains inside a footprint are impassable anyway).
     const { w, h } = map;
-    for (let dy = -2; dy <= 2; dy++) {
-      for (let dx = -2; dx <= 2; dx++) {
-        const tx = s.x + dx, ty = s.y + dy;
-        if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
-        if (dx * dx + dy * dy > 5.5) continue;
-        const i = ty * w + tx;
-        if (map.mountain[i] || game.tilledBy[i]) continue;
-        game.tilledBy[i] = s.id;
-        s.tilled.push(i);
+    const clear = (ax, ay) => ax >= 0 && ay >= 0 && ax + 1 < w && ay + 1 < h
+      && !map.mountain[ay * w + ax] && !map.mountain[ay * w + ax + 1]
+      && !map.mountain[(ay + 1) * w + ax] && !map.mountain[(ay + 1) * w + ax + 1];
+    if (!clear(s.x, s.y)) {
+      let moved = false;
+      for (const [ax, ay] of [[s.x - 1, s.y], [s.x, s.y - 1], [s.x - 1, s.y - 1]]) {
+        if (clear(ax, ay)) { s.x = ax; s.y = ay; moved = true; break; }
+      }
+      if (!moved) {
+        s.x = Math.max(0, Math.min(w - 2, s.x));
+        s.y = Math.max(0, Math.min(h - 2, s.y));
       }
     }
+    claimFootprint(game, s);
+    tillFields(game, s);
     game.settlements.push(s);
   }
   for (const bd of data.blobs) {
@@ -1580,9 +1668,10 @@ export function deserialize(data, prev) {
     game.routes.push({ ...rd, window: [] });
   }
   if (reuse) {
-    // repaint tiles whose tilled state changed (settlements founded/lost)
+    // repaint tiles whose tilled/footprint state changed (settlements founded/lost)
     for (let i = 0; i < game.tilledBy.length; i++) {
       if (game.tilledBy[i] !== prev.tilledBy[i]) dirty.add(i);
+      if (prev.settAt && game.settAt[i] !== prev.settAt[i]) dirty.add(i);
     }
     // carry interpolation anchors so blobs glide instead of teleporting
     const prevById = new Map();
