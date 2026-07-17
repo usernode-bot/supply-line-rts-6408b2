@@ -23,6 +23,8 @@ export const C = {
   FARM_BASE: 0.009,        // stockpile per tick per unit of tilled fertility
   FARM_GROW_FLOOR: 50,     // farm-mode settlements grow farmers only above this stockpile
   FARM_CAP: 12,            // max auto-grown farmers per settlement garrison
+                           // (TRAIN_* / FARM_* figures are restated in plain
+                           // language in index.html's How to Play — keep in sync)
   VISION_BLOB: 6,
   VISION_SETT: 8,
   AGGRO: 4,
@@ -1305,14 +1307,22 @@ function tickRegen(game) {
 // flow can carry one more mouth.
 export function trainGated(s) { return s.flow < C.EAT_PER_SEC * C.DT; }
 
-function tickSettlement(game, s) {
-  if (!game.settlements.includes(s)) return;
+// Gross farmland income per 100 ms tick: tilled fertility × FARM_BASE,
+// +10% per farmer working the fields, × the AI's difficulty multiplier.
+// Shared by the sim and the settlement panel so the displayed rate can
+// never drift from what actually accrues.
+export function incomeRate(game, s) {
   const aiMult = (!game.pvp && s.owner === 1) ? DIFF[game.difficulty].income : 1;
-  // farmland income accrues in every mode (boosted by farmers actually
-  // working the fields) — training modes pick what the surplus becomes
   let fertSum = 0;
   for (const i of s.tilled) fertSum += game.map.fert[i];
-  const income = fertSum * C.FARM_BASE * (1 + 0.1 * workingCount(game, s)) * aiMult;
+  return fertSum * C.FARM_BASE * (1 + 0.1 * workingCount(game, s)) * aiMult;
+}
+
+function tickSettlement(game, s) {
+  if (!game.settlements.includes(s)) return;
+  // farmland income accrues in every mode (boosted by farmers actually
+  // working the fields) — training modes pick what the surplus becomes
+  const income = incomeRate(game, s);
   s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + income);
   s.flowAcc = (s.flowAcc || 0) + income;
   if (s.mode === 'farm') {

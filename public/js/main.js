@@ -1250,6 +1250,11 @@ function renderPanel(force) {
     const wc = S.workingCount(game, st);
     const pct = Math.round(100 * st.trainTicks / S.C.TRAIN_TICKS);
     const gated = S.trainGated(st);
+    // food/s rates: gross farmland income and net after everyone eats
+    // (rounded before signing so a hair-negative EMA doesn't show "-0.0")
+    const fmtRate = (v) => { const r = Math.round(v * 10) / 10; return (r >= 0 ? '+' : '') + r.toFixed(1); };
+    const gross = S.incomeRate(game, st) * 10;
+    const net = st.flow * 10;
     const pausedNote = '<div class="text-xs text-amber-400 mt-1">⏸ Paused — food at break-even. More farmers or fewer mouths to resume.</div>';
     let prog;
     if (st.mode === 'off') {
@@ -1258,12 +1263,12 @@ function renderPanel(force) {
       const hungry = st.stockpile < S.C.FARM_GROW_FLOOR ? `<span class="text-red-400">(needs ${S.C.FARM_GROW_FLOOR} food)</span>` : '';
       prog = wc >= S.C.FARM_CAP
         ? (gated ? pausedNote
-          : `<div class="text-xs text-zinc-400 mt-1">Farmer cap reached — training ⚔️ deploy unit: ${pct}% ${hungry}</div>`)
-        : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% ${hungry}</div>`;
+          : `<div class="text-xs text-zinc-400 mt-1">Farmer cap reached — training ⚔️ deploy unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${hungry}</div>`)
+        : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${hungry}</div>`;
     } else if (gated && st.stockpile >= S.C.TRAIN_COST) {
       prog = pausedNote;
     } else {
-      prog = `<div class="text-xs text-zinc-400 mt-1">Training ${st.mode === 'supply' ? 'supply' : 'deploy'} unit: ${pct}% ${st.stockpile < S.C.TRAIN_COST ? '<span class="text-red-400">(needs food)</span>' : ''}</div>`;
+      prog = `<div class="text-xs text-zinc-400 mt-1">Training ${st.mode === 'supply' ? 'supply' : 'deploy'} unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${st.stockpile < S.C.TRAIN_COST ? '<span class="text-red-400">(needs food)</span>' : ''}</div>`;
     }
     const fieldRows = ['deploy', 'supply', 'farm'].filter(role => g[role] >= 1).map(role => {
       const max = g[role];
@@ -1281,7 +1286,8 @@ function renderPanel(force) {
         <span class="font-semibold">🏠 Settlement</span>
         <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
       </div>
-      <div class="text-xs text-zinc-400 mb-2">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾</div>
+      <div class="text-xs text-zinc-400 mb-2">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾
+        · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></div>
       <div class="text-xs text-zinc-500 mb-1">Production mode (sets new units' role)</div>
       <div class="flex gap-1 mb-2">
         ${[['farm', '🌾 Farm'], ['supply', '🚚 Supply'], ['deploy', '⚔️ Deploy'], ['off', '⏹ Stop']].map(([m, lbl]) => `<button data-act="mode" data-mode="${m}"
@@ -1289,9 +1295,10 @@ function renderPanel(force) {
       </div>
       ${prog}
       <div class="mt-2 pt-2 border-t border-zinc-800 flex items-center justify-between">
-        <span class="text-xs text-zinc-500">🌱 ${wc}/${S.C.FARM_CAP} farmers working the fields</span>
+        <span class="text-xs text-zinc-500">🌱 ${wc}/${S.C.FARM_CAP} farmers working the fields · <b class="${wc > 0 ? 'text-emerald-400' : 'text-zinc-400'}">+${wc * 10}% food</b></span>
         ${wc > 0 ? '<button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall farmers</button>' : ''}
       </div>
+      <div class="text-xs text-zinc-500 mt-1">Each farmer working the fields adds +10% to this settlement's food income. Sheltered or garrisoned farmers don't count — send them back out to the fields.</div>
       <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}</div>
         ${gTot > 0 ? `

@@ -9,6 +9,7 @@
     { "name": "Challenge inbox container present", "path": "/?demo=1", "expectSelector": "#challenge-inbox" },
     { "name": "In-app confirm dialog present (surrender / start-over flows)", "path": "/?demo=1", "expectSelector": "#confirm-modal" },
     { "name": "Start Match button renders", "path": "/?demo=1", "expectSelector": "#btn-new" },
-    { "name": "Back-to-work button present in top bar", "path": "/?demo=1", "expectSelector": "#btn-backtowork" }
+    { "name": "Back-to-work button present in top bar", "path": "/?demo=1", "expectSelector": "#btn-backtowork" },
+    { "name": "How to Play farmer-income paragraph present", "path": "/?demo=1", "expectSelector": "#help-farmer-income" }
   ]
 }
