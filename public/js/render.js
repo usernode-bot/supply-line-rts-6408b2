@@ -122,26 +122,59 @@ export function createRenderer(canvas, minimap) {
   function paintTile(game, i) {
     const { w } = game.map;
     const px = (i % w) * T, py = ((i / w) | 0) * T;
-    const [r, g, b] = tileRGB(game, i);
+    let [r, g, b] = tileRGB(game, i);
+    const sid = game.tilledBy[i];
+    if (sid) {
+      // per-tile tone jitter on farmland only — breaks up the flat tier
+      // color so a plot reads as worked ground, not wallpaper (#49)
+      const jh = (i * 2246822519) >>> 0;
+      r += (jh & 7) - 3; g += ((jh >>> 3) & 7) - 3; b += ((jh >>> 6) & 7) - 3;
+    }
     tctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
     tctx.fillRect(px, py, T, T);
-    // farmland: vertical plough-furrow stripes in a darker shade of the
-    // same tier color. Spacing, furrow width, phase, and shade depth are
-    // hashed from the tile's x column, so tiles stacked in one column join
-    // into a continuous strip while neighboring strips differ slightly —
-    // reading as separately worked plots (#45). A small per-tile jitter on
-    // the shade breaks up uniformity along each strip.
-    if (game.tilledBy[i]) {
-      const tx = i % w;
-      const hash = (tx * 2654435761) >>> 0;
+    // farmland: plough furrows as a world-space wavy stripe function keyed
+    // on the owning settlement id, so each plot gets its own row direction,
+    // spacing, and wobble; tiles of one plot join seamlessly at any angle,
+    // and repainting a single dirty tile reproduces identical pixels (#49).
+    if (sid) {
+      const WOB_LEN = 14, WOB_AMP = 1.2;        // waviness wavelength / amplitude (px)
+      const hash = (sid * 2654435761) >>> 0;
+      const theta = ((hash >>> 3) & 7) * (Math.PI / 8); // 8 quantized row angles
+      const cos = Math.cos(theta), sin = Math.sin(theta);
       const period = 5 + (hash & 3);            // 5–8 px between furrows
-      const lw = 2 + ((hash >> 2) & 1);         // 2 or 3 px furrow width
-      const phase = (hash >> 3) % period;
-      const depth = 0.18 + ((hash >> 5) & 3) * 0.04 + ((i * 40503) & 3) * 0.015;
+      const lw = 2 + ((hash >>> 2) & 1);        // 2 or 3 px furrow width
+      const phase = (hash >>> 6) % period;
+      const wobPhase = ((hash >>> 9) & 255) / 255 * Math.PI * 2;
+      const depth = 0.18 + ((hash >>> 17) & 3) * 0.04 + ((i * 40503) & 3) * 0.015;
       const [dr, dg, db] = mix([r, g, b], [0, 0, 0], depth);
       tctx.fillStyle = `rgb(${dr | 0},${dg | 0},${db | 0})`;
-      for (let x = phase; x < T; x += period) {
-        tctx.fillRect(px + x, py, Math.min(lw, T - x), T);
+      for (let y = 0; y < T; y++) {
+        const gy = py + y;
+        let run = -1;
+        for (let x = 0; x <= T; x++) {
+          let on = false;
+          if (x < T) {
+            const gx = px + x;
+            const u = gx * cos + gy * sin;                 // along-rows coord
+            const v = -gx * sin + gy * cos;                // across-rows coord
+            const m = (u + phase + Math.sin(v / WOB_LEN + wobPhase) * WOB_AMP) % period;
+            on = (m < 0 ? m + period : m) < lw;
+          }
+          if (on && run < 0) run = x;
+          else if (!on && run >= 0) { tctx.fillRect(px + run, py + y, x - run, 1); run = -1; }
+        }
+      }
+      // sparse crop tufts: 2–4 warm flecks hashed from the tile index,
+      // kept a pixel off the tile border so they never bleed across tiles
+      const th = (i * 3266489917) >>> 0;
+      const tufts = 2 + (th & 1) + ((th >>> 1) & 1);
+      const [cr, cg, cb] = mix([r, g, b], [214, 196, 110], 0.35);
+      tctx.fillStyle = `rgb(${cr | 0},${cg | 0},${cb | 0})`;
+      for (let k = 0; k < tufts; k++) {
+        const kh = ((i + 1) * 374761393 + k * 668265263) >>> 0;
+        const size = 1 + (kh & 1);
+        tctx.fillRect(px + 1 + ((kh >>> 1) % (T - 2 - size)),
+                      py + 1 + ((kh >>> 9) % (T - 2 - size)), size, size);
       }
     }
   }
