@@ -40,6 +40,8 @@ export const C = {
   UNIT_HP_FARM: 10,        // farmers are 1/10th as tough
   SEP_PUSH: 1.2,           // max separation push speed, tiles/sec (= SPEED_DEPLOY)
   SEP_SLACK: 0.03,         // minimum overlap before separation acts (damps jitter)
+  MERGE_FRAC: 0.6,         // merge when centers are within this fraction of touching distance (rA + rB)
+  MERGE_MIN: 0.8,          // floor on the merge trigger — tiny blobs keep the old fixed-0.8 feel
 };
 
 export const DIFF = {
@@ -942,7 +944,8 @@ function tickCarrier(game, b) {
 // overlap is load-bearing are exempt: working farmers (one per tilled
 // cell by design), a carrier unloading onto its own route's target blob
 // (touching distance can exceed the 2.0 unload radius), and potentially
-// mergeable same-owner pairs (merge fires at ≤0.8, well inside touching).
+// mergeable same-owner pairs (merge fires at MERGE_FRAC of touching
+// distance — a deep overlap the push would otherwise make unreachable).
 
 function sepExempt(game, a, b) {
   if (a.working != null || b.working != null) return true;
@@ -956,7 +959,7 @@ function sepExempt(game, a, b) {
     const r = SUP.findRoute(game, b.order.routeId);
     if (r && r.targetKind === 'blob' && r.targetId === a.id) return true;
   }
-  return a.owner === b.owner && a.pillaging === b.pillaging
+  return a.owner === b.owner
     && !(a.noMerge && b.noMerge) && !aRoute && !bRoute;
 }
 
@@ -1400,14 +1403,25 @@ function tickMerge(game) {
     for (let j = i + 1; j < alive.length; j++) {
       const b = alive[j];
       if (b.dead || b.order || b.working != null || a.owner !== b.owner) continue;
-      if (a.pillaging !== b.pillaging) continue;
       if (a.noMerge && b.noMerge) continue; // freshly split pair — stays apart
-      if (dist(a.x, a.y, b.x, b.y) > 0.8) continue;
+      // trigger scales with blob size: deep overlap, not mere touching
+      const trigger = Math.max(C.MERGE_MIN, C.MERGE_FRAC * (blobRadius(a) + blobRadius(b)));
+      if (dist(a.x, a.y, b.x, b.y) > trigger) continue;
       const keep = total(a) >= total(b) ? a : b;
       const gone = keep === a ? b : a;
+      // mass-weighted centroid, taken before the union changes the counts;
+      // the survivor keeps its own pillaging stance (bigger blob wins)
+      const mk = total(keep), mg = total(gone);
+      const cx = (keep.x * mk + gone.x * mg) / (mk + mg);
+      const cy = (keep.y * mk + gone.y * mg) / (mk + mg);
       keep.units = keep.units.concat(gone.units).sort((u, v) => u.seed - v.seed);
       recount(keep);
       keep.food = Math.min(foodCap(keep), keep.food + gone.food);
+      // settle between the two groups so the absorbed half doesn't
+      // teleport; skip onto-mountain / onto-settlement centroids
+      if (passable(game.map, Math.floor(cx), Math.floor(cy)) && !game.settAt[tileIdx(game, cx, cy)]) {
+        keep.x = cx; keep.y = cy;
+      }
       gone.dead = true;
       gone.mergedInto = keep.id;
       game.mergeLog[gone.id] = keep.id;
