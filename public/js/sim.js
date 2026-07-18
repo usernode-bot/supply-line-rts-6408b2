@@ -20,9 +20,12 @@ export const C = {
   STOCK_CAP: 500,
   TRAIN_TICKS: 250,        // 25 s per unit
   TRAIN_COST: 15,
-  FARM_BASE: 0.009,        // stockpile per tick per unit of tilled fertility
+  FARM_PER_FARMER: 0.002,  // stockpile per tick per unit of tilled fertility per farmer-equivalent
+  FARM_BASE_FARMERS: 2,    // built-in farmer-equivalents every settlement gets for free
   FARM_GROW_FLOOR: 50,     // farm-mode settlements grow farmers only above this stockpile
-  FARM_CAP: 12,            // max auto-grown farmers per settlement garrison
+  FARM_SOFT_CAP: 10,       // last fully effective farmer; farm-mode auto-growth target
+  FARM_NEUTRAL_AT: 24,     // farmer whose marginal product equals upkeep on reference land
+  FERT_REF: 20,            // reference tilled fertility (a full lush ring) the neutrality tuning assumes
                            // (TRAIN_* / FARM_* figures are restated in plain
                            // language in index.html's How to Play — keep in sync)
   VISION_BLOB: 6,
@@ -389,7 +392,8 @@ export function opSetRole(game, b, role) {
   const n = total(b);
   if (role === 'farm') {
     // farmers disperse into individual working units on the nearest
-    // friendly settlement's fields (up to the farm cap)
+    // friendly settlement's fields — no cap; past FARM_SOFT_CAP each
+    // extra farmer just yields less (see effectiveFarmers)
     if (b.working != null) return { err: 'Already working the fields' };
     let s = null, bd = Infinity;
     for (const st of game.settlements) {
@@ -398,13 +402,10 @@ export function opSetRole(game, b, role) {
       if (d <= C.TERRITORY && d < bd) { bd = d; s = st; }
     }
     if (!s) return { err: 'Farmers can only be assigned at a friendly settlement' };
-    const capLeft = C.FARM_CAP - workingCount(game, s);
-    if (capLeft <= 0) return { err: `Farm already at capacity (${C.FARM_CAP} farmers)` };
     leaveRoute(game, b);
     b.order = null; b.path = null; b.pathGoal = null; b.chaseId = null;
-    const take = Math.min(n, capLeft);
     const foodShare = b.food / n;
-    for (let k = 0; k < take; k++) {
+    while (b.units.length > 0) {
       const u = b.units.shift();
       convertRole(u, 'farm');
       const f = spawnWorkingFarmer(game, s, u);
@@ -412,9 +413,8 @@ export function opSetRole(game, b, role) {
       b.food = Math.max(0, b.food - foodShare);
     }
     recount(b);
-    if (b.units.length === 0) b.dead = true;
-    else b.food = Math.min(b.food, foodCap(b));
-    return take < n ? { ok: true, partial: true, converted: take } : { ok: true };
+    b.dead = true;
+    return { ok: true };
   }
   if (b.count[role] === n) return { err: 'Already in that role' };
   if (role !== 'supply') leaveRoute(game, b);
@@ -548,9 +548,6 @@ export function opFieldRole(game, s, role, n) {
   if (n <= 0) return { err: 'None to field' };
   if (role === 'farm') {
     // farmers go straight out to work the fields as individual units
-    const capLeft = C.FARM_CAP - workingCount(game, s);
-    if (capLeft <= 0) return { err: `Farm already at capacity (${C.FARM_CAP} farmers)` };
-    n = Math.min(n, capLeft);
     let first = null;
     for (let k = 0; k < n; k++) {
       const b = spawnWorkingFarmer(game, s);
@@ -589,46 +586,40 @@ export function opGarrisonRole(game, s, role) {
 
 function backToWorkPlan(game, owner) {
   const setts = game.settlements.filter(s => s.owner === owner);
-  // field slots left per *safe* settlement; unsafe ones take no farmers
-  const room = new Map();
-  for (const s of setts) {
-    if (!settlementInDanger(game, s)) {
-      room.set(s.id, Math.max(0, C.FARM_CAP - workingCount(game, s)));
-    }
-  }
+  // farmers only return to *safe* settlements; unsafe ones take none
+  // (no field-slot cap — a farm takes any number of returning hands)
+  const safe = new Set();
+  for (const s of setts) if (!settlementInDanger(game, s)) safe.add(s.id);
   const plan = { garrison: [], home: [], walk: [], sawIdle: false, sawDanger: false };
   for (const s of setts) {
     if (s.garrison.farm <= 0) continue;
     plan.sawIdle = true;
-    if (!room.has(s.id)) { plan.sawDanger = true; continue; }
-    const n = Math.min(s.garrison.farm, room.get(s.id));
-    if (n > 0) { plan.garrison.push({ s, n }); room.set(s.id, room.get(s.id) - n); }
+    if (!safe.has(s.id)) { plan.sawDanger = true; continue; }
+    plan.garrison.push({ s, n: s.garrison.farm });
   }
   for (const b of game.blobs) {
     if (b.dead || b.owner !== owner || b.working != null || b.order || b.count.farm <= 0) continue;
-    // nearest safe settlement with room, at home and anywhere
+    // nearest safe settlement, at home and anywhere
     let homeSett = null, hd = Infinity, atHomeOfAny = false;
     let walkSett = null, wd = Infinity;
     for (const s of setts) {
       const d = dist(s.x + 1, s.y + 1, b.x, b.y);
       if (d <= C.TERRITORY) atHomeOfAny = true;
-      if (!(room.get(s.id) > 0)) continue;
+      if (!safe.has(s.id)) continue;
       if (d <= C.TERRITORY && d < hd) { hd = d; homeSett = s; }
       if (d < wd) { wd = d; walkSett = s; }
     }
     const pure = b.count.farm === total(b);
     if (homeSett) {
       plan.sawIdle = true;
-      const n = Math.min(b.count.farm, room.get(homeSett.id));
-      plan.home.push({ b, s: homeSett, n });
-      room.set(homeSett.id, room.get(homeSett.id) - n);
+      plan.home.push({ b, s: homeSett, n: b.count.farm });
     } else if (pure && walkSett) {
       plan.sawIdle = true;
       plan.walk.push({ b, s: walkSett });
     } else if (pure || atHomeOfAny) {
       // idle farmers with nowhere to go right now — remember why
       plan.sawIdle = true;
-      if (setts.length > room.size) plan.sawDanger = true;
+      if (setts.length > safe.size) plan.sawDanger = true;
     }
   }
   return plan;
@@ -676,7 +667,7 @@ export function opBackToWork(game, owner) {
     if (!b.dead && opMove(game, b, s.x + 1, s.y + 1, false).ok) walking += b.count.farm;
   }
   if (fielded + walking === 0) {
-    return { fielded, walking, reason: plan.sawIdle ? (plan.sawDanger ? 'danger' : 'cap') : 'none' };
+    return { fielded, walking, reason: plan.sawIdle && plan.sawDanger ? 'danger' : 'none' };
   }
   return { fielded, walking };
 }
@@ -1123,9 +1114,7 @@ function tickFarmerSafety(game) {
   if (game.tick % 50 === 0) {
     for (const s of game.settlements) {
       if (s.garrison.farm <= 0 || game.tick - s.lastHitT <= 300) continue;
-      const capLeft = C.FARM_CAP - workingCount(game, s);
-      if (capLeft <= 0) continue;
-      if (!settlementInDanger(game, s)) opFieldRole(game, s, 'farm', Math.min(s.garrison.farm, capLeft));
+      if (!settlementInDanger(game, s)) opFieldRole(game, s, 'farm', s.garrison.farm);
     }
   }
 }
@@ -1307,15 +1296,39 @@ function tickRegen(game) {
 // flow can carry one more mouth.
 export function trainGated(s) { return s.flow < C.EAT_PER_SEC * C.DT; }
 
-// Gross farmland income per 100 ms tick: tilled fertility × FARM_BASE,
-// +10% per farmer working the fields, × the AI's difficulty multiplier.
+// Derived farming-efficiency constants (computed, never hand-copied):
+// NEUTRAL_EFF is the marginal efficiency at which a farmer on reference
+// land (FERT_REF tilled fertility) exactly feeds themselves; the linear
+// decline FARM_DR_SLOPE is tuned so farmer FARM_NEUTRAL_AT lands there.
+export const NEUTRAL_EFF = (C.EAT_PER_SEC * C.DT) / (C.FERT_REF * C.FARM_PER_FARMER);
+export const FARM_DR_SLOPE = (1 - NEUTRAL_EFF) / (C.FARM_NEUTRAL_AT - C.FARM_SOFT_CAP);
+
+// Effective farmer count: linear up to the soft cap, then each extra
+// farmer's marginal efficiency drops by FARM_DR_SLOPE (floored at 0) —
+// net-neutral on reference land by farmer FARM_NEUTRAL_AT, a pure drain
+// beyond that.
+export function effectiveFarmers(n) {
+  if (n <= C.FARM_SOFT_CAP) return n;
+  let eff = C.FARM_SOFT_CAP;
+  for (let k = C.FARM_SOFT_CAP + 1; k <= n; k++) {
+    eff += Math.max(0, 1 - (k - C.FARM_SOFT_CAP) * FARM_DR_SLOPE);
+  }
+  return eff;
+}
+
+// Gross farmland income per 100 ms tick: a built-in base worth
+// FARM_BASE_FARMERS farmer-equivalents plus one per working farmer
+// (diminishing past the soft cap — see effectiveFarmers), each yielding
+// tilled fertility × FARM_PER_FARMER, × the AI's difficulty multiplier.
 // Shared by the sim and the settlement panel so the displayed rate can
-// never drift from what actually accrues.
-export function incomeRate(game, s) {
+// never drift from what actually accrues. Pass `farmers` to price a
+// hypothetical crew (the panel uses 0 to isolate the farmers' share).
+export function incomeRate(game, s, farmers) {
   const aiMult = (!game.pvp && s.owner === 1) ? DIFF[game.difficulty].income : 1;
   let fertSum = 0;
   for (const i of s.tilled) fertSum += game.map.fert[i];
-  return fertSum * C.FARM_BASE * (1 + 0.1 * workingCount(game, s)) * aiMult;
+  const n = farmers != null ? farmers : workingCount(game, s);
+  return fertSum * C.FARM_PER_FARMER * (C.FARM_BASE_FARMERS + effectiveFarmers(n)) * aiMult;
 }
 
 function tickSettlement(game, s) {
@@ -1327,11 +1340,12 @@ function tickSettlement(game, s) {
   s.flowAcc = (s.flowAcc || 0) + income;
   if (s.mode === 'farm') {
     // healthy farms grow population: surplus food becomes new farmers who
-    // walk straight out to the fields; past the cap, growth trains deploy
-    // units into the garrison instead (those are pure consumers, so they
-    // gate on the break-even food flow)
+    // walk straight out to the fields; past the soft cap (where returns
+    // start diminishing), growth trains deploy units into the garrison
+    // instead (those are pure consumers, so they gate on the break-even
+    // food flow). Players can still assign more farmers manually.
     if (s.stockpile >= C.FARM_GROW_FLOOR) {
-      const atCap = workingCount(game, s) >= C.FARM_CAP;
+      const atCap = workingCount(game, s) >= C.FARM_SOFT_CAP;
       if (!atCap || !trainGated(s)) {
         s.trainTicks++;
         if (s.trainTicks >= C.TRAIN_TICKS) {

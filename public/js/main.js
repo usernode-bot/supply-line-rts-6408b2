@@ -831,7 +831,6 @@ $('btn-backtowork').addEventListener('click', () => {
     if (r.walking > 0) parts.push(`${r.walking} walking home`);
     toast('🌱 ' + parts.join(' · '));
   } else if (r.reason === 'danger') toast('⚠️ Enemies nearby — farmers stay sheltered');
-  else if (r.reason === 'cap') toast(`Farms at capacity (${S.C.FARM_CAP})`);
   else toast('No idle farmers');
   updateHUD();
   renderPanel(true);
@@ -1061,13 +1060,12 @@ panel.addEventListener('click', (e) => {
   switch (act) {
     case 'role': {
       const role = btn.dataset.role;
-      let err = null, okCount = 0, partial = false;
+      let err = null, okCount = 0;
       for (const b of blobs) {
         const res = doSetRole(b, role);
-        if (res.err) err = res.err; else { okCount++; if (res.partial) partial = true; }
+        if (res.err) err = res.err; else okCount++;
       }
       if (err && !okCount) toast(err);
-      else if (partial) toast(`Farm at capacity (${S.C.FARM_CAP}) — some units stayed behind`);
       break;
     }
     case 'move': ui.pending = 'move'; updateHint(); break;
@@ -1255,15 +1253,21 @@ function renderPanel(force) {
     const fmtRate = (v) => { const r = Math.round(v * 10) / 10; return (r >= 0 ? '+' : '') + r.toFixed(1); };
     const gross = S.incomeRate(game, st) * 10;
     const net = st.flow * 10;
+    const farmContrib = (S.incomeRate(game, st) - S.incomeRate(game, st, 0)) * 10;
+    const farmHint = wc >= S.C.FARM_NEUTRAL_AT
+      ? ' · <span class="text-red-400">extra farmers eat as much as they grow</span>'
+      : wc > S.C.FARM_SOFT_CAP
+        ? ` · <span class="text-amber-400">diminishing returns past ${S.C.FARM_SOFT_CAP}</span>`
+        : '';
     const pausedNote = '<div class="text-xs text-amber-400 mt-1">⏸ Paused — food at break-even. More farmers or fewer mouths to resume.</div>';
     let prog;
     if (st.mode === 'off') {
-      prog = '<div class="text-xs text-zinc-500 mt-1">⏹ Production stopped — stockpiling food.</div>';
+      prog = '<div class="text-xs text-zinc-500 mt-1">📦 Stockpiling food — no units trained.</div>';
     } else if (st.mode === 'farm') {
       const hungry = st.stockpile < S.C.FARM_GROW_FLOOR ? `<span class="text-red-400">(needs ${S.C.FARM_GROW_FLOOR} food)</span>` : '';
-      prog = wc >= S.C.FARM_CAP
+      prog = wc >= S.C.FARM_SOFT_CAP
         ? (gated ? pausedNote
-          : `<div class="text-xs text-zinc-400 mt-1">Farmer cap reached — training ⚔️ deploy unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${hungry}</div>`)
+          : `<div class="text-xs text-zinc-400 mt-1">Farm target (${S.C.FARM_SOFT_CAP}) reached — training ⚔️ deploy unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${hungry}</div>`)
         : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${hungry}</div>`;
     } else if (gated && st.stockpile >= S.C.TRAIN_COST) {
       prog = pausedNote;
@@ -1290,15 +1294,15 @@ function renderPanel(force) {
         · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></div>
       <div class="text-xs text-zinc-500 mb-1">Production mode (sets new units' role)</div>
       <div class="flex gap-1 mb-2">
-        ${[['farm', '🌾 Farm'], ['supply', '🚚 Supply'], ['deploy', '⚔️ Deploy'], ['off', '⏹ Stop']].map(([m, lbl]) => `<button data-act="mode" data-mode="${m}"
+        ${[['farm', '🌾 Farm'], ['supply', '🚚 Supply'], ['deploy', '⚔️ Deploy'], ['off', '📦 Stockpile']].map(([m, lbl]) => `<button data-act="mode" data-mode="${m}"
           class="btn-sm flex-1 px-1 rounded ${st.mode === m ? (m === 'off' ? 'bg-zinc-600 text-white' : 'bg-emerald-700 text-white') : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}">${lbl}</button>`).join('')}
       </div>
       ${prog}
       <div class="mt-2 pt-2 border-t border-zinc-800 flex items-center justify-between">
-        <span class="text-xs text-zinc-500">🌱 ${wc}/${S.C.FARM_CAP} farmers working the fields · <b class="${wc > 0 ? 'text-emerald-400' : 'text-zinc-400'}">+${wc * 10}% food</b></span>
+        <span class="text-xs text-zinc-500">🌱 ${wc} farmer${wc === 1 ? '' : 's'} working the fields · <b class="${wc > 0 ? 'text-emerald-400' : 'text-zinc-400'}">${fmtRate(farmContrib)} food/s</b>${farmHint}</span>
         ${wc > 0 ? '<button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall farmers</button>' : ''}
       </div>
-      <div class="text-xs text-zinc-500 mt-1">Each farmer working the fields adds +10% to this settlement's food income. Sheltered or garrisoned farmers don't count — send them back out to the fields.</div>
+      <div class="text-xs text-zinc-500 mt-1">Income = a built-in base worth ${S.C.FARM_BASE_FARMERS} farmers plus a full share per working farmer, up to ${S.C.FARM_SOFT_CAP}; extra farmers yield less and less, breaking even around ${S.C.FARM_NEUTRAL_AT}. Sheltered or garrisoned farmers don't count — send them back out to the fields.</div>
       <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}</div>
         ${gTot > 0 ? `
