@@ -224,9 +224,11 @@ function attack(game, S, setts, mine, ai, diff) {
       return;
     }
     if (!army.order && !army.pillaging) {
-      // arrived / target gone — pick the next known target or head home
+      // arrived / target gone — pick the next known target or head home.
+      // Plain moves no longer attack-move (#74), so offensives are
+      // explicit siege orders on the remembered settlement.
       const t = nearestKnown(ai, army.x, army.y, game);
-      if (t) S.opMove(game, army, t.x + 1, t.y + 1);
+      if (t) S.opMove(game, army, t.x + 1, t.y + 1, { kind: 'settlement', id: t.id });
       else { ai.attacking = false; ai.armyId = null; }
     }
     return;
@@ -241,7 +243,7 @@ function attack(game, S, setts, mine, ai, diff) {
   const army = candidates[0];
   const t = nearestKnown(ai, army.x, army.y, game);
   if (!t) return; // scouts haven't found the player yet
-  if (!S.opMove(game, army, t.x + 1, t.y + 1).ok) return;
+  if (!S.opMove(game, army, t.x + 1, t.y + 1, { kind: 'settlement', id: t.id }).ok) return;
   ai.armyId = army.id;
   ai.attacking = true;
   ai.lastAttack = game.tick;
@@ -264,9 +266,9 @@ function attack(game, S, setts, mine, ai, diff) {
 
 function nearestKnown(ai, x, y, game) {
   let best = null, bd = Infinity;
-  for (const k of Object.values(ai.known)) {
+  for (const [id, k] of Object.entries(ai.known)) {
     const d = dist(k.x, k.y, x, y);
-    if (d < bd) { bd = d; best = k; }
+    if (d < bd) { bd = d; best = { id: +id, x: k.x, y: k.y }; }
   }
   return best;
 }

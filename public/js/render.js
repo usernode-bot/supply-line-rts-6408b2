@@ -586,6 +586,39 @@ export function createRenderer(canvas, minimap) {
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(fogCanvas, ox, oy, game.map.w * s, game.map.h * s);
 
+    // map boundary — drawn above the fog so the world's edge always
+    // reads, even where the tiles beside it are unexplored (#70)
+    ctx.strokeStyle = 'rgba(148,163,184,0.55)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(ox, oy, game.map.w * s, game.map.h * s);
+
+    // order-confirmation ping: collapsing rings at the ordered
+    // destination so a tap visibly lands (#71) — red for an attack
+    // order, white for a plain move. Above fog: the destination may
+    // still be unexplored.
+    if (ui.ping) {
+      const age = now - ui.ping.t;
+      const DUR = 600;
+      if (age >= DUR) ui.ping = null;
+      else {
+        const px = wx(ui.ping.x), py = wy(ui.ping.y);
+        const col = ui.ping.kind === 'attack' ? '248,113,113' : '255,255,255';
+        ctx.lineWidth = 2;
+        for (let k = 0; k < 2; k++) {
+          const p = age / DUR - k * 0.18;
+          if (p <= 0 || p >= 1) continue;
+          ctx.beginPath();
+          ctx.arc(px, py, (1 - p) * Math.max(18, s * 1.1) + 3, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(${col},${(0.15 + 0.85 * (1 - p)).toFixed(2)})`;
+          ctx.stroke();
+        }
+        ctx.beginPath();
+        ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${col},${(1 - age / DUR).toFixed(2)})`;
+        ctx.fill();
+      }
+    }
+
     // inspected-tile outline (above fog so it stays crisp)
     if (ui.selected && ui.selected.kind === 'tile') {
       const ti = ui.selected.i;
@@ -665,25 +698,20 @@ export function createRenderer(canvas, minimap) {
   }
 
   function drawSettlement(game, st, wx, wy, s, ghost, sel, workingN) {
-    // fills the 2×2 footprint exactly: roof in the top ~30% of the plot,
-    // body below, unit counts inside in a loose triangle (#40)
+    // fills the 2×2 footprint exactly: a plain square keep — no roof
+    // triangle (#67) — with unit counts inside in a loose triangle (#40)
     const x0 = wx(st.x), y0 = wy(st.y);
     const size = 2 * s;
     const cx = x0 + size / 2, cy = y0 + size / 2;
-    const roofY = y0 + size * 0.3;
     const hit = !ghost && st.lastHitT != null && game.tick - st.lastHitT < 3;
     ctx.globalAlpha = ghost ? 0.4 : 1;
-    // body (lower 70% of the plot)
+    // body: the whole plot as one square
     ctx.fillStyle = ownerDark(game, st.owner);
-    ctx.fillRect(x0, roofY, size, y0 + size - roofY);
-    // roof (top 30%, apex at top-center, no overhang past the plot)
-    ctx.beginPath();
-    ctx.moveTo(x0, roofY);
-    ctx.lineTo(cx, y0);
-    ctx.lineTo(x0 + size, roofY);
-    ctx.closePath();
-    ctx.fillStyle = hit ? '#f87171' : ownerColor(game, st.owner);
-    ctx.fill();
+    ctx.fillRect(x0, y0, size, size);
+    if (hit) {
+      ctx.fillStyle = 'rgba(248,113,113,0.4)';
+      ctx.fillRect(x0, y0, size, size);
+    }
     // outline around the full plot (white when selected, red when hit)
     ctx.strokeStyle = hit ? '#f87171' : sel ? '#ffffff' : ownerColor(game, st.owner);
     ctx.lineWidth = sel || hit ? 3 : 2;
@@ -750,6 +778,10 @@ export function createRenderer(canvas, minimap) {
       mctx.fillStyle = ownerColor(game, b.owner);
       mctx.fillRect(b.x * sx - 1, b.y * sy - 1, 3, 3);
     }
+    // map boundary (matches the main view's always-visible edge, #70)
+    mctx.strokeStyle = 'rgba(148,163,184,0.8)';
+    mctx.lineWidth = 1;
+    mctx.strokeRect(0.5, 0.5, mw - 1, mh - 1);
     // view rectangle
     const vw = (canvas.clientWidth / view.scale) * sx;
     const vh = (canvas.clientHeight / view.scale) * sy;
