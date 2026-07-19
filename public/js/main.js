@@ -734,6 +734,7 @@ function startMatch(g) {
   $('game-ui').classList.remove('hidden');
   renderer.resize();
   renderPanel(true);
+  updateGroupsBar();
 }
 
 function backToMenu() {
@@ -910,8 +911,10 @@ function onTap(world, pointerType, screen) {
   const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
   if (st && st.owner === me) { ui.selected = { kind: 'settlement', id: st.id }; renderPanel(true); return; }
   // tap elsewhere with blobs selected → inline order popup at the tap
-  // point; a tapped enemy blob/settlement becomes a direct attack target
-  if (selectedBlobs().length > 0) { showOrderPopup(world, screen, findEnemyTargetAt(world)); return; }
+  // point; a tapped enemy blob/settlement becomes a direct attack target.
+  // Mouse skips this (#79): on desktop left-click only selects/inspects —
+  // right-click is the order button.
+  if (pointerType !== 'mouse' && selectedBlobs().length > 0) { showOrderPopup(world, screen, findEnemyTargetAt(world)); return; }
   // nothing selected → inspect what was tapped
   if (eb && S.isVisible(game, eb.x, eb.y)) {
     ui.selected = { kind: 'enemy-blob', id: eb.id };
@@ -981,59 +984,153 @@ function pingOrder(world, target) {
   ui.ping = { x: world.x, y: world.y, kind: target ? 'attack' : 'move', t: performance.now() };
 }
 
-// ---------------------------------------------------------------- control groups (#69)
+// ---------------------------------------------------------------- control groups (#69, #77)
 // Shift+1–9 assigns the current selection to that number; 1–9 selects the
 // group; pressing the same number twice quickly also centers the camera
-// on it. Session-local UI state — never serialized.
+// on it. The groups bar (#77) shows the same groups as tappable chips, so
+// everything here is reachable by tap alone. Session-local UI state —
+// never serialized.
 
-function onGroupKey(n, shift) {
-  if (!game || game.result) return;
-  if (shift) {
-    if (ui.selected && ui.selected.kind === 'settlement') {
-      const st = selectedSettlement();
-      if (!st) return;
-      groups[n] = { kind: 'settlement', id: st.id };
-      toast(`⌨️ Group ${n} set — settlement`);
-      return;
-    }
-    const blobs = selectedBlobs();
-    if (blobs.length) {
-      groups[n] = { kind: 'blobs', ids: blobs.map(b => b.id) };
-      toast(`⌨️ Group ${n} set — ${blobs.length} blob${blobs.length === 1 ? '' : 's'}`);
-    } else if (groups[n]) {
-      delete groups[n];
-      toast(`⌨️ Group ${n} cleared`);
-    }
-    return;
-  }
+// Resolve a group to live entities, pruning dead ones (blob ids follow
+// the merge log; two old ids can resolve to one survivor — dedupe).
+// Shared by the digit keys and the groups-bar chips.
+function resolveGroup(n) {
   const g = groups[n];
-  if (!g) return;
+  if (!g || !game) return null;
+  if (g.kind === 'settlement') {
+    const st = game.settlements.find(s => s.id === g.id && s.owner === me);
+    if (!st) { delete groups[n]; return null; }
+    return { kind: 'settlement', st };
+  }
+  const resolved = g.ids.map(findBlob).filter(b => b && !b.dead && b.owner === me);
+  const blobs = [...new Map(resolved.map(b => [b.id, b])).values()];
+  if (!blobs.length) { delete groups[n]; return null; }
+  g.ids = blobs.map(b => b.id);
+  return { kind: 'blobs', blobs };
+}
+
+function assignGroup(n) {
+  if (ui.selected && ui.selected.kind === 'settlement') {
+    const st = selectedSettlement();
+    if (!st) return false;
+    groups[n] = { kind: 'settlement', id: st.id };
+    toast(`Group ${n} set — settlement`);
+    return true;
+  }
+  const blobs = selectedBlobs();
+  if (blobs.length) {
+    groups[n] = { kind: 'blobs', ids: blobs.map(b => b.id) };
+    toast(`Group ${n} set — ${blobs.length} blob${blobs.length === 1 ? '' : 's'}`);
+    return true;
+  }
+  return false;
+}
+
+// Select group n; a second select within 450 ms also centers the camera.
+function selectGroup(n) {
+  const r = resolveGroup(n);
+  if (!r) return;
   const now = performance.now();
   const dbl = lastGroupTap.n === n && now - lastGroupTap.t < 450;
   lastGroupTap = { n, t: now };
-  if (g.kind === 'settlement') {
-    const st = game.settlements.find(s => s.id === g.id && s.owner === me);
-    if (!st) { delete groups[n]; return; }
-    ui.selected = { kind: 'settlement', id: st.id };
-    if (dbl) { view.cx = st.x + 1; view.cy = st.y + 1; input.clampView(); }
+  if (r.kind === 'settlement') {
+    ui.selected = { kind: 'settlement', id: r.st.id };
+    if (dbl) { view.cx = r.st.x + 1; view.cy = r.st.y + 1; input.clampView(); }
   } else {
-    // resolve through the merge log so merged blobs stay in the group
-    // (two old ids can resolve to one survivor — dedupe)
-    const resolved = g.ids.map(findBlob).filter(b => b && !b.dead && b.owner === me);
-    const blobs = [...new Map(resolved.map(b => [b.id, b])).values()];
-    const ids = blobs.map(b => b.id);
-    if (!ids.length) { delete groups[n]; return; }
-    g.ids = ids;
+    const ids = r.blobs.map(b => b.id);
     ui.selected = ids.length === 1 ? { kind: 'blob', id: ids[0] } : { kind: 'multi', ids: ids.slice() };
     if (dbl) {
       let cx = 0, cy = 0;
-      for (const b of blobs) { cx += b.x; cy += b.y; }
-      view.cx = cx / blobs.length; view.cy = cy / blobs.length;
+      for (const b of r.blobs) { cx += b.x; cy += b.y; }
+      view.cx = cx / r.blobs.length; view.cy = cy / r.blobs.length;
       input.clampView();
     }
   }
   renderPanel(true);
+  updateGroupsBar();
 }
+
+function onGroupKey(n, shift) {
+  if (!game || game.result) return;
+  if (shift) {
+    if (!assignGroup(n) && groups[n]) {
+      delete groups[n];
+      toast(`⌨️ Group ${n} cleared`);
+    }
+    updateGroupsBar();
+    return;
+  }
+  selectGroup(n);
+}
+
+// -- groups bar (#77): chips on the left edge mirroring groups 1–9.
+// Tap = select, tap again quickly = center, ✕ on the active chip clears
+// it, ＋ assigns the current selection to the lowest free number.
+
+let lastGroupsHTML = '';
+
+function groupIsActive(r) {
+  if (!ui.selected) return false;
+  if (r.kind === 'settlement') {
+    return ui.selected.kind === 'settlement' && ui.selected.id === r.st.id;
+  }
+  if (ui.selected.kind !== 'blob' && ui.selected.kind !== 'multi') return false;
+  const selIds = selectedBlobs().map(b => b.id);
+  const ids = new Set(r.blobs.map(b => b.id));
+  return selIds.length === ids.size && selIds.every(id => ids.has(id));
+}
+
+function updateGroupsBar() {
+  const bar = $('groups-bar');
+  if (!bar) return;
+  if (!game || game.result) {
+    bar.classList.add('hidden');
+    lastGroupsHTML = '';
+    return;
+  }
+  const chips = [];
+  for (let n = 1; n <= 9; n++) {
+    const r = resolveGroup(n);
+    if (!r) continue;
+    const label = r.kind === 'settlement'
+      ? '🏠'
+      : `👥${r.blobs.reduce((sum, b) => sum + S.total(b), 0)}`;
+    const active = groupIsActive(r);
+    chips.push(`<button data-gsel="${n}" class="btn-sm px-2 rounded-lg border flex items-center gap-1 ${active ? 'bg-violet-700 border-violet-500 text-white' : 'bg-zinc-900/85 border-zinc-700 text-zinc-200 hover:bg-zinc-800'}">
+      <b>${n}</b><span class="text-xs">${label}</span>${active ? `<span data-gdel="${n}" class="text-xs text-violet-200 pl-1">✕</span>` : ''}
+    </button>`);
+  }
+  const canAssign = ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'multi' || ui.selected.kind === 'settlement');
+  if (canAssign) {
+    chips.push('<button data-gadd="1" class="btn-sm px-2 rounded-lg bg-zinc-900/70 border border-dashed border-zinc-600 text-zinc-400 hover:bg-zinc-800">＋</button>');
+  }
+  const html = chips.join('');
+  bar.classList.toggle('hidden', !html);
+  if (html !== lastGroupsHTML) {
+    lastGroupsHTML = html;
+    bar.innerHTML = html;
+  }
+}
+
+$('groups-bar').addEventListener('click', (e) => {
+  if (!game || game.result) return;
+  const del = e.target.closest('[data-gdel]');
+  if (del) {
+    delete groups[+del.dataset.gdel];
+    toast(`Group ${del.dataset.gdel} cleared`);
+    updateGroupsBar();
+    return;
+  }
+  const sel = e.target.closest('[data-gsel]');
+  if (sel) { selectGroup(+sel.dataset.gsel); return; }
+  if (e.target.closest('[data-gadd]')) {
+    let n = 0;
+    for (let k = 1; k <= 9; k++) if (!groups[k]) { n = k; break; }
+    if (!n) { toast('All groups in use'); return; }
+    assignGroup(n);
+    updateGroupsBar();
+  }
+});
 
 function onCancel() {
   if (!orderPopup.classList.contains('hidden')) { hideOrderPopup(); return; }
@@ -1407,27 +1504,44 @@ function renderPanelInner(force) {
     const g = st.garrison;
     const gTot = S.garrisonTotal(st);
     const wc = S.workingCount(game, st);
+    const y = S.farmYield(game, st);
     const pct = Math.round(100 * st.trainAcc / S.C.TRAIN_COST);
     const gated = S.trainGated(st);
-    // food/s rates: gross farmland income and net after everyone eats
+    // food/s rates: gross farmland income and per-component breakdown
     // (rounded before signing so a hair-negative EMA doesn't show "-0.0")
     const fmtRate = (v) => { const r = Math.round(v * 10) / 10; return (r >= 0 ? '+' : '') + r.toFixed(1); };
-    const gross = S.incomeRate(game, st) * 10;
-    const net = st.flow * 10;
-    const farmContrib = (S.incomeRate(game, st) - S.incomeRate(game, st, 0)) * 10;
-    const farmHint = wc >= S.C.FARM_NEUTRAL_AT
-      ? ' · <span class="text-red-400">extra farmers eat as much as they grow</span>'
-      : wc > S.C.FARM_DR_START
-        ? ` · <span class="text-amber-400">diminishing returns past ${S.C.FARM_DR_START}</span>`
-        : '';
+    const gross = (y.base + y.farmers) * 10;
+    const farmContrib = y.farmers * 10;
+    // itemised food flow (#76): the sim's smoothed per-component ledger.
+    // Near-zero rows hide (farmers always shows); net = the visible sum,
+    // so unlike st.flow it includes training investment.
+    const pe = st.partsEma || {};
+    const FLOW_ROWS = [
+      ['base', '🌾 Land (base)'],
+      ['farmers', '🌱 Farmers working plots'],
+      ['routeIn', '🚚 Route deliveries in'],
+      ['upkeep', '🛡️ Garrison upkeep'],
+      ['fed', '🍖 Feeding armies in territory'],
+      ['routeOut', '🚚 Routes loading out'],
+      ['train', '⚒️ Growing/training unit'],
+    ];
+    const net = FLOW_ROWS.reduce((sum, [k]) => sum + (pe[k] || 0), 0) * 10;
+    const flowRows = FLOW_ROWS.map(([k, lbl]) => {
+      const v = (pe[k] || 0) * 10;
+      if (k !== 'farmers' && Math.abs(v) < 0.05) return '';
+      return `<div class="flex justify-between text-xs text-zinc-400"><span>${lbl}</span><b class="${Math.round(v * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(v)}/s</b></div>`;
+    }).join('');
+    const farmHint = wc > y.worthwhileCells
+      ? ' · <span class="text-red-400">no worthwhile plot free — extra farmers only eat</span>'
+      : '';
     const pausedNote = '<div class="text-xs text-amber-400 mt-1">⏸ Paused — food at break-even. More farmers or fewer mouths to resume.</div>';
     let prog;
     if (st.mode === 'off') {
       prog = '<div class="text-xs text-zinc-500 mt-1">📦 Stockpiling food — no units trained.</div>';
     } else if (st.mode === 'farm') {
       const hungry = st.stockpile < S.C.FARM_GROW_FLOOR ? `<span class="text-red-400">(needs ${S.C.FARM_GROW_FLOOR} food)</span>` : '';
-      prog = wc >= S.C.FARM_NEUTRAL_AT
-        ? `<div class="text-xs text-zinc-400 mt-1">Break-even crew (${S.C.FARM_NEUTRAL_AT}) reached — stockpiling surplus food.</div>`
+      prog = wc >= y.worthwhileCells
+        ? `<div class="text-xs text-zinc-400 mt-1">Every worthwhile plot is manned (${y.worthwhileCells}) — stockpiling surplus food.</div>`
         : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${hungry}</div>`;
     } else if (gated && st.stockpile > 0) {
       prog = pausedNote;
@@ -1453,8 +1567,9 @@ function renderPanelInner(force) {
         <span class="font-semibold">🏠 Settlement</span>
         <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
       </div>
-      <div class="text-xs text-zinc-400 mb-2">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾
+      <div class="text-xs text-zinc-400 mb-1">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾
         · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></div>
+      <div class="mb-2 pl-2 border-l border-zinc-800">${flowRows}</div>
       <div class="text-xs text-zinc-500 mb-1">Production mode (sets new units' role)</div>
       <div class="flex gap-1 mb-2">
         ${[['farm', '🌾 Farm'], ['supply', '🚚 Supply'], ['deploy', '⚔️ Deploy'], ['off', '📦 Stockpile']].map(([m, lbl]) => `<button data-act="mode" data-mode="${m}"
@@ -1462,14 +1577,14 @@ function renderPanelInner(force) {
       </div>
       ${prog}
       <div class="mt-2 pt-2 border-t border-zinc-800">
-        <div class="text-xs text-zinc-500">🌱 ${wc} farmer${wc === 1 ? '' : 's'} working the fields · <b class="${wc > 0 ? 'text-emerald-400' : 'text-zinc-400'}">${fmtRate(farmContrib)} food/s</b>${farmHint}</div>
+        <div class="text-xs text-zinc-500">🌱 ${wc} farmer${wc === 1 ? '' : 's'} · <b class="text-zinc-300">${y.workedCells} of ${st.tilled.length} plots worked</b> · <b class="${y.workedCells > 0 ? 'text-emerald-400' : 'text-zinc-400'}">${fmtRate(farmContrib)} food/s</b>${farmHint}</div>
         ${wc >= 2 ? `
         <div class="flex items-center gap-2 mt-1">
           <input id="recall-count" type="range" min="1" max="${wc}" step="1" value="${rc}" class="flex-1">
           <button data-act="recall" id="recall-btn" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Recall ${rc}</button>
         </div>` : wc === 1 ? '<div class="mt-1 text-right"><button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall 1</button></div>' : ''}
       </div>
-      <div class="text-xs text-zinc-500 mt-1">Income = a built-in base worth ${S.C.FARM_BASE_FARMERS} farmers plus a full share per working farmer; past ${S.C.FARM_DR_START} each extra farmer yields a little less, breaking even around ${S.C.FARM_NEUTRAL_AT} — where farm growth stops and surplus is stockpiled. Sheltered or garrisoned farmers don't count — send them back out to the fields.</div>
+      <div class="text-xs text-zinc-500 mt-1">Each worked plot pays its own fertility — farmers claim the lushest free plot first, and two farmers on one plot don't double it. Unworked farmland only yields a small built-in base worth ${S.C.FARM_BASE_FARMERS} farmers. Plots poorer than Sparse aren't worth manning; farm growth stops once every worthwhile plot is worked. Sheltered, garrisoned or still-walking farmers earn nothing yet.</div>
       <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}</div>
         ${gTot > 0 ? `
@@ -1550,6 +1665,7 @@ function updateHUD() {
   const btw = $('btn-backtowork');
   btw.classList.toggle('hidden', idleN === 0 || !!game.result);
   if (idleN > 0) btw.textContent = `🌱 Back to work (${idleN})`;
+  updateGroupsBar();
   if (isGuest()) {
     // guest toasts come from host snapshots (netEvents); the local
     // dead-reckoning sim's events would duplicate them

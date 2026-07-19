@@ -249,9 +249,11 @@ function attack(game, S, setts, mine, ai, diff) {
   ai.lastAttack = game.tick;
 
   // attach a supply chain sized to distance: reuse an idle pure-supply
-  // blob if one is sitting around, else field from a garrison
+  // blob if one is sitting around, else field from a garrison. Carriers
+  // move at deploy speed now (#80), so ~1 supply feeds 2.5 fighters at a
+  // quarter-map haul instead of the old 5.
   const d = dist(army.x, army.y, t.x, t.y);
-  const wanted = Math.max(2, Math.ceil((army.count.deploy / 5) * (d / (game.map.w * 0.25))));
+  const wanted = Math.max(2, Math.ceil((army.count.deploy / 2.5) * (d / (game.map.w * 0.25))));
   let carrier = mine.find(b =>
     !b.order && b.count.supply > 0 && b.count.deploy === 0 && b.count.farm === 0 && b.id !== army.id);
   if (!carrier) {
