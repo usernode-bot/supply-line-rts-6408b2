@@ -1445,12 +1445,13 @@ function renderPanelInner(force) {
     panel.classList.remove('hidden');
     if (S.settVisible(game, est)) {
       const pct = Math.max(0, Math.min(100, Math.round(100 * est.hp / S.C.SETT_HP)));
+      const barCol = pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
       setPanelHTML(`
         <div class="flex items-center justify-between mb-1">
           <span class="font-semibold text-red-300">🏠 Enemy settlement</span>
           <span class="text-xs ${est.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-400'}">HP ${Math.ceil(est.hp)}/${S.C.SETT_HP}</span>
         </div>
-        <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-red-500" style="width:${pct}%"></div></div>
+        <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full ${barCol}" style="width:${pct}%"></div></div>
         <div class="text-xs text-zinc-400">${est.hp >= S.C.SETT_HP ? 'Walls intact.' : est.hp > S.C.SETT_HP / 2 ? 'Damaged.' : 'Heavily damaged!'} Tap it with deploy units selected to lay siege.</div>`);
     } else {
       setPanelHTML(`
@@ -1508,14 +1509,18 @@ function renderPanelInner(force) {
     const pct = Math.round(100 * st.trainAcc / S.C.TRAIN_COST);
     const gated = S.trainGated(st);
     // food/s rates: gross farmland income and per-component breakdown
-    // (rounded before signing so a hair-negative EMA doesn't show "-0.0")
+    // (rounded before signing so a hair-negative sum doesn't show "-0.0")
     const fmtRate = (v) => { const r = Math.round(v * 10) / 10; return (r >= 0 ? '+' : '') + r.toFixed(1); };
     const gross = (y.base + y.farmers) * 10;
     const farmContrib = y.farmers * 10;
-    // itemised food flow (#76): the sim's smoothed per-component ledger.
+    // itemised food flow (#76): live 1 s window (#92) — the sum of the
+    // sim's last 10 per-tick component ledgers is food/s directly.
     // Near-zero rows hide (farmers always shows); net = the visible sum,
     // so unlike st.flow it includes training investment.
-    const pe = st.partsEma || {};
+    const pe = {};
+    for (const p of st.partsWin || []) {
+      for (const k in p) pe[k] = (pe[k] || 0) + p[k];
+    }
     const FLOW_ROWS = [
       ['base', '🌾 Land (base)'],
       ['farmers', '🌱 Farmers working plots'],
@@ -1525,9 +1530,9 @@ function renderPanelInner(force) {
       ['routeOut', '🚚 Routes loading out'],
       ['train', '⚒️ Growing/training unit'],
     ];
-    const net = FLOW_ROWS.reduce((sum, [k]) => sum + (pe[k] || 0), 0) * 10;
+    const net = FLOW_ROWS.reduce((sum, [k]) => sum + (pe[k] || 0), 0);
     const flowRows = FLOW_ROWS.map(([k, lbl]) => {
-      const v = (pe[k] || 0) * 10;
+      const v = pe[k] || 0;
       if (k !== 'farmers' && Math.abs(v) < 0.05) return '';
       return `<div class="flex justify-between text-xs text-zinc-400"><span>${lbl}</span><b class="${Math.round(v * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(v)}/s</b></div>`;
     }).join('');
@@ -1562,11 +1567,14 @@ function renderPanelInner(force) {
         <button data-act="fieldn" data-role="${role}" id="field-btn-${role}" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Field ${cur}</button>
       </div>`;
     }).join('');
+    const hpBarPct = Math.max(0, Math.min(100, Math.round(100 * st.hp / S.C.SETT_HP)));
+    const hpBarCol = hpBarPct >= 75 ? 'bg-emerald-500' : hpBarPct >= 40 ? 'bg-amber-500' : 'bg-red-500';
     setPanelHTML(`
       <div class="flex items-center justify-between mb-1">
         <span class="font-semibold">🏠 Settlement</span>
         <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
       </div>
+      <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full ${hpBarCol}" style="width:${hpBarPct}%"></div></div>
       <div class="text-xs text-zinc-400 mb-1">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾
         · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></div>
       <div class="mb-2 pl-2 border-l border-zinc-800">${flowRows}</div>
@@ -1616,8 +1624,9 @@ function renderPanelInner(force) {
   const hpPct = Math.round(100 * hpSum / Math.max(1, hpMax));
   const hpColor = hpPct >= 75 ? 'text-emerald-400' : hpPct >= 40 ? 'text-amber-400' : 'text-red-400';
   // nutrition trend across the selection: net food gain/loss per second
-  // (eating vs pillage / territory / route intake), from the sim's EMA
-  const trend = blobs.reduce((s2, b) => s2 + (b.foodTrend || 0), 0) * 10;
+  // (eating vs pillage / territory / route intake) — live sum of the
+  // sim's rolling 1 s window (#92)
+  const trend = blobs.reduce((s2, b) => s2 + (b.foodWin || []).reduce((a, d) => a + d, 0), 0);
   const trendTag = trend > 0.05
     ? `<span class="text-emerald-400" title="Food trend">▲ +${trend.toFixed(1)}/s</span>`
     : trend < -0.05
