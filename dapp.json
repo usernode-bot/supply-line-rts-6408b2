@@ -18,6 +18,7 @@
     { "name": "How to Play pillage-stance paragraph present", "path": "/?demo=1", "expectSelector": "#help-pillage" },
     { "name": "Move-vs-attack help paragraph present", "path": "/?demo=1", "expectSelector": "#help-move-attack" },
     { "name": "Control-groups help paragraph present", "path": "/?demo=1", "expectSelector": "#help-groups" },
+    { "name": "Healing help paragraph present", "path": "/?demo=1", "expectSelector": "#help-healing" },
     { "name": "Groups bar container present", "path": "/?demo=1", "expectSelector": "#groups-bar" }
   ]
 }

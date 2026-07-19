@@ -42,6 +42,7 @@ export const C = {
   TERRITORY: 5,            // settlement territory radius: feeds friendly blobs, farmer reach, drawn ring
   UNIT_HP: 100,            // individual unit health (deploy / supply)
   UNIT_HP_FARM: 10,        // farmers are 1/10th as tough
+  HEAL_FRAC: 0.001,        // fraction of max HP regained per tick at home (1%/s — see tickHeal)
   FLOW_FX_TICKS: 10,       // resource-flow particle travel time in ticks (< fx prune window)
   WHEAT_FX_FOOD: 1.0,      // food earned per wheat particle (farm income → settlement)
   LOOT_FX_FOOD: 0.5,       // food foraged per loot particle (pillaged land → army)
@@ -86,7 +87,8 @@ export function garrisonTotal(s) { return s.garrison.deploy + s.garrison.supply 
 function tileIdx(game, x, y) { return Math.floor(y) * game.map.w + Math.floor(x); }
 
 // Per-component stockpile-flow ledger for the settlement panel's food
-// breakdown (#76). Transient — never serialized; rebuilt each session.
+// breakdown (#76). The panel shows a live 1 s window of these (#92).
+// Transient — never serialized; rebuilt each session.
 function newFlowParts() {
   return { base: 0, farmers: 0, routeIn: 0, upkeep: 0, fed: 0, routeOut: 0, train: 0 };
 }
@@ -317,7 +319,7 @@ function makeBlob(game, owner, x, y, count, units) {
     noMerge: false,               // set on split; cleared when a move order completes
     lastYieldT: game.tick,        // last tick pillaging yielded food (transient)
     starving: false,              // one-shot starvation toast latch (transient)
-    foodTrend: 0,                 // EMA of food change per tick (transient — drives the panel's ▲/▼)
+    foodWin: [],                  // last 10 ticks of food change (transient — drives the panel's live ▲/▼, #92)
   };
   recount(b);
   game.blobs.push(b);
@@ -395,7 +397,7 @@ function foundSettlement(game, owner, x, y) {
     flow: 0,       // EMA of net stockpile flow (food/tick) — gates training
     flowAcc: 0,    // this tick's flow components (transient)
     parts: newFlowParts(),     // this tick's per-component flow (transient, #76)
-    partsEma: newFlowParts(),  // smoothed per-component flow for the panel (transient)
+    partsWin: [],              // last 10 ticks of parts — the panel's live 1 s window (transient, #92)
   };
   claimFootprint(game, s);
   tillFields(game, s);
@@ -808,14 +810,18 @@ export function step(game) {
   tickSeparation(game);
   tickCombat(game);
   for (const b of game.blobs) if (!b.dead) tickFood(game, b);
+  for (const b of game.blobs) if (!b.dead) tickHeal(game, b);
   for (const s of [...game.settlements]) tickSettlement(game, s);
 
-  // fed trend: EMA (~3.5 s half-life) of each blob's net food change per
-  // tick, once all transfers have landed — shown as ▲/▼ in the panel (#64)
+  // fed trend: rolling 1 s window of each blob's net food change per
+  // tick, once all transfers have landed — shown live as ▲/▼ in the
+  // panel (#64, #92); the displayed /s rate is simply the window's sum
   for (const b of game.blobs) {
     if (b.dead) continue;
     const d = b.food - (b.prevFood != null ? b.prevFood : b.food);
-    b.foodTrend = (b.foodTrend || 0) + (d - (b.foodTrend || 0)) * 0.02;
+    if (!b.foodWin) b.foodWin = [];
+    b.foodWin.push(d);
+    if (b.foodWin.length > 10) b.foodWin.shift();
   }
 
   if (game.tick % 10 === 0) tickRegen(game);
@@ -1045,6 +1051,57 @@ function targetPos(tgt, kind) {
   return kind === 'blob' ? { x: tgt.x, y: tgt.y } : settCenter(tgt);
 }
 
+// Planning-only avoid set for supply carriers (#90), modeled on
+// avoidTiles: the footprint (+1 tile) of every stationary friendly
+// blob — a light carrier would otherwise be mass-shoved around a
+// camped army forever while steering back into it. Movers clear on
+// their own, working farmers carpet the fields by design, and the
+// route's endpoints must stay approachable, so all three are skipped.
+// Soft avoidance only — ensurePath falls back to the direct path when
+// no detour exists, so friendly traffic never strands a route.
+function friendlyAvoidTiles(game, b, route) {
+  const set = new Set();
+  const { w, h } = game.map;
+  const src = SUP.routeSource(game, route);
+  const tgt = SUP.routeTarget(game, route);
+  const sc = src ? settCenter(src) : null;
+  const tc = tgt ? targetPos(tgt, route.targetKind) : null;
+  for (const e of game.blobs) {
+    if (e.dead || e.owner !== b.owner || e.id === b.id || e.working != null) continue;
+    if (e.path && e.path.length) continue; // moving — will clear on its own
+    if (route.targetKind === 'blob' && e.id === route.targetId) continue;
+    const reach = blobRadius(e) + 1;
+    const span = Math.ceil(reach);
+    const cx = Math.floor(e.x), cy = Math.floor(e.y);
+    for (let dy = -span; dy <= span; dy++) {
+      for (let dx = -span; dx <= span; dx++) {
+        const tx = cx + dx, ty = cy + dy;
+        if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+        if (dist(tx + 0.5, ty + 0.5, e.x, e.y) > reach) continue;
+        if (sc && dist(tx + 0.5, ty + 0.5, sc.x, sc.y) <= 2.7) continue;
+        if (tc && dist(tx + 0.5, ty + 0.5, tc.x, tc.y) <= 2.5) continue;
+        set.add(ty * w + tx);
+      }
+    }
+  }
+  return set;
+}
+
+// Stall recovery (#90): a carrier bodily pinned by friendly traffic —
+// it holds a path but barely moves for 2 s — drops the path so its
+// phase replans next call with the avoid set, which by then includes
+// whoever is pinning it. Position/counter live on the order (plain
+// numbers; harmless in saves, defaults safely when absent).
+function carrierStalled(game, b, o) {
+  const moved = o.lx != null ? dist(b.x, b.y, o.lx, o.ly) : Infinity;
+  o.lx = b.x; o.ly = b.y;
+  if (!b.path || !b.path.length) { o.stuck = 0; return; }
+  if (moved < blobSpeed(b) * C.DT * 0.2) {
+    o.stuck = (o.stuck || 0) + 1;
+    if (o.stuck >= 20) { o.stuck = 0; b.path = null; }
+  } else o.stuck = 0;
+}
+
 // No way through to this leg's destination (revealed mountains walled it
 // off) — release the carrier instead of pacing at the wall forever. It
 // keeps as much of its cargo as it can carry as its own food.
@@ -1060,6 +1117,7 @@ function tickCarrier(game, b) {
   const route = SUP.findRoute(game, o.routeId);
   if (!route) { b.order = null; return; }
   if (pathBlocked(game, b)) b.path = null; // discovered a mountain; each phase replans below
+  carrierStalled(game, b, o); // pinned by friendly traffic? drop the path and replan around it (#90)
   const src = SUP.routeSource(game, route);
   const tgt = SUP.routeTarget(game, route);
   if (!src || !tgt) { SUP.dissolveRoute(game, route); return; }
@@ -1067,7 +1125,7 @@ function tickCarrier(game, b) {
 
   if (o.phase === 'load') {
     if (dist(b.x, b.y, src.x + 1, src.y + 1) > 2.7) {
-      if (!b.path || !b.path.length) { if (!ensurePath(game, b, src.x + 1, src.y + 1)) { SUP.removeCarrier(game, route, b.id); b.order = null; return; } }
+      if (!b.path || !b.path.length) { if (!ensurePath(game, b, src.x + 1, src.y + 1, friendlyAvoidTiles(game, b, route))) { SUP.removeCarrier(game, route, b.id); b.order = null; return; } }
       moveBlob(game, b);
       return;
     }
@@ -1088,7 +1146,7 @@ function tickCarrier(game, b) {
     if (dist(b.x, b.y, tp.x, tp.y) <= 2.5) { o.phase = 'unload'; b.path = null; return; }
     const stale = b.pathGoal && dist(b.pathGoal.x, b.pathGoal.y, tp.x, tp.y) > 2.5;
     if (!b.path || !b.path.length || (stale && game.tick % 20 === 0)) {
-      if (!ensurePath(game, b, tp.x, tp.y)) { releaseBlockedCarrier(game, b, route); return; }
+      if (!ensurePath(game, b, tp.x, tp.y, friendlyAvoidTiles(game, b, route))) { releaseBlockedCarrier(game, b, route); return; }
     }
     moveBlob(game, b);
   } else if (o.phase === 'unload') {
@@ -1113,7 +1171,7 @@ function tickCarrier(game, b) {
   } else { // return
     if (dist(b.x, b.y, src.x + 1, src.y + 1) <= 2.7) { o.phase = 'load'; o.wait = 0; b.path = null; return; }
     if (!b.path || !b.path.length) {
-      if (!ensurePath(game, b, src.x + 1, src.y + 1)) { releaseBlockedCarrier(game, b, route); return; }
+      if (!ensurePath(game, b, src.x + 1, src.y + 1, friendlyAvoidTiles(game, b, route))) { releaseBlockedCarrier(game, b, route); return; }
     }
     moveBlob(game, b);
   }
@@ -1539,6 +1597,22 @@ function applyStarvation(game, b) {
   if (b.units.length === 0) b.dead = true;
 }
 
+// -- healing (#89): units mend slowly inside friendly territory — the
+// same TERRITORY ring that feeds blobs — while fed and out of combat
+// for 5 s. Each unit regains HEAL_FRAC of its own max HP per tick
+// (1%/s: half-dead to full in ~50 s — deliberately far below combat
+// damage, so healing rewards rotating home, never turns a fight).
+// (Restated in index.html's How to Play — keep in sync.)
+function tickHeal(game, b) {
+  if (b.food <= 0.0001) return;            // starving — never heals
+  if (game.tick - b.engagedT < 50) return; // too fresh out of combat
+  if (!isAtHome(game, b)) return;
+  for (const u of b.units) {
+    const max = unitMaxHP(u.role);
+    if (u.hp < max) u.hp = Math.min(max, u.hp + C.HEAL_FRAC * max);
+  }
+}
+
 function tickRegen(game) {
   for (const i of game.pillaged) {
     const orig = game.map.orig[i];
@@ -1685,14 +1759,15 @@ function tickSettlement(game, s) {
   // fold this tick's flow into the EMA (~10 s half-life). One-time
   // transfers (production investment, garrison deposits, fielding
   // grants) are deliberately excluded from flowAcc so the gate doesn't
-  // oscillate. The per-component ledger (#76) EMAs the same way — it
+  // oscillate. The per-component ledger (#76) instead keeps the last
+  // 10 ticks verbatim so the panel shows a live 1 s window (#92) — it
   // DOES include training, purely for the panel's breakdown.
   s.flow += ((s.flowAcc || 0) - s.flow) * 0.007;
   s.flowAcc = 0;
-  for (const k in s.parts) {
-    s.partsEma[k] += (s.parts[k] - s.partsEma[k]) * 0.007;
-    s.parts[k] = 0;
-  }
+  if (!s.partsWin) s.partsWin = [];
+  s.partsWin.push(s.parts);
+  if (s.partsWin.length > 10) s.partsWin.shift();
+  s.parts = newFlowParts();
 }
 
 // Invest food into the unit under construction: the tick's positive net
@@ -1713,17 +1788,35 @@ function investProduction(game, s) {
 
 // -- merge / cleanup / vision / result
 
+// Two blobs ordered to attack the same target — blob or settlement —
+// are merge-eligible even mid-combat (#93): the survivor keeps the
+// shared attack order and the siege continues uninterrupted.
+function sameAttackTarget(a, b) {
+  const oa = a.order, ob = b.order;
+  return !!(oa && ob && oa.type === 'move' && ob.type === 'move'
+    && oa.tkind && oa.tkind === ob.tkind && oa.tid === ob.tid);
+}
+
 function tickMerge(game) {
   const alive = game.blobs.filter(b => !b.dead);
   for (let i = 0; i < alive.length; i++) {
     const a = alive[i];
-    if (a.dead || a.order || a.working != null) continue;
+    if (a.dead || a.working != null) continue;
     for (let j = i + 1; j < alive.length; j++) {
       const b = alive[j];
-      if (b.dead || b.order || b.working != null || a.owner !== b.owner) continue;
+      if (b.dead || b.working != null || a.owner !== b.owner) continue;
       if (a.noMerge && b.noMerge) continue; // freshly split pair — stays apart
-      // trigger scales with blob size: deep overlap, not mere touching
-      const trigger = Math.max(C.MERGE_MIN, C.MERGE_FRAC * (blobRadius(a) + blobRadius(b)));
+      // eligible pairs: both idle (deep-overlap trigger — scales with
+      // blob size, not mere touching), or both attacking the same
+      // target (#93 — touching distance, since attackers halt at
+      // contact/siege range and rarely overlap deeply). Mixed pairs
+      // never merge: a marching army must not slurp up idle blobs.
+      let trigger;
+      if (!a.order && !b.order) {
+        trigger = Math.max(C.MERGE_MIN, C.MERGE_FRAC * (blobRadius(a) + blobRadius(b)));
+      } else if (sameAttackTarget(a, b)) {
+        trigger = blobRadius(a) + blobRadius(b);
+      } else continue;
       if (dist(a.x, a.y, b.x, b.y) > trigger) continue;
       const keep = total(a) >= total(b) ? a : b;
       const gone = keep === a ? b : a;
@@ -1954,7 +2047,7 @@ export function deserialize(data, prev) {
         : (sd.trainTicks ? sd.trainTicks / C.TRAIN_TICKS * C.TRAIN_COST : 0),
       garrLoss: 0, lastHitT: -999, tilled: [],
       flow: sd.flow || 0, flowAcc: 0,
-      parts: newFlowParts(), partsEma: newFlowParts(),
+      parts: newFlowParts(), partsWin: [],
     };
     // pre-v4 saves stored a single-tile settlement; the same (x, y) now
     // anchors a 2×2 footprint. If that footprint runs off the map or
@@ -1998,7 +2091,7 @@ export function deserialize(data, prev) {
       pillaging: bd.pillaging, working: bd.working != null ? bd.working : null,
       engagedT: -999, meleeT: -999, chaseId: null, dead: false, mergedInto: null,
       noMerge: !!bd.noMerge, lastYieldT: data.tick, starving: false,
-      foodTrend: 0,
+      foodWin: [],
     };
     recount(b);
     game.blobs.push(b);
@@ -2007,12 +2100,12 @@ export function deserialize(data, prev) {
     game.routes.push({ ...rd, window: [] });
   }
   if (reuse) {
-    // carry the smoothed food-breakdown ledger across snapshot
+    // carry the rolling food-breakdown window across snapshot
     // applications so the guest's panel doesn't reset every ~2 s (#76)
     const prevSett = new Map(prev.settlements.map(ps => [ps.id, ps]));
     for (const s of game.settlements) {
       const ps = prevSett.get(s.id);
-      if (ps && ps.partsEma) s.partsEma = { ...ps.partsEma };
+      if (ps && ps.partsWin) s.partsWin = ps.partsWin.map(p => ({ ...p }));
     }
     // repaint tiles whose tilled/footprint state changed (settlements founded/lost)
     for (let i = 0; i < game.tilledBy.length; i++) {
