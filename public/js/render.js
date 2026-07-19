@@ -513,8 +513,10 @@ export function createRenderer(canvas, minimap) {
         ctx.globalAlpha = 1;
       }
 
-      // sieges: solid line from attacker edge to the settlement's box edge
+      // sieges: solid line from attacker edge to the settlement's box
+      // edge, with the same pulsing ⚔️ as blob melees at the midpoint (#84)
       const half = Math.max(8, 1.0 * s);
+      const siegeSwords = [];
       ctx.strokeStyle = 'rgba(248,113,113,0.85)';
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -526,13 +528,23 @@ export function createRenderer(canvas, minimap) {
         const x1 = wx(bx(b)), y1 = wy(by(b)), x2 = wx(st.x + 1), y2 = wy(st.y + 1);
         const ang = Math.atan2(y2 - y1, x2 - x1);
         const ex = x2 - Math.cos(ang) * (half + 3), ey = y2 - Math.sin(ang) * (half + 3);
-        ctx.moveTo(x1 + Math.cos(ang) * blobPxR(b), y1 + Math.sin(ang) * blobPxR(b));
+        const sx = x1 + Math.cos(ang) * blobPxR(b), sy = y1 + Math.sin(ang) * blobPxR(b);
+        ctx.moveTo(sx, sy);
         ctx.lineTo(ex, ey);
         arrows.push([ex, ey, ang]);
+        siegeSwords.push([(sx + ex) / 2, (sy + ey) / 2]);
       }
       ctx.stroke();
       ctx.fillStyle = 'rgba(248,113,113,0.85)';
       for (const [ax, ay, ang] of arrows) arrowAt(ax, ay, ang, 6);
+      if (siegeSwords.length) {
+        ctx.globalAlpha = pulse;
+        ctx.font = `${Math.max(11, s * 0.7)}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        for (const [mx, my] of siegeSwords) ctx.fillText('⚔️', mx, my);
+        ctx.globalAlpha = 1;
+      }
     }
 
     // floating damage numbers + resource-flow particles (wheat: farmers →
@@ -592,8 +604,8 @@ export function createRenderer(canvas, minimap) {
     ctx.lineWidth = 2;
     ctx.strokeRect(ox, oy, game.map.w * s, game.map.h * s);
 
-    // order-confirmation ping: collapsing rings at the ordered
-    // destination so a tap visibly lands (#71) — red for an attack
+    // order-confirmation ping: a single collapsing ring at the ordered
+    // destination so a tap visibly lands (#71, #78) — red for an attack
     // order, white for a plain move. Above fog: the destination may
     // still be unexplored.
     if (ui.ping) {
@@ -603,18 +615,15 @@ export function createRenderer(canvas, minimap) {
       else {
         const px = wx(ui.ping.x), py = wy(ui.ping.y);
         const col = ui.ping.kind === 'attack' ? '248,113,113' : '255,255,255';
+        const p = age / DUR;
         ctx.lineWidth = 2;
-        for (let k = 0; k < 2; k++) {
-          const p = age / DUR - k * 0.18;
-          if (p <= 0 || p >= 1) continue;
-          ctx.beginPath();
-          ctx.arc(px, py, (1 - p) * Math.max(18, s * 1.1) + 3, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(${col},${(0.15 + 0.85 * (1 - p)).toFixed(2)})`;
-          ctx.stroke();
-        }
+        ctx.beginPath();
+        ctx.arc(px, py, (1 - p) * Math.max(18, s * 1.1) + 3, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${col},${(0.15 + 0.85 * (1 - p)).toFixed(2)})`;
+        ctx.stroke();
         ctx.beginPath();
         ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${col},${(1 - age / DUR).toFixed(2)})`;
+        ctx.fillStyle = `rgba(${col},${(1 - p).toFixed(2)})`;
         ctx.fill();
       }
     }
@@ -717,7 +726,8 @@ export function createRenderer(canvas, minimap) {
     ctx.lineWidth = sel || hit ? 3 : 2;
     ctx.strokeRect(x0, y0, size, size);
     // unit counts inside, loose triangle: ⚔️ upper-left, 🚚 upper-right,
-    // 🌱 (garrisoned + working the fields) bottom-center
+    // 🌱 (garrisoned + working the fields) bottom-center; own settlements
+    // also show the 🌾 stockpile top-center (#86 — the enemy's stays private)
     if (!ghost && st.garrison && s >= 8) {
       const fs = Math.max(9, Math.min(12, s * 0.55));
       ctx.font = `600 ${fs}px system-ui`;
@@ -728,6 +738,9 @@ export function createRenderer(canvas, minimap) {
         [`🚚${st.garrison.supply}`, cx + 0.45 * s, cy + 0.10 * s],
         [`🌱${st.garrison.farm + (workingN || 0)}`, cx, cy + 0.60 * s],
       ];
+      if (st.owner === viewer(game) && st.stockpile != null) {
+        chips.push([`🌾${Math.floor(st.stockpile)}`, cx, cy - 0.55 * s]);
+      }
       for (const [label, lx, ly] of chips) {
         const tw = ctx.measureText(label).width;
         ctx.fillStyle = 'rgba(0,0,0,0.45)';

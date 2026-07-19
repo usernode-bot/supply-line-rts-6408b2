@@ -8,7 +8,7 @@ import * as SUP from './supply.js';
 export const C = {
   DT: 0.1,                 // seconds per tick
   SPEED_DEPLOY: 1.2,       // tiles/sec
-  SPEED_SUPPLY: 2.4,
+  SPEED_SUPPLY: 1.2,       // same as deploy (#80); kept separate for retuning
   FOOD_PER_UNIT: 10,       // food meter capacity per unit
   EAT_PER_SEC: 1 / 12,     // food per unit per second
   STARVE_FRAC: 0.005,      // fraction of blob lost per tick at 0 food (5%/s — dead in ~20 s)
@@ -20,12 +20,12 @@ export const C = {
   STOCK_CAP: 500,
   TRAIN_TICKS: 250,        // baseline 25 s per unit (surplus income trains faster — see investProduction)
   TRAIN_COST: 15,
-  FARM_PER_FARMER: 0.002,  // stockpile per tick per unit of tilled fertility per farmer-equivalent
+  FARM_PER_FARMER: 0.002,  // base-income rate: stockpile per tick per unit of tilled fertility per farmer-equivalent
   FARM_BASE_FARMERS: 2,    // built-in farmer-equivalents every settlement gets for free
   FARM_GROW_FLOOR: 50,     // farm-mode settlements grow farmers only above this stockpile
-  FARM_DR_START: 10,       // last fully effective farmer; diminishing returns start past it
-  FARM_NEUTRAL_AT: 24,     // farmer whose marginal product equals upkeep on reference land
-  FERT_REF: 20,            // reference tilled fertility (a full lush ring) the neutrality tuning assumes
+  FARM_PER_CELL: 0.04,     // stockpile per tick per unit of fertility of a worked plot
+                           // (= the old reference ring 20 × FARM_PER_FARMER, so a farmer
+                           // on a Lush plot matches the old full share — see farmYield)
                            // (TRAIN_* / FARM_* figures are restated in plain
                            // language in index.html's How to Play — keep in sync)
   VISION_BLOB: 6,
@@ -84,6 +84,12 @@ export function blobSpeed(b) {
 export function garrisonTotal(s) { return s.garrison.deploy + s.garrison.supply + s.garrison.farm; }
 
 function tileIdx(game, x, y) { return Math.floor(y) * game.map.w + Math.floor(x); }
+
+// Per-component stockpile-flow ledger for the settlement panel's food
+// breakdown (#76). Transient — never serialized; rebuilt each session.
+function newFlowParts() {
+  return { base: 0, farmers: 0, routeIn: 0, upkeep: 0, fed: 0, routeOut: 0, train: 0 };
+}
 
 // -- settlement footprint: every settlement occupies a 2×2 block of
 // tiles anchored at (s.x, s.y) top-left. The footprint center is the
@@ -156,7 +162,9 @@ function tilledJitter(game, i, salt) {
 }
 
 // Farmers spread out: each new field hand takes the least-crowded tilled
-// cell (walking farmers claim their destination cell) instead of stacking.
+// cell (walking farmers claim their destination cell) instead of
+// stacking; among equally free cells the lushest wins (#87 — with
+// per-plot income that ordering is what maximises the farm's yield).
 function farmerSpot(game, s) {
   const w = game.map.w;
   if (!s.tilled.length) {
@@ -173,18 +181,38 @@ function farmerSpot(game, s) {
     const i = Math.floor(g.y) * w + Math.floor(g.x);
     occ.set(i, (occ.get(i) || 0) + total(b));
   }
-  let best = s.tilled[0], bo = Infinity;
+  let best = s.tilled[0], bo = Infinity, bf = -1;
   for (const i of s.tilled) {
     const o = occ.get(i) || 0;
-    if (o < bo) { bo = o; best = i; }
+    const f = game.map.fert[i];
+    if (o < bo || (o === bo && f > bf)) { bo = o; bf = f; best = i; }
   }
   return tilledJitter(game, best, workingCount(game, s) + s.id * 17);
 }
 
-function spawnWorkingFarmer(game, s, unit) {
-  const spot = farmerSpot(game, s);
-  const b = makeBlob(game, s.owner, spot.x, spot.y, null, [unit || newUnit('farm')]);
+// The settlement "gate": the spot just outside the footprint that fielded
+// units already emerge from — new farmers appear here and walk out (#83).
+function farmerGate(game, s) {
+  const foot = new Set(settTiles(game.map, s));
+  const spot = nearestPassable(game.map, s.x + 2, s.y + 1, 4, null, foot)
+    || { x: s.x + 2, y: s.y + 1 };
+  return { x: spot.x + 0.5, y: spot.y + 0.5 };
+}
+
+// Farmers walk in and out of settlements, never pop (#83): spawn at
+// `origin` (the gate by default; a converting blob passes its own spot)
+// and walk to the chosen plot. The move order keeps `working` set, so
+// safety/selection behave as for any field hand; income starts only on
+// arrival (see farmYield).
+function spawnWorkingFarmer(game, s, unit, origin) {
+  const o = origin || farmerGate(game, s);
+  const b = makeBlob(game, s.owner, o.x, o.y, null, [unit || newUnit('farm')]);
   b.working = s.id;
+  const spot = farmerSpot(game, s);
+  if (dist(b.x, b.y, spot.x, spot.y) > 0.05) {
+    b.order = { type: 'move', x: spot.x, y: spot.y };
+    if (!ensurePath(game, b, spot.x, spot.y)) b.order = null;
+  }
   return b;
 }
 
@@ -284,7 +312,7 @@ function makeBlob(game, owner, x, y, count, units) {
     food: 0,
     order: null, path: null, pathGoal: null,
     pillaging: false, working: null,
-    engagedT: -999, chaseId: null,
+    engagedT: -999, meleeT: -999, chaseId: null,
     dead: false, mergedInto: null,
     noMerge: false,               // set on split; cleared when a move order completes
     lastYieldT: game.tick,        // last tick pillaging yielded food (transient)
@@ -313,16 +341,46 @@ function tillFields(game, s) {
   const { w, h } = game.map;
   const c = settCenter(s);
   const span = Math.ceil(FARM_RING);
+  const ring = new Set();
   for (let ty = s.y - span; ty <= s.y + 1 + span; ty++) {
     for (let tx = s.x - span; tx <= s.x + 1 + span; tx++) {
       if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
       if (dist(tx + 0.5, ty + 0.5, c.x, c.y) > FARM_RING) continue;
       const i = ty * w + tx;
       if (game.map.mountain[i] || game.tilledBy[i] || game.settAt[i]) continue;
-      game.tilledBy[i] = s.id;
-      s.tilled.push(i);
-      game.dirty.add(i);
+      ring.add(i);
     }
+  }
+  // only plots walkable from the settlement are tilled (#83): flood
+  // (4-connected) through the candidate ring from tiles touching the
+  // footprint — plots sealed off behind mountains never become fields
+  const DIRS4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const reached = new Set();
+  const stack = [];
+  for (const i of ring) {
+    const tx = i % w, ty = (i / w) | 0;
+    for (const [dx, dy] of DIRS4) {
+      const nx = tx + dx, ny = ty + dy;
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      if (game.settAt[ny * w + nx] === s.id) { reached.add(i); stack.push(i); break; }
+    }
+  }
+  while (stack.length) {
+    const i = stack.pop();
+    const tx = i % w, ty = (i / w) | 0;
+    for (const [dx, dy] of DIRS4) {
+      const nx = tx + dx, ny = ty + dy;
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const ni = ny * w + nx;
+      if (ring.has(ni) && !reached.has(ni)) { reached.add(ni); stack.push(ni); }
+    }
+  }
+  // row-major order, matching the old scan, so rebuilds are deterministic
+  const cells = [...reached].sort((a, b) => a - b);
+  for (const i of cells) {
+    game.tilledBy[i] = s.id;
+    s.tilled.push(i);
+    game.dirty.add(i);
   }
 }
 
@@ -336,6 +394,8 @@ function foundSettlement(game, owner, x, y) {
     tilled: [],
     flow: 0,       // EMA of net stockpile flow (food/tick) — gates training
     flowAcc: 0,    // this tick's flow components (transient)
+    parts: newFlowParts(),     // this tick's per-component flow (transient, #76)
+    partsEma: newFlowParts(),  // smoothed per-component flow for the panel (transient)
   };
   claimFootprint(game, s);
   tillFields(game, s);
@@ -409,8 +469,9 @@ export function opSetRole(game, b, role) {
   const n = total(b);
   if (role === 'farm') {
     // farmers disperse into individual working units on the nearest
-    // friendly settlement's fields — no cap; past FARM_DR_START each
-    // extra farmer just yields less (see effectiveFarmers)
+    // friendly settlement's fields — no cap; each earns only from the
+    // plot they actually work (see farmYield), so extra hands beyond
+    // the worthwhile plots are a pure drain
     if (b.working != null) return { err: 'Already working the fields' };
     let s = null, bd = Infinity;
     for (const st of game.settlements) {
@@ -425,7 +486,8 @@ export function opSetRole(game, b, role) {
     while (b.units.length > 0) {
       const u = b.units.shift();
       convertRole(u, 'farm');
-      const f = spawnWorkingFarmer(game, s, u);
+      // converts in place: the farmer starts from the blob's own spot
+      const f = spawnWorkingFarmer(game, s, u, { x: b.x, y: b.y });
       f.food = Math.min(foodCap(f), foodShare);
       b.food = Math.max(0, b.food - foodShare);
     }
@@ -665,7 +727,7 @@ function peelFarmersToFields(game, b, s, n) {
   for (let i = b.units.length - 1; i >= 0 && moved < n; i--) {
     if (b.units[i].role !== 'farm') continue;
     const u = b.units.splice(i, 1)[0];
-    const f = spawnWorkingFarmer(game, s, u);
+    const f = spawnWorkingFarmer(game, s, u, { x: b.x, y: b.y });
     f.food = Math.min(foodCap(f), foodShare);
     b.food = Math.max(0, b.food - foodShare);
     moved++;
@@ -889,12 +951,14 @@ function tickOrder(game, b) {
   if (o.type !== 'move' && o.type !== 'attack') return;
   if (o.tkind) { tickTargetedMove(game, b, o); return; }
   // plain tile move: never diverts to attack (#74) — attacking takes an
-  // explicit target. Fighters still defend themselves: while actively
-  // engaged (contact keeps refreshing engagedT) they stand and fight
-  // back instead of marching out of the melee.
+  // explicit target. Fighters still defend themselves: while actively in
+  // MELEE with an enemy blob (contact keeps refreshing meleeT) they stand
+  // and fight back instead of marching out of it. Settlement contact
+  // deliberately doesn't hold them (#82) — a settlement can't disengage,
+  // so waiting for it would freeze the move order forever.
   if (b.count.deploy > 0) {
     b.chaseId = null;
-    if (game.tick - b.engagedT < 5) return;
+    if (game.tick - b.meleeT < 5) return;
   }
   if (!b.path && b.pathGoal == null) ensurePath(game, b, o.x, o.y); // resumed save
   if (pathBlocked(game, b) && !ensurePath(game, b, o.x, o.y)) {
@@ -1013,6 +1077,7 @@ function tickCarrier(game, b) {
     const self = Math.min(foodCap(b) - b.food, src.stockpile, total(b) * 0.1);
     src.stockpile -= self; b.food += self;
     src.flowAcc = (src.flowAcc || 0) - take - self;
+    if (src.parts) src.parts.routeOut -= take + self;
     if (o.cargo >= cap - 0.01) { o.phase = 'go'; o.wait = 0; b.path = null; }
     else if (src.stockpile <= 0.01) {
       o.wait++;
@@ -1040,6 +1105,7 @@ function tickCarrier(game, b) {
       taken = Math.min(give, room);
       tgt.stockpile += taken;
       tgt.flowAcc = (tgt.flowAcc || 0) + taken;
+      if (tgt.parts) tgt.parts.routeIn += taken;
     }
     o.cargo -= taken;
     if (taken > 0) SUP.recordDelivery(game, route, taken);
@@ -1146,6 +1212,7 @@ function tickCombat(game) {
       const d = dist(a.x, a.y, b.x, b.y);
       if (d > blobRadius(a) + blobRadius(b) + 0.2) continue;
       a.engagedT = game.tick; b.engagedT = game.tick;
+      a.meleeT = game.tick; b.meleeT = game.tick; // blob melee only — settlement contact never sets meleeT (#82)
       game.combat.push({ kind: 'bb', a: a.id, b: b.id });
       dmg.set(a, (dmg.get(a) || 0) + b.count.deploy * fedMult(fedMeter(b)) * C.K_COMBAT);
       dmg.set(b, (dmg.get(b) || 0) + a.count.deploy * fedMult(fedMeter(a)) * C.K_COMBAT);
@@ -1291,7 +1358,9 @@ function tickFarmerSpread(game) {
       idle.get(i).push(b);
     }
     if (!idle) continue;
-    const free = s.tilled.filter(i => !idle.has(i) && !claimed.has(i));
+    // lushest free plots are claimed first (#87)
+    const free = s.tilled.filter(i => !idle.has(i) && !claimed.has(i))
+      .sort((a, b) => game.map.fert[b] - game.map.fert[a]);
     for (const stack of idle.values()) {
       while (stack.length > 1 && free.length) {
         const b = stack.pop();
@@ -1353,6 +1422,10 @@ export function pillageCells(game, b) {
   const { w, h } = game.map;
   const reach = C.PILLAGE_RADIUS;
   const span = Math.ceil(reach);
+  // own settlement land is never pillaged (#85): own farmland, and any
+  // tile inside a friendly territory ring (matches the drawn border)
+  const friendly = game.settlements.filter(st => st.owner === b.owner);
+  const friendlyIds = new Set(friendly.map(st => st.id));
   const cells = [];
   for (let dy = -span; dy <= span; dy++) {
     for (let dx = -span; dx <= span; dx++) {
@@ -1361,6 +1434,12 @@ export function pillageCells(game, b) {
       if (dist(tx + 0.5, ty + 0.5, b.x, b.y) > reach) continue;
       const i = ty * w + tx;
       if (game.map.mountain[i] || game.settAt[i]) continue;
+      if (friendlyIds.has(game.tilledBy[i])) continue;
+      let own = false;
+      for (const st of friendly) {
+        if (dist(tx + 0.5, ty + 0.5, st.x + 1, st.y + 1) <= C.TERRITORY) { own = true; break; }
+      }
+      if (own) continue;
       cells.push(i);
     }
   }
@@ -1475,39 +1554,48 @@ function tickRegen(game) {
 // flow can carry one more mouth.
 export function trainGated(s) { return s.flow < C.EAT_PER_SEC * C.DT; }
 
-// Derived farming-efficiency constants (computed, never hand-copied):
-// NEUTRAL_EFF is the marginal efficiency at which a farmer on reference
-// land (FERT_REF tilled fertility) exactly feeds themselves; the linear
-// decline FARM_DR_SLOPE is tuned so farmer FARM_NEUTRAL_AT lands there.
-export const NEUTRAL_EFF = (C.EAT_PER_SEC * C.DT) / (C.FERT_REF * C.FARM_PER_FARMER);
-export const FARM_DR_SLOPE = (1 - NEUTRAL_EFF) / (C.FARM_NEUTRAL_AT - C.FARM_DR_START);
+// Break-even plot fertility: a plot must out-earn its farmer's upkeep
+// to be worth manning (≈ 0.21 — Sparse and up qualify).
+export const FERT_WORTHWHILE = (C.EAT_PER_SEC * C.DT) / C.FARM_PER_CELL;
 
-// Effective farmer count: linear up to the soft cap, then each extra
-// farmer's marginal efficiency drops by FARM_DR_SLOPE (floored at 0) —
-// net-neutral on reference land by farmer FARM_NEUTRAL_AT, a pure drain
-// beyond that.
-export function effectiveFarmers(n) {
-  if (n <= C.FARM_DR_START) return n;
-  let eff = C.FARM_DR_START;
-  for (let k = C.FARM_DR_START + 1; k <= n; k++) {
-    eff += Math.max(0, 1 - (k - C.FARM_DR_START) * FARM_DR_SLOPE);
+// Per-plot farm income (counts the land actually farmed): each distinct
+// tilled cell with an arrived farmer standing on it pays its own
+// fertility × FARM_PER_CELL once per tick — one plot, one share; walkers
+// en route earn nothing until they reach their plot (#83). The land also
+// earns a built-in base worth FARM_BASE_FARMERS old-style shares over
+// the whole ring, so a farmerless settlement earns what it always did.
+// Shared by the sim tick, the settlement panel and the food breakdown
+// (#76) so displayed rates can never drift from what actually accrues.
+export function farmYield(game, s) {
+  const aiMult = (!game.pvp && s.owner === 1) ? DIFF[game.difficulty].income : 1;
+  const w = game.map.w;
+  let fertSum = 0, worthwhileCells = 0;
+  for (const i of s.tilled) {
+    fertSum += game.map.fert[i];
+    if (game.map.fert[i] > FERT_WORTHWHILE) worthwhileCells++;
   }
-  return eff;
+  const tilled = new Set(s.tilled);
+  const worked = new Set();
+  let farmers = 0;
+  for (const b of game.blobs) {
+    if (b.dead || b.working !== s.id || b.order) continue;
+    const i = Math.floor(b.y) * w + Math.floor(b.x);
+    if (!tilled.has(i) || worked.has(i)) continue;
+    worked.add(i);
+    farmers += game.map.fert[i] * C.FARM_PER_CELL;
+  }
+  return {
+    base: fertSum * C.FARM_PER_FARMER * C.FARM_BASE_FARMERS * aiMult,
+    farmers: farmers * aiMult,
+    workedCells: worked.size,
+    worthwhileCells,
+  };
 }
 
-// Gross farmland income per 100 ms tick: a built-in base worth
-// FARM_BASE_FARMERS farmer-equivalents plus one per working farmer
-// (diminishing past FARM_DR_START — see effectiveFarmers), each yielding
-// tilled fertility × FARM_PER_FARMER, × the AI's difficulty multiplier.
-// Shared by the sim and the settlement panel so the displayed rate can
-// never drift from what actually accrues. Pass `farmers` to price a
-// hypothetical crew (the panel uses 0 to isolate the farmers' share).
-export function incomeRate(game, s, farmers) {
-  const aiMult = (!game.pvp && s.owner === 1) ? DIFF[game.difficulty].income : 1;
-  let fertSum = 0;
-  for (const i of s.tilled) fertSum += game.map.fert[i];
-  const n = farmers != null ? farmers : workingCount(game, s);
-  return fertSum * C.FARM_PER_FARMER * (C.FARM_BASE_FARMERS + effectiveFarmers(n)) * aiMult;
+// Gross farmland income per 100 ms tick (base + worked plots).
+export function incomeRate(game, s) {
+  const y = farmYield(game, s);
+  return y.base + y.farmers;
 }
 
 // Deterministic source spot for a wheat particle: rotate through the
@@ -1528,11 +1616,15 @@ function wheatFxSource(game, s) {
 
 function tickSettlement(game, s) {
   if (!game.settlements.includes(s)) return;
-  // farmland income accrues in every mode (boosted by farmers actually
-  // working the fields) — training modes pick what the surplus becomes
-  const income = incomeRate(game, s);
+  // farmland income accrues in every mode: the base trickle plus one
+  // share per plot actually being worked — training modes pick what the
+  // surplus becomes
+  const y = farmYield(game, s);
+  const income = y.base + y.farmers;
   s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + income);
   s.flowAcc = (s.flowAcc || 0) + income;
+  s.parts.base += y.base;
+  s.parts.farmers += y.farmers;
   // wheat-flow fx: one particle per WHEAT_FX_FOOD earned, from a working
   // farmer (or a tilled cell) toward the settlement — same throttled
   // accumulator pattern as hpFxAcc. Transient; never serialized.
@@ -1546,8 +1638,8 @@ function tickSettlement(game, s) {
   const g = garrisonTotal(s);
   if (g > 0) {
     const eat = g * C.EAT_PER_SEC * C.DT;
-    if (s.stockpile >= eat) { s.stockpile -= eat; s.flowAcc -= eat; }
-    else { s.flowAcc -= s.stockpile; s.stockpile = 0; applyGarrisonLosses(game, s, g * C.STARVE_FRAC); }
+    if (s.stockpile >= eat) { s.stockpile -= eat; s.flowAcc -= eat; s.parts.upkeep -= eat; }
+    else { s.flowAcc -= s.stockpile; s.parts.upkeep -= s.stockpile; s.stockpile = 0; applyGarrisonLosses(game, s, g * C.STARVE_FRAC); }
   }
   // feed friendly blobs inside the territory
   if (s.stockpile > 0.01) {
@@ -1559,6 +1651,7 @@ function tickSettlement(game, s) {
       const give = Math.min(need, s.stockpile, total(b) * 0.1);
       s.stockpile -= give;
       s.flowAcc -= give;
+      s.parts.fed -= give;
       b.food += give;
       if (s.stockpile <= 0.01) break;
     }
@@ -1570,12 +1663,13 @@ function tickSettlement(game, s) {
   // flow gate pauses training. Paid-in progress (trainAcc) is kept across
   // mode switches and pauses; it's food already spent.
   if (s.mode === 'farm') {
-    // healthy farms grow population up to the break-even crew (where a
-    // new farmer only grows what they eat); after that the farm invests
-    // nothing and surplus banks, like 'off'. Growth is deliberately not
-    // gated on the flow EMA — an army feeding in territory shouldn't
-    // stall population growth; FARM_GROW_FLOOR is the brake.
-    if (s.stockpile >= C.FARM_GROW_FLOOR && workingCount(game, s) < C.FARM_NEUTRAL_AT) {
+    // healthy farms grow population while a worthwhile plot is unmanned
+    // (workingCount includes crews still walking out, so growth doesn't
+    // overshoot); after that the farm invests nothing and surplus banks,
+    // like 'off'. Growth is deliberately not gated on the flow EMA — an
+    // army feeding in territory shouldn't stall population growth;
+    // FARM_GROW_FLOOR is the brake.
+    if (s.stockpile >= C.FARM_GROW_FLOOR && workingCount(game, s) < y.worthwhileCells) {
       if (investProduction(game, s)) {
         const f = spawnWorkingFarmer(game, s);
         const give = Math.min(s.stockpile, foodCap(f));
@@ -1591,9 +1685,14 @@ function tickSettlement(game, s) {
   // fold this tick's flow into the EMA (~10 s half-life). One-time
   // transfers (production investment, garrison deposits, fielding
   // grants) are deliberately excluded from flowAcc so the gate doesn't
-  // oscillate.
+  // oscillate. The per-component ledger (#76) EMAs the same way — it
+  // DOES include training, purely for the panel's breakdown.
   s.flow += ((s.flowAcc || 0) - s.flow) * 0.007;
   s.flowAcc = 0;
+  for (const k in s.parts) {
+    s.partsEma[k] += (s.parts[k] - s.partsEma[k]) * 0.007;
+    s.parts[k] = 0;
+  }
 }
 
 // Invest food into the unit under construction: the tick's positive net
@@ -1606,6 +1705,7 @@ function investProduction(game, s) {
   const invest = Math.min(s.stockpile, Math.max(surplus, drip));
   if (invest <= 0) return false;
   s.stockpile -= invest;
+  s.parts.train -= invest; // panel breakdown only — kept out of flowAcc/the gate
   s.trainAcc += invest; // remainder past the cost rolls into the next unit
   if (s.trainAcc >= C.TRAIN_COST - 1e-9) { s.trainAcc -= C.TRAIN_COST; return true; }
   return false;
@@ -1854,6 +1954,7 @@ export function deserialize(data, prev) {
         : (sd.trainTicks ? sd.trainTicks / C.TRAIN_TICKS * C.TRAIN_COST : 0),
       garrLoss: 0, lastHitT: -999, tilled: [],
       flow: sd.flow || 0, flowAcc: 0,
+      parts: newFlowParts(), partsEma: newFlowParts(),
     };
     // pre-v4 saves stored a single-tile settlement; the same (x, y) now
     // anchors a 2×2 footprint. If that footprint runs off the map or
@@ -1895,7 +1996,7 @@ export function deserialize(data, prev) {
       food: bd.food, order,
       path: null, pathGoal: null,
       pillaging: bd.pillaging, working: bd.working != null ? bd.working : null,
-      engagedT: -999, chaseId: null, dead: false, mergedInto: null,
+      engagedT: -999, meleeT: -999, chaseId: null, dead: false, mergedInto: null,
       noMerge: !!bd.noMerge, lastYieldT: data.tick, starving: false,
       foodTrend: 0,
     };
@@ -1906,6 +2007,13 @@ export function deserialize(data, prev) {
     game.routes.push({ ...rd, window: [] });
   }
   if (reuse) {
+    // carry the smoothed food-breakdown ledger across snapshot
+    // applications so the guest's panel doesn't reset every ~2 s (#76)
+    const prevSett = new Map(prev.settlements.map(ps => [ps.id, ps]));
+    for (const s of game.settlements) {
+      const ps = prevSett.get(s.id);
+      if (ps && ps.partsEma) s.partsEma = { ...ps.partsEma };
+    }
     // repaint tiles whose tilled/footprint state changed (settlements founded/lost)
     for (let i = 0; i < game.tilledBy.length; i++) {
       if (game.tilledBy[i] !== prev.tilledBy[i]) dirty.add(i);

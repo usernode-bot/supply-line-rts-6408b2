@@ -154,7 +154,12 @@ export function createInput({ canvas, minimap, view, handlers }) {
     e.preventDefault();
     if (handlers.gesture) handlers.gesture();
     const before = worldFromScreen(e.clientX, e.clientY);
-    view.scale *= e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    // delta-proportional zoom (#81): ~×1.08 per standard 120px wheel
+    // notch, smooth on trackpads; line/page delta modes normalised to px
+    let dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= 33;
+    else if (e.deltaMode === 2) dy *= cssSize().h;
+    view.scale *= Math.pow(2, -dy * 0.0009);
     clampView();
     const { w, h } = cssSize();
     view.cx = before.x - (e.clientX - w / 2) / view.scale;
