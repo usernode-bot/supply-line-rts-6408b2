@@ -31,12 +31,12 @@ export const C = {
   VISION_BLOB: 6,
   VISION_SETT: 8,
   AGGRO: 4,
-  CHASE_LEASH: 8,          // max tiles a tile-move blob diverts from its path to chase
   PILLAGE_RADIUS: 2.5,     // pillage harvest reach in tiles (half a territory ring)
   PILLAGE_YIELD: 0.8,      // food per 1.0 fertility destroyed by pillaging — one full
                            // level off the whole ~21-tile disc (21 × 0.25 × 0.8 ≈ 4.2
                            // food) feeds the reference 10-unit army for ~5 s (#42)
   PILLAGE_INTAKE_MULT: 3,  // pillage intake cap per tick, × the army's eating rate
+  PILLAGE_DRAWS: 3,        // max tiles drawn from (degraded) per pillage tick (#72)
   FERT_LEVEL: 0.25,        // one visible fertility level (of four above zero)
   FERT_REGEN: 0.01 / 600,  // fertility per tick (0.01/min)
   TERRITORY: 5,            // settlement territory radius: feeds friendly blobs, farmer reach, drawn ring
@@ -375,12 +375,14 @@ function destroySettlement(game, s, why) {
 
 // ---------------------------------------------------------------- ops (player + AI share these)
 
-// One unified move command with attack-move semantics. Optional `target`
-// ({kind:'blob'|'settlement', id}) makes it a targeted order: the blob
-// heads for that entity (following blobs while visible, besieging
-// settlements until destroyed) and never diverts en route. Moving never
-// touches the pillaging stance — pillage is a persistent toggle (#63)
-// and armies forage on the march (#66).
+// One move command. A plain move only moves — it never diverts to attack
+// (#74); combat is contact-based, so a moving blob still fights back
+// while an enemy engages it. Optional `target`
+// ({kind:'blob'|'settlement', id}) makes it an explicit attack order:
+// the blob heads for that entity (following blobs while visible,
+// besieging settlements until destroyed). Moving never touches the
+// pillaging stance — pillage is a persistent toggle (#63) and armies
+// forage on the march (#66).
 export function opMove(game, b, x, y, target) {
   if (b.dead) return { err: 'Gone' };
   leaveRoute(game, b);
@@ -886,35 +888,12 @@ function tickOrder(game, b) {
   const o = b.order;
   if (o.type !== 'move' && o.type !== 'attack') return;
   if (o.tkind) { tickTargetedMove(game, b, o); return; }
-  // tile move: every move attack-moves — fighters chase enemies inside
-  // aggro, but only up to CHASE_LEASH tiles from where they left the path
+  // plain tile move: never diverts to attack (#74) — attacking takes an
+  // explicit target. Fighters still defend themselves: while actively
+  // engaged (contact keeps refreshing engagedT) they stand and fight
+  // back instead of marching out of the melee.
   if (b.count.deploy > 0) {
-    let tgt = null, bd = C.AGGRO;
-    for (const e of game.blobs) {
-      if (e.dead || e.owner === b.owner) continue;
-      const d = dist(b.x, b.y, e.x, e.y);
-      if (d < bd) { bd = d; tgt = e; }
-    }
-    if (tgt) {
-      if (o.lx == null) { o.lx = b.x; o.ly = b.y; } // divert anchor
-      if (dist(b.x, b.y, o.lx, o.ly) <= C.CHASE_LEASH) {
-        b.chaseId = tgt.id;
-        const inRange = dist(b.x, b.y, tgt.x, tgt.y) <= blobRadius(b) + blobRadius(tgt) + 0.15;
-        if (!inRange) {
-          if (game.tick % 10 === 0 || !b.path || !b.path.length || pathBlocked(game, b)) ensurePath(game, b, tgt.x, tgt.y);
-          moveBlob(game, b);
-        }
-        return;
-      }
-      // leash spent: give up the chase and march on (the anchor stays so
-      // this enemy can't re-divert the blob until it leaves aggro)
-      if (b.chaseId) { b.chaseId = null; ensurePath(game, b, o.x, o.y); }
-    } else if (b.chaseId || o.lx != null) {
-      b.chaseId = null;
-      delete o.lx; delete o.ly;
-      ensurePath(game, b, o.x, o.y);
-    }
-    // engaged with a settlement? stand and fight
+    b.chaseId = null;
     if (game.tick - b.engagedT < 5) return;
   }
   if (!b.path && b.pathGoal == null) ensurePath(game, b, o.x, o.y); // resumed save
@@ -1393,37 +1372,49 @@ function tickFood(game, b) {
   b.food = Math.max(0, b.food - n * C.EAT_PER_SEC * C.DT);
   let gained = 0; // food the land yielded this tick (for stripped-land feedback)
   if (b.pillaging) {
-    // Demand-driven foraging (#41, #42): every harvestable cell in the
-    // disc degrades together each tick, whether the army is marching or
-    // standing still. The army takes only what it needs — the meter
-    // deficit, capped at PILLAGE_INTAKE_MULT× its eating rate so a
-    // hungry blob refills steadily instead of instantly — split evenly
-    // across the cells. Tiles at or below half a level (displayed as
-    // Barren) yield nothing, so stripped land really stops feeding the
-    // army and recovers only via the slow regen tick.
+    // Demand-driven foraging (#41, #42), drawn from concrete tiles (#72):
+    // each tick up to PILLAGE_DRAWS randomly-picked harvestable cells in
+    // the disc supply the whole demand and degrade — so the on-map tile
+    // damage and the loot particles come from exactly the cells that were
+    // stripped. The pick is a deterministic hash of tick + blob id (no
+    // Math.random() — host/guest dead-reckoning stays aligned). The army
+    // takes only what it needs — the meter deficit, capped at
+    // PILLAGE_INTAKE_MULT× its eating rate so a hungry blob refills
+    // steadily instead of instantly. Tiles at or below half a level
+    // (displayed as Barren) yield nothing, so stripped land really stops
+    // feeding the army and recovers only via the slow regen tick.
     const floor = C.FERT_LEVEL / 2;
     const need = Math.min(foodCap(b) - b.food, C.PILLAGE_INTAKE_MULT * n * C.EAT_PER_SEC * C.DT);
     if (need > 0.0001) {
       const cells = pillageCells(game, b).filter(i => game.map.fert[i] > floor);
       if (cells.length) {
-        const share = need / cells.length / C.PILLAGE_YIELD; // fertility taken per cell
-        for (const i of cells) {
-          const loss = Math.min(share, game.map.fert[i] - floor);
+        let remaining = need / C.PILLAGE_YIELD; // fertility still to take
+        const picks = Math.min(cells.length, C.PILLAGE_DRAWS);
+        const drawn = []; // cells that actually yielded this tick
+        let h = (Math.imul(game.tick, 374761393) ^ Math.imul(b.id, 668265263)) >>> 0;
+        for (let k = 0; k < picks && remaining > 0.0001; k++) {
+          h = Math.imul(h ^ (h >>> 13), 2246822519) >>> 0;
+          const idx = h % cells.length;
+          const i = cells[idx];
+          cells[idx] = cells[cells.length - 1]; // swap-pop: no double draws
+          cells.pop();
+          const loss = Math.min(remaining / (picks - k), game.map.fert[i] - floor);
           if (loss <= 0) continue;
           game.map.fert[i] -= loss;
+          remaining -= loss;
           gained += loss * C.PILLAGE_YIELD;
           game.pillaged.add(i);
           game.dirty.add(i);
+          drawn.push(i);
         }
         b.food = Math.min(foodCap(b), b.food + gained);
-        // loot-flow fx: one particle per LOOT_FX_FOOD foraged, from one
-        // of this tick's yielding cells into the army. Deterministic cell
-        // pick (no Math.random() — host/guest dead-reckoning stays aligned).
+        // loot-flow fx: one particle per LOOT_FX_FOOD foraged, flying in
+        // from the very cells that just degraded.
         b.lootFxAcc = (b.lootFxAcc || 0) + gained;
         let burst = 0;
-        while (b.lootFxAcc >= C.LOOT_FX_FOOD && burst < 3) {
+        while (b.lootFxAcc >= C.LOOT_FX_FOOD && burst < 3 && drawn.length) {
           b.lootFxAcc -= C.LOOT_FX_FOOD;
-          const ci = cells[(game.tick * 7 + burst * 11) % cells.length];
+          const ci = drawn[burst % drawn.length];
           pushFx(game, {
             kind: 'loot',
             x: (ci % game.map.w) + 0.5, y: ((ci / game.map.w) | 0) + 0.5,

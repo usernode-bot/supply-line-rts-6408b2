@@ -201,13 +201,21 @@ export function createInput({ canvas, minimap, view, handlers }) {
     if (isTextEntry(e.target)) return;
     keys.add(e.code);
     if (e.code === 'Escape') handlers.cancel();
+    // control groups (#69): shift+digit assigns, digit selects (double-tap
+    // centers) — main.js owns the group state via the groupKey handler
+    const dg = /^Digit([1-9])$/.exec(e.code);
+    if (dg && handlers.groupKey) {
+      handlers.groupKey(+dg[1], e.shiftKey);
+      e.preventDefault();
+    }
   });
   window.addEventListener('keyup', (e) => keys.delete(e.code));
   window.addEventListener('blur', () => keys.clear());
   document.addEventListener('visibilitychange', () => { if (document.hidden) keys.clear(); });
 
-  // Shift is a legacy modifier — move and attack-move are unified now, so
-  // it changes nothing; kept only so old muscle memory stays harmless.
+  // Shift no longer modifies orders (attacking needs an explicit enemy
+  // target, #74) — it's the control-group assign modifier now. Kept only
+  // for the legacy rightClick/attackHeld plumbing, which ignores it.
   function isAttackHeld() { return keys.has('ShiftLeft') || keys.has('ShiftRight'); }
 
   // called each frame for keyboard / edge panning

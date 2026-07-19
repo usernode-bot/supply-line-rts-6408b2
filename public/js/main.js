@@ -18,8 +18,10 @@ let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1; // displayed speed step 1–4; the sim multiplier is speed × 0.5
 let paused = false;
-let ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {} };
+let ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null };
 let renderer = null, input = null;
+let groups = {};                      // control groups (#69): n -> {kind:'blobs', ids} | {kind:'settlement', id}
+let lastGroupTap = { n: 0, t: 0 };    // for double-tap-to-center
 let lastFrame = 0, acc = 0, lastSaveTick = 0, lastPanel = 0;
 let resultPosted = false;
 let panelHeld = false;
@@ -703,7 +705,8 @@ function doGarrisonRole(st, role) {
 function startMatch(g) {
   game = g;
   resultPosted = false;
-  ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {} };
+  ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null };
+  groups = {};
   hideOrderPopup();
   acc = 0; speed = 1; paused = false; lastSaveTick = g.tick;
   $('sel-speed').value = '1';
@@ -717,7 +720,7 @@ function startMatch(g) {
 
   if (!renderer) {
     renderer = createRenderer($('game-canvas'), $('minimap'));
-    input = createInput({ canvas: $('game-canvas'), minimap: $('minimap'), view, handlers: { tap: onTap, box: onBox, rightClick: onRightClick, cancel: onCancel, gesture: hideOrderPopup } });
+    input = createInput({ canvas: $('game-canvas'), minimap: $('minimap'), view, handlers: { tap: onTap, box: onBox, rightClick: onRightClick, cancel: onCancel, gesture: hideOrderPopup, groupKey: onGroupKey } });
   }
   input.setMapSize(g.map.w, g.map.h);
   const start = g.map.starts[me] || g.map.starts[0];
@@ -964,12 +967,72 @@ function onRightClick(world) {
   const blobs = selectedBlobs();
   if (!blobs.length) return;
   const target = findEnemyTargetAt(world);
-  let err = null;
+  let err = null, ok = 0;
   for (const b of blobs) {
     const r = doMove(b, world.x, world.y, target);
-    if (r.err) err = r.err;
+    if (r.err) err = r.err; else ok++;
   }
+  if (ok) pingOrder(world, target);
   if (err) toast(err);
+}
+
+// Brief destination animation so a move/attack order visibly lands (#71).
+function pingOrder(world, target) {
+  ui.ping = { x: world.x, y: world.y, kind: target ? 'attack' : 'move', t: performance.now() };
+}
+
+// ---------------------------------------------------------------- control groups (#69)
+// Shift+1–9 assigns the current selection to that number; 1–9 selects the
+// group; pressing the same number twice quickly also centers the camera
+// on it. Session-local UI state — never serialized.
+
+function onGroupKey(n, shift) {
+  if (!game || game.result) return;
+  if (shift) {
+    if (ui.selected && ui.selected.kind === 'settlement') {
+      const st = selectedSettlement();
+      if (!st) return;
+      groups[n] = { kind: 'settlement', id: st.id };
+      toast(`⌨️ Group ${n} set — settlement`);
+      return;
+    }
+    const blobs = selectedBlobs();
+    if (blobs.length) {
+      groups[n] = { kind: 'blobs', ids: blobs.map(b => b.id) };
+      toast(`⌨️ Group ${n} set — ${blobs.length} blob${blobs.length === 1 ? '' : 's'}`);
+    } else if (groups[n]) {
+      delete groups[n];
+      toast(`⌨️ Group ${n} cleared`);
+    }
+    return;
+  }
+  const g = groups[n];
+  if (!g) return;
+  const now = performance.now();
+  const dbl = lastGroupTap.n === n && now - lastGroupTap.t < 450;
+  lastGroupTap = { n, t: now };
+  if (g.kind === 'settlement') {
+    const st = game.settlements.find(s => s.id === g.id && s.owner === me);
+    if (!st) { delete groups[n]; return; }
+    ui.selected = { kind: 'settlement', id: st.id };
+    if (dbl) { view.cx = st.x + 1; view.cy = st.y + 1; input.clampView(); }
+  } else {
+    // resolve through the merge log so merged blobs stay in the group
+    // (two old ids can resolve to one survivor — dedupe)
+    const resolved = g.ids.map(findBlob).filter(b => b && !b.dead && b.owner === me);
+    const blobs = [...new Map(resolved.map(b => [b.id, b])).values()];
+    const ids = blobs.map(b => b.id);
+    if (!ids.length) { delete groups[n]; return; }
+    g.ids = ids;
+    ui.selected = ids.length === 1 ? { kind: 'blob', id: ids[0] } : { kind: 'multi', ids: ids.slice() };
+    if (dbl) {
+      let cx = 0, cy = 0;
+      for (const b of blobs) { cx += b.x; cy += b.y; }
+      view.cx = cx / blobs.length; view.cy = cy / blobs.length;
+      input.clampView();
+    }
+  }
+  renderPanel(true);
 }
 
 function onCancel() {
@@ -1015,11 +1078,13 @@ orderPopup.addEventListener('click', (e) => {
   hideOrderPopup();
   if (act === 'pclose') { ui.selected = null; renderPanel(true); return; }
   if (!world) return;
-  let err = null;
+  const target = act === 'pattack' ? targetEnt : null;
+  let err = null, ok = 0;
   for (const b of selectedBlobs()) {
-    const r = doMove(b, world.x, world.y, act === 'pattack' ? targetEnt : null);
-    if (r.err) err = r.err;
+    const r = doMove(b, world.x, world.y, target);
+    if (r.err) err = r.err; else ok++;
   }
+  if (ok) pingOrder(world, target);
   if (err) toast(err);
   renderPanel(true);
 });
@@ -1032,11 +1097,12 @@ function resolvePending(world) {
   if (pending === 'move') {
     if (!blobs.length) return;
     const target = findEnemyTargetAt(world); // tapping an enemy targets it
-    let err = null;
+    let err = null, ok = 0;
     for (const b of blobs) {
       const r = doMove(b, world.x, world.y, target);
-      if (r.err) err = r.err;
+      if (r.err) err = r.err; else ok++;
     }
+    if (ok) pingOrder(world, target);
     if (err) toast(err);
   } else if (pending === 'route') {
     const carrier = blobs[0];
@@ -1160,11 +1226,16 @@ panel.addEventListener('click', (e) => {
     }
     case 'recall': {
       if (st) {
+        // partial recall (#68): the slider picks how many field hands come
+        // home; the farthest-out farmers return first so the close fields
+        // stay manned
+        const workers = game.blobs
+          .filter(b => !b.dead && b.owner === me && b.working === st.id)
+          .sort((a, b2) => dist(b2.x, b2.y, st.x + 1, st.y + 1) - dist(a.x, a.y, st.x + 1, st.y + 1));
+        const n = Math.max(1, Math.min(workers.length, ui.recallCount || workers.length));
         let c = 0;
-        for (const b of [...game.blobs]) {
-          if (!b.dead && b.owner === me && b.working === st.id) {
-            if (doMove(b, st.x + 1, st.y + 1).ok) c++;
-          }
+        for (const b of workers.slice(0, n)) {
+          if (doMove(b, st.x + 1, st.y + 1).ok) c++;
         }
         toast(c ? `🏠 Recalling ${c} farmer${c === 1 ? '' : 's'}` : 'No farmers working the fields');
       }
@@ -1179,6 +1250,10 @@ panel.addEventListener('input', (e) => {
     ui.splitCount = Math.max(1, e.target.value | 0);
     const lbl = $('split-label');
     if (lbl) lbl.textContent = `${ui.splitCount} / ${(e.target.max | 0) + 1}`;
+  } else if (e.target.id === 'recall-count') {
+    ui.recallCount = Math.max(1, e.target.value | 0);
+    const btn = $('recall-btn');
+    if (btn) btn.textContent = `Recall ${ui.recallCount}`;
   } else if (e.target.id && e.target.id.startsWith('field-count-')) {
     const role = e.target.id.slice('field-count-'.length);
     const v = Math.max(1, e.target.value | 0);
@@ -1359,6 +1434,9 @@ function renderPanelInner(force) {
     } else {
       prog = `<div class="text-xs text-zinc-400 mt-1">Training ${st.mode === 'supply' ? 'supply' : 'deploy'} unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each — surplus food goes to training ${st.stockpile <= 0 ? '<span class="text-red-400">(needs food)</span>' : ''}</div>`;
     }
+    // partial farmer recall (#68): same split-slider UX as blob splitting
+    const rc = wc > 0 ? Math.max(1, Math.min(wc, ui.recallCount || wc)) : 0;
+    ui.recallCount = rc || null;
     const fieldRows = ['deploy', 'supply', 'farm'].filter(role => g[role] >= 1).map(role => {
       const max = g[role];
       const cur = Math.max(1, Math.min(max, ui.fieldCounts[role] || Math.max(1, Math.floor(max / 2))));
@@ -1383,9 +1461,13 @@ function renderPanelInner(force) {
           class="btn-sm flex-1 px-1 rounded ${st.mode === m ? (m === 'off' ? 'bg-zinc-600 text-white' : 'bg-emerald-700 text-white') : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}">${lbl}</button>`).join('')}
       </div>
       ${prog}
-      <div class="mt-2 pt-2 border-t border-zinc-800 flex items-center justify-between">
-        <span class="text-xs text-zinc-500">🌱 ${wc} farmer${wc === 1 ? '' : 's'} working the fields · <b class="${wc > 0 ? 'text-emerald-400' : 'text-zinc-400'}">${fmtRate(farmContrib)} food/s</b>${farmHint}</span>
-        ${wc > 0 ? '<button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall farmers</button>' : ''}
+      <div class="mt-2 pt-2 border-t border-zinc-800">
+        <div class="text-xs text-zinc-500">🌱 ${wc} farmer${wc === 1 ? '' : 's'} working the fields · <b class="${wc > 0 ? 'text-emerald-400' : 'text-zinc-400'}">${fmtRate(farmContrib)} food/s</b>${farmHint}</div>
+        ${wc >= 2 ? `
+        <div class="flex items-center gap-2 mt-1">
+          <input id="recall-count" type="range" min="1" max="${wc}" step="1" value="${rc}" class="flex-1">
+          <button data-act="recall" id="recall-btn" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Recall ${rc}</button>
+        </div>` : wc === 1 ? '<div class="mt-1 text-right"><button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall 1</button></div>' : ''}
       </div>
       <div class="text-xs text-zinc-500 mt-1">Income = a built-in base worth ${S.C.FARM_BASE_FARMERS} farmers plus a full share per working farmer; past ${S.C.FARM_DR_START} each extra farmer yields a little less, breaking even around ${S.C.FARM_NEUTRAL_AT} — where farm growth stops and surplus is stockpiled. Sheltered or garrisoned farmers don't count — send them back out to the fields.</div>
       <div class="mt-2 pt-2 border-t border-zinc-800">
