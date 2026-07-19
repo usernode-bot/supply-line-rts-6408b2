@@ -206,14 +206,15 @@ export function createInput({ canvas, minimap, view, handlers }) {
   window.addEventListener('blur', () => keys.clear());
   document.addEventListener('visibilitychange', () => { if (document.hidden) keys.clear(); });
 
-  // attack-move modifier: hold Shift while right-clicking
+  // Shift is a legacy modifier — move and attack-move are unified now, so
+  // it changes nothing; kept only so old muscle memory stays harmless.
   function isAttackHeld() { return keys.has('ShiftLeft') || keys.has('ShiftRight'); }
 
   // called each frame for keyboard / edge panning
   function update(dtMs) {
     const panPx = 0.6 * dtMs; // px per ms
     let dx = 0, dy = 0;
-    // full WASD pan (attack-move modifier lives on Shift, so A is free)
+    // full WASD pan
     if (keys.has('KeyW') || keys.has('ArrowUp')) dy -= panPx;
     if (keys.has('KeyS') || keys.has('ArrowDown')) dy += panPx;
     if (keys.has('KeyA') || keys.has('KeyQ') || keys.has('ArrowLeft')) dx -= panPx;

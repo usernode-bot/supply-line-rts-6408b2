@@ -29,7 +29,11 @@ tables you've marked private), etc.
 ## About Supply Line
 
 Single-player, slow-paced 2D top-down RTS ("Supply Line") played in the
-browser vs a scripted AI, tuned for a 20–40 minute match. Core loop:
+browser vs a scripted AI, tuned for a 20–40 minute match at the sim's
+native tick rate. The default 1× game speed runs at *half* that rate
+(the top-bar selector offers 1×–4×, where 2× is the native rate); PvP
+is fixed at 1×, so quick multiplayer games are best played on the
+smaller map sizes. Core loop:
 found settlements on fertile land, feed armies via pillage or supply
 routes, destroy all enemy settlements to win. The full game sim runs
 client-side (ES modules under `public/js/`); the server only gates auth

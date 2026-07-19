@@ -80,7 +80,7 @@ function rallyPoint(game, setts) {
 
 function sendToRally(game, S, setts, b) {
   const r = rallyPoint(game, setts);
-  S.opMove(game, b, r.x, r.y, false);
+  S.opMove(game, b, r.x, r.y);
 }
 
 // -- expand: found new settlements on good land ------------------------
@@ -97,7 +97,7 @@ function expand(game, S, setts, mine, ai, diff) {
         if (res.err) { /* site got contested; try again later */ }
       } else {
         // stalled — retry the move once, then give up on this site
-        if (S.opMove(game, b, ai.expand.x, ai.expand.y, false).err) ai.expand = null;
+        if (S.opMove(game, b, ai.expand.x, ai.expand.y).err) ai.expand = null;
         else ai.expand.retried = (ai.expand.retried || 0) + 1;
         if (ai.expand && ai.expand.retried > 2) { ai.expand = null; }
       }
@@ -119,7 +119,7 @@ function expand(game, S, setts, mine, ai, diff) {
   }
   const site = pickSite(game, S, setts, ai);
   if (!site) return;
-  if (S.opMove(game, b, site.x + 1, site.y + 1, false).ok) {
+  if (S.opMove(game, b, site.x + 1, site.y + 1).ok) {
     ai.expand = { blobId: b.id, x: site.x + 1, y: site.y + 1 };
     ai.lastExpand = game.tick;
   }
@@ -184,7 +184,7 @@ function scout(game, S, setts, mine, ai, diff) {
     tx = 4 + Math.random() * (game.map.w - 8);
     ty = 4 + Math.random() * (game.map.h - 8);
   }
-  if (S.opMove(game, r.blob, tx, ty, false).ok) {
+  if (S.opMove(game, r.blob, tx, ty).ok) {
     ai.scoutId = r.blob.id;
     ai.lastScout = game.tick;
   }
@@ -196,11 +196,11 @@ function muster(game, S, setts, mine, ai, diff) {
   if (ai.attacking) return;
   // idle deploy blobs (not tasked) drift to the rally and merge up
   for (const b of mine) {
-    if (b.order || b.id === ai.armyId || b.id === ai.scoutId) continue;
+    if (b.order || b.pillaging || b.id === ai.armyId || b.id === ai.scoutId) continue;
     if (ai.expand && ai.expand.blobId === b.id) continue;
     if (b.count.deploy === 0) continue;
     const r = rallyPoint(game, setts);
-    if (dist(b.x, b.y, r.x, r.y) > 3) S.opMove(game, b, r.x, r.y, false);
+    if (dist(b.x, b.y, r.x, r.y) > 3) S.opMove(game, b, r.x, r.y);
   }
 }
 
@@ -210,21 +210,23 @@ function attack(game, S, setts, mine, ai, diff) {
     const army = mine.find(b => b.id === ai.armyId);
     if (!army) { ai.armyId = null; ai.attacking = false; return; }
     const meter = S.fedMeter(army);
-    // live off the land while campaigning; stop once well-fed again
+    // live off the land while campaigning: pillaging is a stationary
+    // camp now, so a hungry army halts to forage and breaks camp (the
+    // !army.pillaging guard below) once well-fed again
     if (meter < 0.85 && !army.pillaging) S.opPillage(game, army, true);
     else if (meter > 0.95 && army.pillaging) S.opPillage(game, army, false);
     if (meter < 0.5) {
       // starving offensive: retreat home
       const home = setts[0];
       S.opPillage(game, army, false);
-      S.opMove(game, army, home.x + 2.5, home.y + 1, false);
+      S.opMove(game, army, home.x + 2.5, home.y + 1);
       ai.armyId = null; ai.attacking = false;
       return;
     }
-    if (!army.order) {
+    if (!army.order && !army.pillaging) {
       // arrived / target gone — pick the next known target or head home
       const t = nearestKnown(ai, army.x, army.y, game);
-      if (t) S.opMove(game, army, t.x + 1, t.y + 1, true);
+      if (t) S.opMove(game, army, t.x + 1, t.y + 1);
       else { ai.attacking = false; ai.armyId = null; }
     }
     return;
@@ -239,7 +241,7 @@ function attack(game, S, setts, mine, ai, diff) {
   const army = candidates[0];
   const t = nearestKnown(ai, army.x, army.y, game);
   if (!t) return; // scouts haven't found the player yet
-  if (!S.opMove(game, army, t.x + 1, t.y + 1, true).ok) return;
+  if (!S.opMove(game, army, t.x + 1, t.y + 1).ok) return;
   ai.armyId = army.id;
   ai.attacking = true;
   ai.lastAttack = game.tick;
@@ -282,7 +284,7 @@ function defend(game, S, setts, mine, ai) {
     if (d < bd) { bd = d; best = b; }
   }
   if (best && bd > 3) {
-    S.opMove(game, best, hit.x + 1, hit.y + 1, true);
+    S.opMove(game, best, hit.x + 1, hit.y + 1);
     if (best.id === ai.armyId) { ai.armyId = null; ai.attacking = false; }
   }
 }

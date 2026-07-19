@@ -10,6 +10,10 @@
     { "name": "In-app confirm dialog present (surrender / start-over flows)", "path": "/?demo=1", "expectSelector": "#confirm-modal" },
     { "name": "Start Match button renders", "path": "/?demo=1", "expectSelector": "#btn-new" },
     { "name": "Back-to-work button present in top bar", "path": "/?demo=1", "expectSelector": "#btn-backtowork" },
-    { "name": "How to Play farmer-income paragraph present", "path": "/?demo=1", "expectSelector": "#help-farmer-income" }
+    { "name": "How to Play farmer-income paragraph present", "path": "/?demo=1", "expectSelector": "#help-farmer-income" },
+    { "name": "Speed dropdown (1×–4×) present in top bar", "path": "/?demo=1", "expectSelector": "#sel-speed" },
+    { "name": "Very small map option in solo picker", "path": "/?demo=1", "expectSelector": "#sel-mapsize option[value=xsmall]" },
+    { "name": "Very small map option in multiplayer picker", "path": "/?demo=1", "expectSelector": "#mp-size option[value=xsmall]" },
+    { "name": "Per-unit health strip container present", "path": "/?demo=1", "expectSelector": "#unit-strip" }
   ]
 }
