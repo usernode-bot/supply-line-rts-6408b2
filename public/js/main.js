@@ -1256,8 +1256,8 @@ function renderPanel(force) {
     const farmContrib = (S.incomeRate(game, st) - S.incomeRate(game, st, 0)) * 10;
     const farmHint = wc >= S.C.FARM_NEUTRAL_AT
       ? ' · <span class="text-red-400">extra farmers eat as much as they grow</span>'
-      : wc > S.C.FARM_SOFT_CAP
-        ? ` · <span class="text-amber-400">diminishing returns past ${S.C.FARM_SOFT_CAP}</span>`
+      : wc > S.C.FARM_DR_START
+        ? ` · <span class="text-amber-400">diminishing returns past ${S.C.FARM_DR_START}</span>`
         : '';
     const pausedNote = '<div class="text-xs text-amber-400 mt-1">⏸ Paused — food at break-even. More farmers or fewer mouths to resume.</div>';
     let prog;
@@ -1265,9 +1265,8 @@ function renderPanel(force) {
       prog = '<div class="text-xs text-zinc-500 mt-1">📦 Stockpiling food — no units trained.</div>';
     } else if (st.mode === 'farm') {
       const hungry = st.stockpile < S.C.FARM_GROW_FLOOR ? `<span class="text-red-400">(needs ${S.C.FARM_GROW_FLOOR} food)</span>` : '';
-      prog = wc >= S.C.FARM_SOFT_CAP
-        ? (gated ? pausedNote
-          : `<div class="text-xs text-zinc-400 mt-1">Farm target (${S.C.FARM_SOFT_CAP}) reached — training ⚔️ deploy unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${hungry}</div>`)
+      prog = wc >= S.C.FARM_NEUTRAL_AT
+        ? `<div class="text-xs text-zinc-400 mt-1">Break-even crew (${S.C.FARM_NEUTRAL_AT}) reached — stockpiling surplus food.</div>`
         : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${hungry}</div>`;
     } else if (gated && st.stockpile >= S.C.TRAIN_COST) {
       prog = pausedNote;
@@ -1302,7 +1301,7 @@ function renderPanel(force) {
         <span class="text-xs text-zinc-500">🌱 ${wc} farmer${wc === 1 ? '' : 's'} working the fields · <b class="${wc > 0 ? 'text-emerald-400' : 'text-zinc-400'}">${fmtRate(farmContrib)} food/s</b>${farmHint}</span>
         ${wc > 0 ? '<button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall farmers</button>' : ''}
       </div>
-      <div class="text-xs text-zinc-500 mt-1">Income = a built-in base worth ${S.C.FARM_BASE_FARMERS} farmers plus a full share per working farmer, up to ${S.C.FARM_SOFT_CAP}; extra farmers yield less and less, breaking even around ${S.C.FARM_NEUTRAL_AT}. Sheltered or garrisoned farmers don't count — send them back out to the fields.</div>
+      <div class="text-xs text-zinc-500 mt-1">Income = a built-in base worth ${S.C.FARM_BASE_FARMERS} farmers plus a full share per working farmer; past ${S.C.FARM_DR_START} each extra farmer yields a little less, breaking even around ${S.C.FARM_NEUTRAL_AT} — where farm growth stops and surplus is stockpiled. Sheltered or garrisoned farmers don't count — send them back out to the fields.</div>
       <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}</div>
         ${gTot > 0 ? `

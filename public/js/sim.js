@@ -23,7 +23,7 @@ export const C = {
   FARM_PER_FARMER: 0.002,  // stockpile per tick per unit of tilled fertility per farmer-equivalent
   FARM_BASE_FARMERS: 2,    // built-in farmer-equivalents every settlement gets for free
   FARM_GROW_FLOOR: 50,     // farm-mode settlements grow farmers only above this stockpile
-  FARM_SOFT_CAP: 10,       // last fully effective farmer; farm-mode auto-growth target
+  FARM_DR_START: 10,       // last fully effective farmer; diminishing returns start past it
   FARM_NEUTRAL_AT: 24,     // farmer whose marginal product equals upkeep on reference land
   FERT_REF: 20,            // reference tilled fertility (a full lush ring) the neutrality tuning assumes
                            // (TRAIN_* / FARM_* figures are restated in plain
@@ -392,7 +392,7 @@ export function opSetRole(game, b, role) {
   const n = total(b);
   if (role === 'farm') {
     // farmers disperse into individual working units on the nearest
-    // friendly settlement's fields — no cap; past FARM_SOFT_CAP each
+    // friendly settlement's fields — no cap; past FARM_DR_START each
     // extra farmer just yields less (see effectiveFarmers)
     if (b.working != null) return { err: 'Already working the fields' };
     let s = null, bd = Infinity;
@@ -1301,24 +1301,24 @@ export function trainGated(s) { return s.flow < C.EAT_PER_SEC * C.DT; }
 // land (FERT_REF tilled fertility) exactly feeds themselves; the linear
 // decline FARM_DR_SLOPE is tuned so farmer FARM_NEUTRAL_AT lands there.
 export const NEUTRAL_EFF = (C.EAT_PER_SEC * C.DT) / (C.FERT_REF * C.FARM_PER_FARMER);
-export const FARM_DR_SLOPE = (1 - NEUTRAL_EFF) / (C.FARM_NEUTRAL_AT - C.FARM_SOFT_CAP);
+export const FARM_DR_SLOPE = (1 - NEUTRAL_EFF) / (C.FARM_NEUTRAL_AT - C.FARM_DR_START);
 
 // Effective farmer count: linear up to the soft cap, then each extra
 // farmer's marginal efficiency drops by FARM_DR_SLOPE (floored at 0) —
 // net-neutral on reference land by farmer FARM_NEUTRAL_AT, a pure drain
 // beyond that.
 export function effectiveFarmers(n) {
-  if (n <= C.FARM_SOFT_CAP) return n;
-  let eff = C.FARM_SOFT_CAP;
-  for (let k = C.FARM_SOFT_CAP + 1; k <= n; k++) {
-    eff += Math.max(0, 1 - (k - C.FARM_SOFT_CAP) * FARM_DR_SLOPE);
+  if (n <= C.FARM_DR_START) return n;
+  let eff = C.FARM_DR_START;
+  for (let k = C.FARM_DR_START + 1; k <= n; k++) {
+    eff += Math.max(0, 1 - (k - C.FARM_DR_START) * FARM_DR_SLOPE);
   }
   return eff;
 }
 
 // Gross farmland income per 100 ms tick: a built-in base worth
 // FARM_BASE_FARMERS farmer-equivalents plus one per working farmer
-// (diminishing past the soft cap — see effectiveFarmers), each yielding
+// (diminishing past FARM_DR_START — see effectiveFarmers), each yielding
 // tilled fertility × FARM_PER_FARMER, × the AI's difficulty multiplier.
 // Shared by the sim and the settlement panel so the displayed rate can
 // never drift from what actually accrues. Pass `farmers` to price a
@@ -1340,26 +1340,22 @@ function tickSettlement(game, s) {
   s.flowAcc = (s.flowAcc || 0) + income;
   if (s.mode === 'farm') {
     // healthy farms grow population: surplus food becomes new farmers who
-    // walk straight out to the fields; past the soft cap (where returns
-    // start diminishing), growth trains deploy units into the garrison
-    // instead (those are pure consumers, so they gate on the break-even
-    // food flow). Players can still assign more farmers manually.
-    if (s.stockpile >= C.FARM_GROW_FLOOR) {
-      const atCap = workingCount(game, s) >= C.FARM_SOFT_CAP;
-      if (!atCap || !trainGated(s)) {
-        s.trainTicks++;
-        if (s.trainTicks >= C.TRAIN_TICKS) {
-          s.trainTicks = 0;
-          s.stockpile -= C.TRAIN_COST;
-          if (!atCap) {
-            const f = spawnWorkingFarmer(game, s);
-            const give = Math.min(s.stockpile, foodCap(f));
-            s.stockpile -= give;
-            f.food = give;
-          } else {
-            s.garrison.deploy++;
-          }
-        }
+    // walk straight out to the fields, up to the break-even crew (where a
+    // new farmer only grows what they eat); after that the farm trains
+    // nothing and surplus banks in the stockpile, like 'off'. Growth is
+    // deliberately not gated on the flow EMA — an army feeding in
+    // territory shouldn't stall population growth; FARM_GROW_FLOOR is the
+    // brake. Players can still assign more than the crew manually (those
+    // extras are a net drain, as the curve dictates).
+    if (s.stockpile >= C.FARM_GROW_FLOOR && workingCount(game, s) < C.FARM_NEUTRAL_AT) {
+      s.trainTicks++;
+      if (s.trainTicks >= C.TRAIN_TICKS) {
+        s.trainTicks = 0;
+        s.stockpile -= C.TRAIN_COST;
+        const f = spawnWorkingFarmer(game, s);
+        const give = Math.min(s.stockpile, foodCap(f));
+        s.stockpile -= give;
+        f.food = give;
       }
     } else {
       s.trainTicks = 0;
