@@ -34,7 +34,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
   function clampView() {
     const { w, h } = cssSize();
     const minScale = Math.max(3, Math.min(w / mapSize.w, h / mapSize.h) * 0.9);
-    view.scale = Math.max(minScale, Math.min(48, view.scale));
+    view.scale = Math.max(minScale, Math.min(96, view.scale)); // 96 px/tile ≈ close-up on a single blob (#60)
     view.cx = Math.max(0, Math.min(mapSize.w, view.cx));
     view.cy = Math.max(0, Math.min(mapSize.h, view.cy));
   }

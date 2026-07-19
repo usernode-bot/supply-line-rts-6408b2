@@ -133,12 +133,16 @@ export function createRenderer(canvas, minimap) {
     tctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
     tctx.fillRect(px, py, T, T);
     // farmland: plough furrows as a world-space wavy stripe function keyed
-    // on the owning settlement id, so each plot gets its own row direction,
-    // spacing, and wobble; tiles of one plot join seamlessly at any angle,
-    // and repainting a single dirty tile reproduces identical pixels (#49).
+    // on the owning settlement id AND a 2×2-tile patch grid, so one
+    // settlement's farmland breaks into small plots with mixed row
+    // directions (#61); tiles of one patch join seamlessly, and repainting
+    // a single dirty tile reproduces identical pixels (#49).
     if (sid) {
       const WOB_LEN = 14, WOB_AMP = 1.2;        // waviness wavelength / amplitude (px)
-      const hash = (sid * 2654435761) >>> 0;
+      const patchX = (i % w) >> 1, patchY = ((i / w) | 0) >> 1;
+      let hash = (sid * 2654435761 + patchX * 668265263 + patchY * 374761393) >>> 0;
+      hash = Math.imul(hash ^ (hash >>> 15), 2246822519) >>> 0;
+      hash = (hash ^ (hash >>> 13)) >>> 0;
       // rows are strictly horizontal or vertical (~50/50 per plot) — exact
       // 0/1 axis vectors, no diagonals
       const vert = (hash >>> 3) & 1;
@@ -275,12 +279,22 @@ export function createRenderer(canvas, minimap) {
     }
     ctx.globalAlpha = 1;
 
-    // selected blob path
-    if (ui.selected && ui.selected.kind === 'blob') {
-      const b = game.blobs.find(x => x.id === ui.selected.id && !x.dead);
-      if (b && b.path && b.path.length) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-        ctx.lineWidth = 1.5;
+    // selected blob ids — single tap OR box multi-select (#62): the same
+    // white ring / path treatment applies to every selected blob,
+    // working farmers included
+    let selSet = null;
+    if (ui.selected) {
+      if (ui.selected.kind === 'multi') selSet = new Set(ui.selected.ids);
+      else if (ui.selected.kind === 'blob' || ui.selected.kind === 'enemy-blob') selSet = new Set([ui.selected.id]);
+    }
+
+    // selected blob paths (own blobs only — never reveal enemy plans)
+    if (selSet) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.lineWidth = 1.5;
+      for (const b of game.blobs) {
+        if (b.dead || !selSet.has(b.id) || b.owner !== viewer(game)) continue;
+        if (!b.path || !b.path.length) continue;
         ctx.beginPath();
         ctx.moveTo(wx(bx(b)), wy(by(b)));
         for (const p of b.path) ctx.lineTo(wx(p.x), wy(p.y));
@@ -300,7 +314,7 @@ export function createRenderer(canvas, minimap) {
     for (const b of game.blobs) {
       if (b.dead || b.working == null) continue;
       if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
-      drawWorkingFarmer(game, b, wx, wy, s, alpha, ui);
+      drawWorkingFarmer(game, b, wx, wy, s, alpha, selSet);
     }
 
     // settlements (with per-settlement working-farmer totals, one sweep)
@@ -349,7 +363,7 @@ export function createRenderer(canvas, minimap) {
         ctx.lineWidth = 3;
         ctx.stroke();
       }
-      if (ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'enemy-blob') && ui.selected.id === b.id) {
+      if (selSet && selSet.has(b.id)) {
         ctx.beginPath();
         ctx.arc(px, py, r + 4, 0, Math.PI * 2);
         ctx.strokeStyle = '#ffffff';
@@ -615,7 +629,7 @@ export function createRenderer(canvas, minimap) {
 
   // Working farmers are real 1-unit blobs standing in the fields — drawn
   // as the little farmer figure, but selectable and attackable.
-  function drawWorkingFarmer(game, b, wx, wy, s, alpha, ui) {
+  function drawWorkingFarmer(game, b, wx, wy, s, alpha, selSet) {
     const t = game.tick + alpha;
     const bob = Math.abs(Math.sin(t * 0.14 + (b.id % 7) * 1.7)) * 0.1;
     const ix = lerp(b.prevX != null ? b.prevX : b.x, b.x, alpha);
@@ -631,7 +645,7 @@ export function createRenderer(canvas, minimap) {
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-    if (ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'enemy-blob') && ui.selected.id === b.id) {
+    if (selSet && selSet.has(b.id)) {
       ctx.beginPath();
       ctx.arc(px, py - r * 0.5, r * 2.2, 0, Math.PI * 2);
       ctx.strokeStyle = '#ffffff';
@@ -704,11 +718,11 @@ export function createRenderer(canvas, minimap) {
       barY += 5;
     }
     // production progress (own settlements only)
-    if (!ghost && st.owner === viewer(game) && st.trainTicks > 0) {
+    if (!ghost && st.owner === viewer(game) && st.trainAcc > 0) {
       ctx.fillStyle = '#111827';
       ctx.fillRect(x0, barY, size, 3);
       ctx.fillStyle = '#fbbf24';
-      ctx.fillRect(x0, barY, size * (st.trainTicks / S.C.TRAIN_TICKS), 3);
+      ctx.fillRect(x0, barY, size * (st.trainAcc / S.C.TRAIN_COST), 3);
       barY += 4;
     }
     ctx.globalAlpha = 1;

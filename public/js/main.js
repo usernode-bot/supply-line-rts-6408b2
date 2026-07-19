@@ -1332,7 +1332,7 @@ function renderPanelInner(force) {
     const g = st.garrison;
     const gTot = S.garrisonTotal(st);
     const wc = S.workingCount(game, st);
-    const pct = Math.round(100 * st.trainTicks / S.C.TRAIN_TICKS);
+    const pct = Math.round(100 * st.trainAcc / S.C.TRAIN_COST);
     const gated = S.trainGated(st);
     // food/s rates: gross farmland income and net after everyone eats
     // (rounded before signing so a hair-negative EMA doesn't show "-0.0")
@@ -1354,10 +1354,10 @@ function renderPanelInner(force) {
       prog = wc >= S.C.FARM_NEUTRAL_AT
         ? `<div class="text-xs text-zinc-400 mt-1">Break-even crew (${S.C.FARM_NEUTRAL_AT}) reached — stockpiling surplus food.</div>`
         : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${hungry}</div>`;
-    } else if (gated && st.stockpile >= S.C.TRAIN_COST) {
+    } else if (gated && st.stockpile > 0) {
       prog = pausedNote;
     } else {
-      prog = `<div class="text-xs text-zinc-400 mt-1">Training ${st.mode === 'supply' ? 'supply' : 'deploy'} unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${st.stockpile < S.C.TRAIN_COST ? '<span class="text-red-400">(needs food)</span>' : ''}</div>`;
+      prog = `<div class="text-xs text-zinc-400 mt-1">Training ${st.mode === 'supply' ? 'supply' : 'deploy'} unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each — surplus food goes to training ${st.stockpile <= 0 ? '<span class="text-red-400">(needs food)</span>' : ''}</div>`;
     }
     const fieldRows = ['deploy', 'supply', 'farm'].filter(role => g[role] >= 1).map(role => {
       const max = g[role];
@@ -1418,6 +1418,14 @@ function renderPanelInner(force) {
   const hpMax = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + S.unitMaxHP(u.role), 0), 0);
   const hpPct = Math.round(100 * hpSum / Math.max(1, hpMax));
   const hpColor = hpPct >= 75 ? 'text-emerald-400' : hpPct >= 40 ? 'text-amber-400' : 'text-red-400';
+  // nutrition trend across the selection: net food gain/loss per second
+  // (eating vs pillage / territory / route intake), from the sim's EMA
+  const trend = blobs.reduce((s2, b) => s2 + (b.foodTrend || 0), 0) * 10;
+  const trendTag = trend > 0.05
+    ? `<span class="text-emerald-400" title="Food trend">▲ +${trend.toFixed(1)}/s</span>`
+    : trend < -0.05
+      ? `<span class="text-red-400" title="Food trend">▼ ${trend.toFixed(1)}/s</span>`
+      : `<span class="text-zinc-500" title="Food trend">▶ steady</span>`;
   if (!multi && tot >= 2) {
     ui.splitCount = Math.max(1, Math.min(tot - 1, ui.splitCount || Math.floor(tot / 2)));
   }
@@ -1425,7 +1433,7 @@ function renderPanelInner(force) {
   setPanelHTML(`
     <div class="flex items-center justify-between mb-1">
       <span class="font-semibold">${multi ? `${blobs.length} blobs` : 'Blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
-      <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span></span>
+      <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
     <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ' · <span class="text-sky-300">on supply route</span>' : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
     <div class="text-xs text-zinc-500 mb-1">Role ${!atHome ? '<span class="text-zinc-600">(farmers need a settlement)</span>' : ''}</div>

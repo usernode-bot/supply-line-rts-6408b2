@@ -210,9 +210,9 @@ function attack(game, S, setts, mine, ai, diff) {
     const army = mine.find(b => b.id === ai.armyId);
     if (!army) { ai.armyId = null; ai.attacking = false; return; }
     const meter = S.fedMeter(army);
-    // live off the land while campaigning: pillaging is a stationary
-    // camp now, so a hungry army halts to forage and breaks camp (the
-    // !army.pillaging guard below) once well-fed again
+    // live off the land while campaigning: pillage is a persistent
+    // stance independent of movement, so a hungry army forages on the
+    // march and drops the torch once well-fed again
     if (meter < 0.85 && !army.pillaging) S.opPillage(game, army, true);
     else if (meter > 0.95 && army.pillaging) S.opPillage(game, army, false);
     if (meter < 0.5) {
