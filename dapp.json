@@ -16,6 +16,7 @@
     { "name": "Very small map option in multiplayer picker", "path": "/?demo=1", "expectSelector": "#mp-size option[value=xsmall]" },
     { "name": "Per-unit health strip container present", "path": "/?demo=1", "expectSelector": "#unit-strip" },
     { "name": "How to Play pillage-stance paragraph present", "path": "/?demo=1", "expectSelector": "#help-pillage" },
+    { "name": "How to Play caravan cargo & raiding sentence present", "path": "/?demo=1", "expectSelector": "#help-caravan-raid" },
     { "name": "Move-vs-attack help paragraph present", "path": "/?demo=1", "expectSelector": "#help-move-attack" },
     { "name": "Control-groups help paragraph present", "path": "/?demo=1", "expectSelector": "#help-groups" },
     { "name": "Healing help paragraph present", "path": "/?demo=1", "expectSelector": "#help-healing" },

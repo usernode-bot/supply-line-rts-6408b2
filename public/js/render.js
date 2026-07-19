@@ -395,6 +395,20 @@ export function createRenderer(canvas, minimap) {
       ctx.fillRect(px - tw / 2 - 3, cy2 - fs * 0.7, tw + 6, fs * 1.4);
       ctx.fillStyle = '#fff';
       ctx.fillText(label, px, cy2);
+      // cargo chip: food a route carrier is hauling. Deliberately public —
+      // drawn for every visible carrier regardless of owner, so enemy
+      // caravans read as raid targets (killing one loots half its cargo).
+      if (b.order && b.order.type === 'route') {
+        const cfs = Math.max(9, Math.min(13, r * 0.6));
+        const clabel = `🌾 ${Math.round(b.order.cargo || 0)}`;
+        ctx.font = `bold ${cfs}px system-ui`;
+        const cw = ctx.measureText(clabel).width;
+        const ccy = py + r + cfs * 0.8;
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(px - cw / 2 - 3, ccy - cfs * 0.7, cw + 6, cfs * 1.4);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(clabel, px, ccy);
+      }
       if (b.pillaging) {
         ctx.font = `${Math.max(10, r * 0.6)}px system-ui`;
         ctx.fillText('🔥', px + r * 0.9, py - r * 0.9);

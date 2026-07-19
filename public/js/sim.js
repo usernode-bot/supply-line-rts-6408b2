@@ -1263,6 +1263,7 @@ function tickCombat(game) {
   game.combat = []; // rebuilt every tick — engaged pairs re-register while in contact
   const alive = game.blobs.filter(b => !b.dead);
   const dmg = new Map();
+  const hitBy = new Map(); // victim -> Map(attacker -> damage this tick); attributes caravan kills for cargo raiding
   for (let i = 0; i < alive.length; i++) {
     for (let j = i + 1; j < alive.length; j++) {
       const a = alive[i], b = alive[j];
@@ -1272,8 +1273,18 @@ function tickCombat(game) {
       a.engagedT = game.tick; b.engagedT = game.tick;
       a.meleeT = game.tick; b.meleeT = game.tick; // blob melee only — settlement contact never sets meleeT (#82)
       game.combat.push({ kind: 'bb', a: a.id, b: b.id });
-      dmg.set(a, (dmg.get(a) || 0) + b.count.deploy * fedMult(fedMeter(b)) * C.K_COMBAT);
-      dmg.set(b, (dmg.get(b) || 0) + a.count.deploy * fedMult(fedMeter(a)) * C.K_COMBAT);
+      const da = b.count.deploy * fedMult(fedMeter(b)) * C.K_COMBAT;
+      const db = a.count.deploy * fedMult(fedMeter(a)) * C.K_COMBAT;
+      dmg.set(a, (dmg.get(a) || 0) + da);
+      dmg.set(b, (dmg.get(b) || 0) + db);
+      if (da > 0) {
+        if (!hitBy.has(a)) hitBy.set(a, new Map());
+        hitBy.get(a).set(b, (hitBy.get(a).get(b) || 0) + da);
+      }
+      if (db > 0) {
+        if (!hitBy.has(b)) hitBy.set(b, new Map());
+        hitBy.get(b).set(a, (hitBy.get(b).get(a) || 0) + db);
+      }
     }
   }
   // settlements
@@ -1319,7 +1330,36 @@ function tickCombat(game) {
       }
     }
     applyLosses(game, b, d);
+    if (b.dead) raidCargo(game, b, hitBy.get(b));
   }
+}
+
+// Cargo raiding: killing a supply-route carrier feeds the killer half of
+// the caravan's cargo, capped at its own food meter (overflow lost); the
+// other half is destroyed with the caravan. Only combat deaths reach here
+// — a carrier that starves or is released transfers nothing. With several
+// attackers in contact, the one that dealt the most damage this tick
+// takes the loot.
+function raidCargo(game, victim, attackers) {
+  if (!victim.order || victim.order.type !== 'route') return;
+  const cargo = victim.order.cargo || 0;
+  victim.order.cargo = 0; // half looted below, the rest burns either way
+  if (cargo <= 0.01 || !attackers) return;
+  let killer = null, best = 0;
+  for (const [a, d] of attackers) {
+    if (!a.dead && d > best) { killer = a; best = d; }
+  }
+  if (!killer) return;
+  const loot = Math.min(foodCap(killer) - killer.food, cargo / 2);
+  if (loot > 0) {
+    killer.food += loot;
+    pushFx(game, {
+      kind: 'loot', x: victim.x, y: victim.y,
+      bid: killer.id, tx: killer.x, ty: killer.y, t: game.tick,
+    });
+  }
+  game.events.push({ owner: killer.owner, msg: `🌾 Caravan raided! +${Math.round(Math.max(0, loot))} food`, x: victim.x, y: victim.y });
+  game.events.push({ owner: victim.owner, msg: '🌾 Your caravan was raided!', x: victim.x, y: victim.y });
 }
 
 // -- farmer safety: AI-owned working farmers shelter in their settlement
