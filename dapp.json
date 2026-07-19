@@ -21,6 +21,7 @@
     { "name": "Control-groups help paragraph present", "path": "/?demo=1", "expectSelector": "#help-groups" },
     { "name": "Healing help paragraph present", "path": "/?demo=1", "expectSelector": "#help-healing" },
     { "name": "Groups bar container present", "path": "/?demo=1", "expectSelector": "#groups-bar" },
-    { "name": "How to Play settlement placement & construction paragraph present", "path": "/?demo=1", "expectSelector": "#help-settlements" }
+    { "name": "How to Play settlement placement & construction paragraph present", "path": "/?demo=1", "expectSelector": "#help-settlements" },
+    { "name": "How to Play reflects removed farmer-growth food floor", "path": "/?demo=1", "expectText": "grows new farmers this way until every worthwhile plot" }
   ]
 }
