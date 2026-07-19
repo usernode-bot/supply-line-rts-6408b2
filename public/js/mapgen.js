@@ -20,7 +20,7 @@ export function mulberry32(a) {
   };
 }
 
-export const MAP_SIZES = { small: 72, medium: 96, large: 128 };
+export const MAP_SIZES = { xsmall: 36, small: 72, medium: 96, large: 128 };
 
 // Fertility is presented as exactly five tiers. Generation quantizes to
 // multiples of 0.25; pillage/regen drift fractionally in between, so

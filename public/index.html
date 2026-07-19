@@ -92,7 +92,12 @@
       <span id="stat-opp" class="hidden text-red-300 truncate max-w-[30vw]"></span>
       <span class="flex-1"></span>
       <button id="btn-pause" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">⏸</button>
-      <button id="btn-speed" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700 font-mono">1×</button>
+      <select id="sel-speed" class="btn-sm px-2 rounded bg-zinc-800 hover:bg-zinc-700 font-mono text-zinc-100">
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+        <option value="3">3×</option>
+        <option value="4">4×</option>
+      </select>
       <button id="btn-surrender" class="btn-sm px-3 rounded bg-red-900/70 hover:bg-red-800 text-red-200">Surrender</button>
     </div>
 
@@ -118,6 +123,11 @@
     <!-- top-right on phones (the bottom sheet owns the bottom edge); bottom-left on desktop -->
     <canvas id="minimap" width="144" height="144"
       class="absolute top-14 right-2 bottom-auto left-auto sm:top-auto sm:right-auto sm:bottom-2 sm:left-2 w-28 h-28 sm:w-36 sm:h-36 rounded border border-zinc-700 bg-black/70 z-10"></canvas>
+
+    <!-- per-unit health strip for the selected friendly blob: above the
+         bottom-sheet panel on phones (offset set from JS), bottom edge
+         between minimap and panel card on desktop -->
+    <div id="unit-strip" class="hidden absolute bottom-0 inset-x-0 sm:left-40 sm:right-[21.5rem] sm:bottom-2 z-10 flex items-center gap-1 overflow-x-auto px-2 py-1 bg-zinc-950/85 backdrop-blur border-t sm:border border-zinc-800 sm:rounded-lg"></div>
 
     <!-- selection panel: bottom sheet on phones, card bottom-right on desktop -->
     <div id="panel" class="hidden absolute bottom-0 inset-x-0 sm:inset-x-auto sm:right-3 sm:bottom-3 sm:w-80 bg-zinc-900/95 backdrop-blur border-t sm:border border-zinc-700 sm:rounded-xl p-3 z-10 text-sm max-h-[45%] overflow-y-auto">
@@ -150,6 +160,7 @@
         </label>
         <label class="flex items-center justify-between gap-2 text-zinc-300">Map size
           <select id="sel-mapsize" class="bg-zinc-800 rounded px-3 py-2 text-zinc-100">
+            <option value="xsmall">Very small</option>
             <option value="small">Small</option>
             <option value="medium" selected>Medium</option>
             <option value="large">Large</option>
@@ -180,6 +191,7 @@
         <div id="mp-forms" class="flex flex-col gap-3">
           <label class="flex items-center justify-between gap-2 text-zinc-300">Map size
             <select id="mp-size" class="bg-zinc-800 rounded px-3 py-2 text-zinc-100">
+              <option value="xsmall">Very small</option>
               <option value="small">Small</option>
               <option value="medium" selected>Medium</option>
               <option value="large">Large</option>
@@ -209,10 +221,10 @@
           <p><b class="text-zinc-200">Goal:</b> destroy every enemy settlement. You lose if all your settlements fall and you have fewer than 5 units left.</p>
           <p id="help-farmer-income"><b class="text-zinc-200">Units</b> are all one type; their <b>role</b> is switchable any time from the selection panel: <b>Deploy</b> fights at normal speed, <b>Supply</b> moves 2× but can't fight, <b>Farmer</b> grows food while working a settlement's fields. A settlement's food income comes from a built-in base worth 2 farmers, and every working farmer adds another full farmer's share on top (sheltered or garrisoned farmers don't count) — richer land makes every share bigger. There's no farmer cap, but each farmer past 10 is a little less effective than the last: by the 24th a new farmer only grows about as much as they eat, and beyond that extra farmers are a drain. Farmers are only 1/10th as tough, and run into the settlement for shelter when raiders come near.</p>
           <p><b class="text-zinc-200">Settlements</b> cost 5 units to found (build on fertile land!), auto-till the ground around them, and run one production mode: Farm (grow the population), train Supply / Deploy units, or 📦 Stockpile (train nothing and bank the food). In Farm mode a settlement grows a new farmer every 25 seconds (15 food each) while it has at least 50 food stockpiled, up to the break-even crew of 24 — after that it stops training and banks the surplus, just like Stockpile mode. Farm mode never trains soldiers; set a settlement to Supply or Deploy when you want units. Every unit — farmers included — eats from the stockpile, so unit training pauses automatically when the settlement's food income only just covers what its people eat.</p>
-          <p><b class="text-zinc-200">Food:</b> every unit eats. Land comes in five fertility tiers (Barren → Lush). Feed armies by keeping them inside a settlement's solid team-colored <b>territory border</b>, toggling <b>Pillage</b> (forages the whole highlighted area around the army evenly — every tile in it degrades together, moving or standing still, tuned so one fertility level across the area feeds the army for about 5 seconds; Barren tiles yield nothing, so stripped land recovers very slowly and an army must keep moving to fresh land or starve), or running a <b>Supply route</b>: select a supply blob, tap "Supply route", tap the army. Routes draw color-coded: green = fed, amber = falling behind, red = starving. Roughly 1 supply unit feeds 5 fighters at a quarter of the map's distance.</p>
+          <p><b class="text-zinc-200">Food:</b> every unit eats. Land comes in five fertility tiers (Barren → Lush). Feed armies by keeping them inside a settlement's solid team-colored <b>territory border</b>, toggling <b>Pillage</b> (the army makes camp and forages the whole highlighted area around it evenly — every tile in it degrades together, tuned so one fertility level across the area feeds the army for about 5 seconds; a pillaging army stands still, and any move order breaks camp. Barren tiles yield nothing, so stripped land recovers very slowly and an army must move camp to fresh land or starve), or running a <b>Supply route</b>: select a supply blob, tap "Supply route", tap the army. Routes draw color-coded: green = fed, amber = falling behind, red = starving. Roughly 1 supply unit feeds 5 fighters at a quarter of the map's distance.</p>
           <p><b class="text-zinc-200">Hunger and combat:</b> above ¾ fed fights best; below ½ worse; below ¼ famished (weakest), and at zero food units die within about 20 seconds.</p>
-          <p><b class="text-zinc-200">Touch:</b> drag to pan, pinch to zoom, tap to select. With a blob selected, tap a destination to choose Move / Pillage-move / Attack-move right there — or use the panel buttons, then tap the target.</p>
-          <p><b class="text-zinc-200">Desktop:</b> right-click = move (hold Shift for attack-move), left-drag = box select, WASD/edge/middle-drag = pan, wheel = zoom, Esc = cancel.</p>
+          <p><b class="text-zinc-200">Touch:</b> drag to pan, pinch to zoom, tap to select. With a blob selected, tap a destination to Move right there (moving units always engage enemies they meet) — tap an enemy blob or settlement instead to Attack it directly: your army follows a targeted blob while it stays in sight, and besieges a targeted settlement until it falls.</p>
+          <p><b class="text-zinc-200">Desktop:</b> right-click = move (on an enemy: attack it directly), left-drag = box select, WASD/edge/middle-drag = pan, wheel = zoom, Esc = cancel.</p>
         </div>
       </details>
 

@@ -321,17 +321,25 @@ export function createRenderer(canvas, minimap) {
       const r = Math.max(10, S.blobRadius(b) * s);
       const px = wx(bx(b)), py = wy(by(b));
       const isSupply = b.count.supply > 0 && b.count.deploy === 0 && b.count.farm === 0;
+      // faint team-colored fill keeps a readable tap target; the units
+      // inside carry the identity now
       ctx.beginPath();
       ctx.arc(px, py, r, 0, Math.PI * 2);
       ctx.fillStyle = ownerColor(game, b.owner);
-      ctx.globalAlpha = isSupply ? 0.75 : 0.92;
+      ctx.globalAlpha = isSupply ? 0.12 : 0.16;
       ctx.fill();
       ctx.globalAlpha = 1;
-      // fed-state ring
+      // individual unit figures inside the ring (number-only at far zoom)
+      if (r >= 12) drawBlobUnits(game, b, px, py, r);
+      // dashed fed-state ring
       const m = S.fedMeter(b);
       ctx.lineWidth = 2.5;
       ctx.strokeStyle = m >= 0.75 ? '#4ade80' : m >= 0.5 ? '#a3e635' : m >= 0.25 ? '#fbbf24' : '#f87171';
+      ctx.setLineDash([Math.max(3, r * 0.25), Math.max(2, r * 0.18)]);
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
       ctx.stroke();
+      ctx.setLineDash([]);
       // taking-damage flash
       if (game.tick - b.engagedT < 3) {
         const pulse = 0.55 + 0.45 * Math.sin((game.tick + alpha) * 2.2);
@@ -348,29 +356,31 @@ export function createRenderer(canvas, minimap) {
         ctx.lineWidth = 2;
         ctx.stroke();
       }
-      // role marker
+      // role marker (kept clear of the count badge below)
+      const roleMarked = isSupply || (b.count.farm > 0 && b.count.deploy === 0);
       if (isSupply) {
         ctx.fillStyle = '#fff';
-        ctx.font = `${Math.max(9, r * 0.7)}px system-ui`;
+        ctx.font = `${Math.max(9, r * 0.6)}px system-ui`;
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText('⇄', px, py - r * 0.05);
-      } else if (b.count.farm > 0 && b.count.deploy === 0) {
+        ctx.fillText('⇄', px, py - r * 0.5);
+      } else if (roleMarked) {
         ctx.fillStyle = '#bbf7d0';
-        ctx.font = `${Math.max(9, r * 0.7)}px system-ui`;
+        ctx.font = `${Math.max(9, r * 0.6)}px system-ui`;
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText('🌱', px, py);
+        ctx.fillText('🌱', px, py - r * 0.5);
       }
-      // count
-      ctx.fillStyle = '#fff';
-      ctx.font = `bold ${Math.max(10, Math.min(16, r * 0.8))}px system-ui`;
+      // unit count on a dark backing pill so it reads over the figures
+      const fs = roleMarked ? Math.max(9, Math.min(13, r * 0.6)) : Math.max(10, Math.min(16, r * 0.8));
+      const cy2 = roleMarked ? py + r * 0.5 : py;
+      const label = String(S.total(b));
+      ctx.font = `bold ${fs}px system-ui`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      if (!isSupply && !(b.count.farm > 0 && b.count.deploy === 0)) {
-        ctx.fillText(String(S.total(b)), px, py);
-      } else {
-        ctx.font = `bold ${Math.max(9, Math.min(13, r * 0.6))}px system-ui`;
-        ctx.fillText(String(S.total(b)), px, py + r * 0.55);
-      }
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(px - tw / 2 - 3, cy2 - fs * 0.7, tw + 6, fs * 1.4);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(label, px, cy2);
       if (b.pillaging) {
         ctx.font = `${Math.max(10, r * 0.6)}px system-ui`;
         ctx.fillText('🔥', px + r * 0.9, py - r * 0.9);
@@ -436,7 +446,7 @@ export function createRenderer(canvas, minimap) {
       ctx.setLineDash([2, 4]);
       ctx.beginPath();
       for (const b of game.blobs) {
-        if (b.dead || !b.order || b.order.type !== 'attack' || b.chaseId == null) continue;
+        if (b.dead || !b.order || b.order.type !== 'move' || b.chaseId == null) continue;
         const t = blobById.get(b.chaseId);
         if (!t || !blobSeen(b) || !blobSeen(t)) continue;
         if (Math.hypot(t.x - b.x, t.y - b.y) <= S.blobRadius(b) + S.blobRadius(t) + 0.2) continue;
@@ -572,6 +582,35 @@ export function createRenderer(canvas, minimap) {
     }
 
     drawMinimap(game, view);
+  }
+
+  // Individual unit figures inside a blob's dashed ring: a deterministic
+  // golden-angle spiral (index-ordered, jittered per unit from its seed —
+  // no Math.random(), so host/guest frames match). Heads are role-tinted;
+  // bodies use the owner's dark tone. Capped for very large armies — the
+  // count badge stays authoritative.
+  const GOLDEN_ANGLE = 2.399963229728653;
+  function drawBlobUnits(game, b, px, py, rPx) {
+    const n = Math.min(b.units.length, 40);
+    if (!n) return;
+    const ur = Math.max(1.5, Math.min(4, rPx / (2.2 * Math.sqrt(n))));
+    const body = ownerDark(game, b.owner);
+    for (let i = 0; i < n; i++) {
+      const u = b.units[i];
+      const h = Math.floor(u.seed * 4096);
+      const fr = n === 1 ? 0 : Math.sqrt((i + 0.5) / n) * rPx * 0.72;
+      const ang = i * GOLDEN_ANGLE + ((h & 63) / 63 - 0.5) * 0.4;
+      const ux = px + Math.cos(ang) * fr + (((h >> 6) & 3) - 1.5) * ur * 0.2;
+      const uy = py + Math.sin(ang) * fr + (((h >> 8) & 3) - 1.5) * ur * 0.2;
+      ctx.beginPath();
+      ctx.arc(ux, uy + ur * 0.3, ur, 0, Math.PI * 2);
+      ctx.fillStyle = body;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(ux, uy - ur * 0.75, ur * 0.55, 0, Math.PI * 2);
+      ctx.fillStyle = u.role === 'deploy' ? '#f4f4f5' : u.role === 'supply' ? '#7dd3fc' : '#86efac';
+      ctx.fill();
+    }
   }
 
   // Working farmers are real 1-unit blobs standing in the fields — drawn

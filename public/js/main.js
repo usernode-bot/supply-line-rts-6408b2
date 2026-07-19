@@ -16,15 +16,16 @@ const IS_DEMO = params.get('demo') === '1';
 
 let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
-let speed = 1;
+let speed = 1; // displayed speed step 1–4; the sim multiplier is speed × 0.5
 let paused = false;
-let ui = { selected: null, pending: null, splitCount: null, orderTarget: null, fieldCounts: {} };
+let ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {} };
 let renderer = null, input = null;
 let lastFrame = 0, acc = 0, lastSaveTick = 0, lastPanel = 0;
 let resultPosted = false;
 let panelHeld = false;
 let toastTimer = null;
 let lastPanelHTML = '';
+let lastStripHTML = '';
 
 // -- multiplayer state ------------------------------------------------
 let me = 0;        // which owner this client plays (0 solo/host, 1 guest)
@@ -92,6 +93,12 @@ function fmtDur(sec) {
   sec = Math.max(0, sec | 0);
   return `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, '0')}s`;
 }
+// Display name for a stored map-size key ('xsmall' → 'Very small').
+function sizeLabel(key) {
+  if (key === 'xsmall') return 'Very small';
+  const s = String(key || '');
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 function loadSaveData() {
   try {
@@ -99,8 +106,9 @@ function loadSaveData() {
     if (!raw) return null;
     const data = JSON.parse(raw);
     // v1 saves predate per-unit health and are not migratable — discard.
-    // v2 saves load fine (new fields default; farmer HP is clamped).
-    if ((data.v !== 2 && data.v !== 3) || data.result || data.pvp) return null;
+    // v2–v4 saves load fine (new fields default; farmer HP is clamped;
+    // old attack-move orders are migrated by deserialize).
+    if (!(data.v >= 2 && data.v <= 4) || data.result || data.pvp) return null;
     return data;
   } catch { return null; }
 }
@@ -217,7 +225,7 @@ function renderLobbyList(rows) {
   el.innerHTML = rows.map(l => `
     <div class="flex items-center justify-between gap-2 bg-zinc-800/50 rounded-lg px-3 py-2">
       <span class="truncate text-zinc-200">${esc(l.host_username)}</span>
-      <span class="text-xs text-zinc-500">${esc(l.size_key)} · ${lobbyAge(l.created_at)}</span>
+      <span class="text-xs text-zinc-500">${esc(sizeLabel(l.size_key))} · ${lobbyAge(l.created_at)}</span>
       <button data-join="${l.id}" data-host="${esc(l.host_username)}" class="btn-sm px-3 rounded bg-sky-700 hover:bg-sky-600 text-white">Join</button>
     </div>`).join('');
 }
@@ -238,7 +246,7 @@ function renderChallenges(rows) {
   seenChallengeIds = ids;
   el.innerHTML = visible.map(c => `
     <div class="bg-violet-950/60 border border-violet-700 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
-      <span class="text-sm text-violet-100">⚔️ <b>${esc(c.host_username)}</b> challenges you! <span class="text-violet-300">(${esc(c.size_key)} map)</span></span>
+      <span class="text-sm text-violet-100">⚔️ <b>${esc(c.host_username)}</b> challenges you! <span class="text-violet-300">(${esc(sizeLabel(c.size_key))} map)</span></span>
       <span class="flex gap-1 shrink-0">
         <button data-accept="${c.id}" data-host="${esc(c.host_username)}" class="btn-sm px-3 rounded bg-emerald-700 hover:bg-emerald-600 text-white">Accept</button>
         <button data-decline="${c.id}" class="btn-sm px-3 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200">Decline</button>
@@ -548,7 +556,21 @@ function applyGuestCommand(c) {
       game.result = 'p0-win';
       game.resultReason = 'surrender';
       break;
-    case 'move': if (b) S.opMove(game, b, +c.x || 0, +c.y || 0, !!c.attack); break;
+    case 'move': {
+      if (!b) break;
+      // targeted orders point at the guest's ENEMY (owner 0) — validate
+      // against authoritative state; anything invalid degrades to a tile move
+      let target = null;
+      if (c.target && c.target.kind === 'blob') {
+        const t = resolveBlobFor(0, c.target.id);
+        if (t) target = { kind: 'blob', id: t.id };
+      } else if (c.target && c.target.kind === 'settlement') {
+        const t = game.settlements.find(s => s.id === c.target.id && s.owner === 0);
+        if (t) target = { kind: 'settlement', id: t.id };
+      }
+      S.opMove(game, b, +c.x || 0, +c.y || 0, target);
+      break;
+    }
     case 'setRole': if (b) S.opSetRole(game, b, c.role); break;
     case 'split': if (b) S.opSplit(game, b, c.take | 0); break;
     case 'build': if (b) S.opBuild(game, b); break;
@@ -635,9 +657,9 @@ function updateOppLabel() {
 function sendCmd(c) { if (mp) mp.outQueue.push(c); }
 const QUEUED = { ok: true, queued: true };
 
-function doMove(b, x, y, attack) {
-  if (isGuest()) { sendCmd({ op: 'move', blobId: b.id, x, y, attack: !!attack }); return QUEUED; }
-  return S.opMove(game, b, x, y, attack);
+function doMove(b, x, y, target) {
+  if (isGuest()) { sendCmd({ op: 'move', blobId: b.id, x, y, target: target || null }); return QUEUED; }
+  return S.opMove(game, b, x, y, target);
 }
 function doSetRole(b, role) {
   if (isGuest()) { sendCmd({ op: 'setRole', blobId: b.id, role }); return QUEUED; }
@@ -681,14 +703,15 @@ function doGarrisonRole(st, role) {
 function startMatch(g) {
   game = g;
   resultPosted = false;
-  ui = { selected: null, pending: null, splitCount: null, orderTarget: null, fieldCounts: {} };
+  ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {} };
   hideOrderPopup();
   acc = 0; speed = 1; paused = false; lastSaveTick = g.tick;
-  $('btn-speed').textContent = '1×';
+  $('sel-speed').value = '1';
   $('btn-pause').textContent = '⏸';
-  // no pause / fast-forward in multiplayer — the sim is shared
+  // no pause / fast-forward in multiplayer — the sim is shared, and both
+  // clients run it at the 1× default (speed stays forced to 1)
   $('btn-pause').classList.toggle('hidden', !!g.pvp);
-  $('btn-speed').classList.toggle('hidden', !!g.pvp);
+  $('sel-speed').classList.toggle('hidden', !!g.pvp);
   updateOppLabel();
   stopMenuPolling();
 
@@ -817,10 +840,12 @@ $('btn-pause').addEventListener('click', () => {
   paused = !paused;
   $('btn-pause').textContent = paused ? '▶' : '⏸';
 });
-$('btn-speed').addEventListener('click', () => {
-  if (game && game.pvp) return;
-  speed = speed === 1 ? 2 : 1;
-  $('btn-speed').textContent = speed + '×';
+$('sel-speed').addEventListener('change', () => {
+  if (game && game.pvp) { $('sel-speed').value = '1'; return; }
+  speed = Math.max(1, Math.min(4, +$('sel-speed').value || 1));
+  // a focused <select> counts as text entry to the key handler and would
+  // swallow WASD panning — hand focus back to the map
+  $('sel-speed').blur();
 });
 $('btn-backtowork').addEventListener('click', () => {
   if (!game || game.result) return;
@@ -881,8 +906,9 @@ function onTap(world, pointerType, screen) {
   if (b) { ui.selected = { kind: 'blob', id: b.id }; renderPanel(true); return; }
   const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
   if (st && st.owner === me) { ui.selected = { kind: 'settlement', id: st.id }; renderPanel(true); return; }
-  // tap elsewhere with blobs selected → inline order popup at the tap point
-  if (selectedBlobs().length > 0) { showOrderPopup(world, screen); return; }
+  // tap elsewhere with blobs selected → inline order popup at the tap
+  // point; a tapped enemy blob/settlement becomes a direct attack target
+  if (selectedBlobs().length > 0) { showOrderPopup(world, screen, findEnemyTargetAt(world)); return; }
   // nothing selected → inspect what was tapped
   if (eb && S.isVisible(game, eb.x, eb.y)) {
     ui.selected = { kind: 'enemy-blob', id: eb.id };
@@ -917,14 +943,30 @@ function onBox(rect) {
   renderPanel(true);
 }
 
-function onRightClick(world, attackHeld) {
+// Enemy entity under a world point that the current player may target
+// directly: a visible enemy blob, or an enemy settlement that is visible
+// or remembered on the map.
+function findEnemyTargetAt(world) {
+  const hitR = Math.max(1.5, 24 / view.scale);
+  const eb = S.blobAt(game, world.x, world.y, hitR);
+  if (eb && eb.owner !== me && S.isVisible(game, eb.x, eb.y)) return { kind: 'blob', id: eb.id };
+  const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+  const known = game.pvp ? game.knowns[me] : game.known;
+  if (st && st.owner !== me && (S.settVisible(game, st) || known[st.id])) {
+    return { kind: 'settlement', id: st.id };
+  }
+  return null;
+}
+
+function onRightClick(world) {
   if (!game || game.result) return;
   hideOrderPopup();
   const blobs = selectedBlobs();
   if (!blobs.length) return;
+  const target = findEnemyTargetAt(world);
   let err = null;
   for (const b of blobs) {
-    const r = doMove(b, world.x, world.y, attackHeld);
+    const r = doMove(b, world.x, world.y, target);
     if (r.err) err = r.err;
   }
   if (err) toast(err);
@@ -944,15 +986,17 @@ const orderPopup = $('order-popup');
 function hideOrderPopup() {
   orderPopup.classList.add('hidden');
   ui.orderTarget = null;
+  ui.orderTargetEnt = null;
 }
 
-function showOrderPopup(world, screen) {
+function showOrderPopup(world, screen, target) {
   ui.orderTarget = world;
+  ui.orderTargetEnt = target || null;
   const hasDeploy = selectedBlobs().some(b => b.count.deploy > 0);
+  const atkLabel = target && target.kind === 'blob' ? '⚔️ Attack blob' : '⚔️ Attack settlement';
   orderPopup.innerHTML = `
+    ${target && hasDeploy ? `<button data-act="pattack" class="btn px-3 rounded-lg text-left bg-red-900/80 hover:bg-red-800 text-red-100">${atkLabel}</button>` : ''}
     <button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
-    <button data-act="ppillage" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">🔥 Pillage-move</button>
-    ${hasDeploy ? '<button data-act="pattack" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">⚔️ Attack-move</button>' : ''}
     <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`;
   orderPopup.classList.remove('hidden');
   const px = screen ? screen.x : window.innerWidth / 2;
@@ -967,14 +1011,13 @@ orderPopup.addEventListener('click', (e) => {
   if (!btn || !game) return;
   const act = btn.dataset.act;
   const world = ui.orderTarget;
+  const targetEnt = ui.orderTargetEnt;
   hideOrderPopup();
   if (act === 'pclose') { ui.selected = null; renderPanel(true); return; }
   if (!world) return;
   let err = null;
   for (const b of selectedBlobs()) {
-    if (act === 'pmove') doPillage(b, false);
-    else if (act === 'ppillage') doPillage(b, true);
-    const r = doMove(b, world.x, world.y, act === 'pattack');
+    const r = doMove(b, world.x, world.y, act === 'pattack' ? targetEnt : null);
     if (r.err) err = r.err;
   }
   if (err) toast(err);
@@ -986,11 +1029,12 @@ function resolvePending(world) {
   ui.pending = null;
   updateHint();
   const blobs = selectedBlobs();
-  if (pending === 'move' || pending === 'attack') {
+  if (pending === 'move') {
     if (!blobs.length) return;
+    const target = findEnemyTargetAt(world); // tapping an enemy targets it
     let err = null;
     for (const b of blobs) {
-      const r = doMove(b, world.x, world.y, pending === 'attack');
+      const r = doMove(b, world.x, world.y, target);
       if (r.err) err = r.err;
     }
     if (err) toast(err);
@@ -1019,9 +1063,8 @@ function resolvePending(world) {
 function updateHint() {
   const el = $('hint');
   if (!ui.pending) { el.classList.add('hidden'); return; }
-  const text = ui.pending === 'move' ? 'Tap a destination…'
-    : ui.pending === 'attack' ? 'Tap where to attack-move…'
-      : 'Tap the army or settlement to supply…';
+  const text = ui.pending === 'move' ? 'Tap a destination — or an enemy to attack…'
+    : 'Tap the army or settlement to supply…';
   $('hint-text').textContent = text;
   el.classList.remove('hidden');
 }
@@ -1069,7 +1112,6 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'move': ui.pending = 'move'; updateHint(); break;
-    case 'attack': ui.pending = 'attack'; updateHint(); break;
     case 'route': ui.pending = 'route'; updateHint(); break;
     case 'split': {
       const b = blobs[0];
@@ -1121,7 +1163,7 @@ panel.addEventListener('click', (e) => {
         let c = 0;
         for (const b of [...game.blobs]) {
           if (!b.dead && b.owner === me && b.working === st.id) {
-            if (doMove(b, st.x + 1, st.y + 1, false).ok) c++;
+            if (doMove(b, st.x + 1, st.y + 1).ok) c++;
           }
         }
         toast(c ? `🏠 Recalling ${c} farmer${c === 1 ? '' : 's'}` : 'No farmers working the fields');
@@ -1157,7 +1199,51 @@ function setPanelHTML(html) {
   panel.innerHTML = html;
 }
 
+// Per-unit health strip along the bottom of the screen for a single
+// selected friendly blob: one chip per unit (role icon + hp bar) in
+// damage order — the leftmost unit is the next to take damage.
+const STRIP_MAX = 100;
+function updateUnitStrip() {
+  const strip = $('unit-strip');
+  let b = null;
+  if (game && !game.result && ui.selected && ui.selected.kind === 'blob') b = findBlob(ui.selected.id);
+  if (!b || b.dead || !b.units || !b.units.length) {
+    strip.classList.add('hidden');
+    lastStripHTML = '';
+    return;
+  }
+  strip.classList.remove('hidden');
+  // phones: the panel is a bottom sheet, so the strip sits directly above it
+  strip.style.bottom = window.matchMedia('(min-width: 640px)').matches
+    ? '' : (panel.classList.contains('hidden') ? 0 : panel.offsetHeight) + 'px';
+  const chips = [];
+  const n = Math.min(b.units.length, STRIP_MAX);
+  for (let i = 0; i < n; i++) {
+    const u = b.units[i];
+    const pct = Math.max(0, Math.min(1, u.hp / S.unitMaxHP(u.role)));
+    const col = pct >= 0.75 ? 'bg-emerald-500' : pct >= 0.4 ? 'bg-amber-500' : 'bg-red-500';
+    const icon = u.role === 'deploy' ? '⚔️' : u.role === 'supply' ? '🚚' : '🌱';
+    chips.push(`<div class="shrink-0 w-7 flex flex-col items-center gap-0.5 py-0.5">
+      <span class="text-sm leading-none">${icon}</span>
+      <div class="w-6 h-1 rounded bg-zinc-800 overflow-hidden"><div class="h-full ${col}" style="width:${Math.round(pct * 100)}%"></div></div>
+    </div>`);
+  }
+  if (b.units.length > STRIP_MAX) {
+    chips.push(`<div class="shrink-0 flex items-center text-xs text-zinc-400 px-1">+${b.units.length - STRIP_MAX} more</div>`);
+  }
+  const html = chips.join('');
+  if (html !== lastStripHTML) {
+    lastStripHTML = html;
+    strip.innerHTML = html;
+  }
+}
+
 function renderPanel(force) {
+  renderPanelInner(force);
+  updateUnitStrip(); // after the panel, so the strip can sit on its top edge
+}
+
+function renderPanelInner(force) {
   if (!game) { panel.classList.add('hidden'); lastPanelHTML = ''; return; }
   if (!force && panelHeld) return;
 
@@ -1193,7 +1279,7 @@ function renderPanel(force) {
           <span class="text-xs ${est.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-400'}">HP ${Math.ceil(est.hp)}/${S.C.SETT_HP}</span>
         </div>
         <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-red-500" style="width:${pct}%"></div></div>
-        <div class="text-xs text-zinc-400">${est.hp >= S.C.SETT_HP ? 'Walls intact.' : est.hp > S.C.SETT_HP / 2 ? 'Damaged.' : 'Heavily damaged!'} Attack-move deploy units onto it to lay siege.</div>`);
+        <div class="text-xs text-zinc-400">${est.hp >= S.C.SETT_HP ? 'Walls intact.' : est.hp > S.C.SETT_HP / 2 ? 'Damaged.' : 'Heavily damaged!'} Tap it with deploy units selected to lay siege.</div>`);
     } else {
       setPanelHTML(`
         <div class="font-semibold text-red-300 mb-1">🏠 Enemy settlement <span class="text-zinc-500 font-normal">(last seen)</span></div>
@@ -1350,10 +1436,9 @@ function renderPanel(force) {
     </div>
     <div class="grid grid-cols-2 gap-1 mb-2">
       <button data-act="move" class="btn rounded bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
-      <button data-act="attack" class="btn rounded bg-zinc-800 hover:bg-zinc-700" ${cnt.deploy === 0 ? 'disabled' : ''}>⚔️ Attack-move</button>
-      <button data-act="build" class="btn rounded bg-zinc-800 hover:bg-zinc-700 ${multi || tot < S.C.SETT_COST ? 'opacity-40' : ''}" ${multi || tot < S.C.SETT_COST ? 'disabled' : ''}>🏠 Build (${S.C.SETT_COST})</button>
       <button data-act="pillage" class="btn rounded ${blobs.some(b => b.pillaging) ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 Pillage</button>
-      <button data-act="route" class="btn rounded col-span-2 ${pureSupply && !multi ? 'bg-sky-800 hover:bg-sky-700' : 'bg-zinc-800 opacity-40'}" ${pureSupply && !multi ? '' : 'disabled'}>🚚 Supply route…</button>
+      <button data-act="build" class="btn rounded bg-zinc-800 hover:bg-zinc-700 ${multi || tot < S.C.SETT_COST ? 'opacity-40' : ''}" ${multi || tot < S.C.SETT_COST ? 'disabled' : ''}>🏠 Build (${S.C.SETT_COST})</button>
+      <button data-act="route" class="btn rounded ${pureSupply && !multi ? 'bg-sky-800 hover:bg-sky-700' : 'bg-zinc-800 opacity-40'}" ${pureSupply && !multi ? '' : 'disabled'}>🚚 Supply route…</button>
     </div>
     ${!multi && tot >= 2 ? `
     <div class="flex items-center gap-2">
@@ -1395,7 +1480,10 @@ function frame(ts) {
   if (!game) return;
 
   if (!paused && !game.result) {
-    acc += dt * speed;
+    // displayed speed steps 1–4 map to 0.5×–2× of the sim's native tick
+    // rate: 1× is the half-speed default, 2× the old normal. PvP always
+    // runs at step 1, so both clients share the same 0.5 multiplier.
+    acc += dt * speed * 0.5;
     let iter = 0;
     while (acc >= 100 && iter++ < 40) {
       S.step(game);

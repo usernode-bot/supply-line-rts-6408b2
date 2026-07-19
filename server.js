@@ -49,7 +49,7 @@ app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
 const RESULTS = new Set(['win', 'loss', 'surrender']);
 const DIFFICULTIES = new Set(['easy', 'normal', 'hard', 'pvp']);
-const MAP_SIZES = new Set(['small', 'medium', 'large']);
+const MAP_SIZES = new Set(['xsmall', 'small', 'medium', 'large']);
 const END_REASONS = new Set(['elimination', 'surrender', 'abandoned']);
 
 // Staging demo rows use negative user ids / ids in the 9001xx range so

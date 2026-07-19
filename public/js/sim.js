@@ -31,6 +31,7 @@ export const C = {
   VISION_BLOB: 6,
   VISION_SETT: 8,
   AGGRO: 4,
+  CHASE_LEASH: 8,          // max tiles a tile-move blob diverts from its path to chase
   PILLAGE_RADIUS: 2.5,     // pillage harvest reach in tiles (half a territory ring)
   PILLAGE_YIELD: 0.8,      // food per 1.0 fertility destroyed by pillaging — one full
                            // level off the whole ~21-tile disc (21 × 0.25 × 0.8 ≈ 4.2
@@ -373,11 +374,19 @@ function destroySettlement(game, s, why) {
 
 // ---------------------------------------------------------------- ops (player + AI share these)
 
-export function opMove(game, b, x, y, attack) {
+// One unified move command with attack-move semantics. Optional `target`
+// ({kind:'blob'|'settlement', id}) makes it a targeted order: the blob
+// heads for that entity (following blobs while visible, besieging
+// settlements until destroyed) and never diverts en route. Issuing any
+// move exits the pillaging stance.
+export function opMove(game, b, x, y, target) {
   if (b.dead) return { err: 'Gone' };
   leaveRoute(game, b);
   b.working = null;
-  b.order = { type: attack ? 'attack' : 'move', x, y };
+  b.pillaging = false;
+  const o = { type: 'move', x, y };
+  if (target && target.kind && target.id != null) { o.tkind = target.kind; o.tid = target.id; }
+  b.order = o;
   b.chaseId = null;
   const p = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), blockedTiles(game, b.owner));
   if (!p) { b.order = null; return { err: 'No path there' }; }
@@ -513,8 +522,17 @@ export function opBuild(game, b) {
   return { ok: true, settlement: s };
 }
 
+// Pillaging is a stationary stance: toggling it on stops the blob where
+// it stands (dropping any march, supply route, or field work) and it
+// camps and forages until a move order — which clears the stance — or a
+// manual toggle-off.
 export function opPillage(game, b, on) {
   if (on && !b.pillaging) b.lastYieldT = game.tick;
+  if (on) {
+    leaveRoute(game, b);
+    b.order = null; b.path = null; b.pathGoal = null; b.chaseId = null;
+    b.working = null;
+  }
   b.pillaging = on;
   return { ok: true };
 }
@@ -669,7 +687,7 @@ export function opBackToWork(game, owner) {
     if (!b.dead) fielded += peelFarmersToFields(game, b, s, n);
   }
   for (const { b, s } of plan.walk) {
-    if (!b.dead && opMove(game, b, s.x + 1, s.y + 1, false).ok) walking += b.count.farm;
+    if (!b.dead && opMove(game, b, s.x + 1, s.y + 1).ok) walking += b.count.farm;
   }
   if (fielded + walking === 0) {
     return { fielded, walking, reason: plan.sawIdle && plan.sawDanger ? 'danger' : 'none' };
@@ -745,11 +763,65 @@ function pushFx(game, fx) {
 
 // -- movement / orders
 
-function ensurePath(game, b, x, y) {
-  const p = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), blockedTiles(game, b.owner));
+function ensurePath(game, b, x, y, avoid) {
+  const blocked = blockedTiles(game, b.owner);
+  if (avoid && avoid.size) {
+    // soft avoidance: try to route around the avoid set first, but never
+    // let it strand the order — fall through to a plain plan on failure
+    const merged = new Set(blocked);
+    for (const i of avoid) merged.add(i);
+    merged.delete(tileIdx(game, b.x, b.y));
+    const pa = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), merged);
+    if (pa) { b.path = pa; b.pathGoal = { x, y }; return true; }
+  }
+  const p = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), blocked);
   b.path = p;
   b.pathGoal = p ? { x, y } : null;
   return !!p;
+}
+
+// Tiles a targeted mover plans around: the footprint (+1 tile) of every
+// enemy blob its owner can currently see, except the target itself and
+// enemy field hands. Planning-only — moveBlob never hard-blocks on these.
+function avoidTiles(game, b, targetId) {
+  const set = new Set();
+  const fog = pathFog(game, b.owner);
+  const { w, h } = game.map;
+  for (const e of game.blobs) {
+    if (e.dead || e.owner === b.owner || e.id === targetId || e.working != null) continue;
+    if (fog && fog[tileIdx(game, e.x, e.y)] !== 2) continue; // unseen — nothing to dodge
+    const reach = blobRadius(e) + 1;
+    const span = Math.ceil(reach);
+    const cx = Math.floor(e.x), cy = Math.floor(e.y);
+    for (let dy = -span; dy <= span; dy++) {
+      for (let dx = -span; dx <= span; dx++) {
+        const tx = cx + dx, ty = cy + dy;
+        if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+        if (dist(tx + 0.5, ty + 0.5, e.x, e.y) <= reach) set.add(ty * w + tx);
+      }
+    }
+  }
+  return set;
+}
+
+// Resolve a targeted order's blob through the merge log, like the UI's
+// selection does, so a target that merged away keeps being followed.
+function resolveTargetBlob(game, id) {
+  let cur = id, hops = 0;
+  while (hops++ < 10) {
+    const t = game.blobs.find(x => x.id === cur && !x.dead);
+    if (t) return t;
+    if (game.mergeLog[cur] != null) cur = game.mergeLog[cur];
+    else return null;
+  }
+  return null;
+}
+
+// Whether `owner` can currently see world position (x, y). Owners with
+// no fog array (the solo AI) are omniscient.
+function ownerSees(game, owner, x, y) {
+  const fog = pathFog(game, owner);
+  return !fog || fog[tileIdx(game, x, y)] === 2;
 }
 
 // Player paths are planned optimistically through unexplored fog; once an
@@ -806,16 +878,20 @@ function moveBlob(game, b) {
 function tickOrder(game, b) {
   if (!b.order) return;
   const o = b.order;
-  if (o.type === 'move' || o.type === 'attack') {
-    // attack-movers chase enemies inside aggro
-    if (o.type === 'attack' && b.count.deploy > 0) {
-      let tgt = null, bd = C.AGGRO;
-      for (const e of game.blobs) {
-        if (e.dead || e.owner === b.owner) continue;
-        const d = dist(b.x, b.y, e.x, e.y);
-        if (d < bd) { bd = d; tgt = e; }
-      }
-      if (tgt) {
+  if (o.type !== 'move' && o.type !== 'attack') return;
+  if (o.tkind) { tickTargetedMove(game, b, o); return; }
+  // tile move: every move attack-moves — fighters chase enemies inside
+  // aggro, but only up to CHASE_LEASH tiles from where they left the path
+  if (b.count.deploy > 0) {
+    let tgt = null, bd = C.AGGRO;
+    for (const e of game.blobs) {
+      if (e.dead || e.owner === b.owner) continue;
+      const d = dist(b.x, b.y, e.x, e.y);
+      if (d < bd) { bd = d; tgt = e; }
+    }
+    if (tgt) {
+      if (o.lx == null) { o.lx = b.x; o.ly = b.y; } // divert anchor
+      if (dist(b.x, b.y, o.lx, o.ly) <= C.CHASE_LEASH) {
         b.chaseId = tgt.id;
         const inRange = dist(b.x, b.y, tgt.x, tgt.y) <= blobRadius(b) + blobRadius(tgt) + 0.15;
         if (!inRange) {
@@ -824,35 +900,94 @@ function tickOrder(game, b) {
         }
         return;
       }
+      // leash spent: give up the chase and march on (the anchor stays so
+      // this enemy can't re-divert the blob until it leaves aggro)
       if (b.chaseId) { b.chaseId = null; ensurePath(game, b, o.x, o.y); }
-      // engaged with a settlement? stand and fight
-      if (game.tick - b.engagedT < 5) return;
+    } else if (b.chaseId || o.lx != null) {
+      b.chaseId = null;
+      delete o.lx; delete o.ly;
+      ensurePath(game, b, o.x, o.y);
     }
-    if (!b.path && b.pathGoal == null) ensurePath(game, b, o.x, o.y); // resumed save
-    if (pathBlocked(game, b) && !ensurePath(game, b, o.x, o.y)) {
-      // walled in by explored mountains — the optimistic plan was wrong
+    // engaged with a settlement? stand and fight
+    if (game.tick - b.engagedT < 5) return;
+  }
+  if (!b.path && b.pathGoal == null) ensurePath(game, b, o.x, o.y); // resumed save
+  if (pathBlocked(game, b) && !ensurePath(game, b, o.x, o.y)) {
+    // walled in by explored mountains — the optimistic plan was wrong
+    b.order = null; b.pathGoal = null;
+    game.events.push({ owner: b.owner, msg: '⛰️ No way through — order cancelled', x: b.x, y: b.y });
+    return;
+  }
+  const arrived = moveBlob(game, b);
+  if (arrived) {
+    b.order = null;
+    b.pathGoal = null;
+    b.noMerge = false; // completed a deliberate move — mergeable again
+    // working farmers walking to a new field cell stay in the fields
+    if (b.working == null) {
+      const s = game.settlements.find(s2 => s2.owner === b.owner && dist(s2.x + 1, s2.y + 1, b.x, b.y) < 1.9);
+      if (s) { // garrison
+        s.garrison.deploy += b.count.deploy;
+        s.garrison.supply += b.count.supply;
+        s.garrison.farm += b.count.farm;
+        s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + b.food);
+        b.dead = true;
+      }
+    }
+  }
+}
+
+// Targeted move: head for a specific enemy blob or settlement. Never
+// diverts to other enemies — instead it plans around the ones it can see.
+function tickTargetedMove(game, b, o) {
+  if (o.tkind === 'blob') {
+    const t = resolveTargetBlob(game, o.tid);
+    if (!t) {
+      // target died — degrade to a plain tile move toward its last-known spot
+      delete o.tkind; delete o.tid;
+      ensurePath(game, b, o.x, o.y);
+      return;
+    }
+    o.tid = t.id; // follow merges
+    const seen = ownerSees(game, b.owner, t.x, t.y);
+    b.chaseId = seen ? t.id : null; // drives the renderer's targeting line
+    if (seen) { o.x = t.x; o.y = t.y; } // last-known position while visible
+    if (seen && dist(b.x, b.y, t.x, t.y) <= blobRadius(b) + blobRadius(t) + 0.15) {
+      b.path = null; b.pathGoal = null; // in contact — combat takes it from here
+      return;
+    }
+    const stale = !b.pathGoal || dist(b.pathGoal.x, b.pathGoal.y, o.x, o.y) > 0.75;
+    if (!b.path || !b.path.length || pathBlocked(game, b) || (stale && game.tick % 10 === 0)) {
+      if (!ensurePath(game, b, o.x, o.y, avoidTiles(game, b, t.id))) {
+        b.order = null; b.pathGoal = null;
+        game.events.push({ owner: b.owner, msg: '⛰️ No way through — order cancelled', x: b.x, y: b.y });
+        return;
+      }
+    }
+    const arrived = moveBlob(game, b);
+    if (arrived && !seen) {
+      // reached the last place it was seen and it isn't there — give up
+      b.order = null; b.pathGoal = null; b.noMerge = false;
+    }
+    return;
+  }
+  // settlement target: besiege until it falls
+  const s = game.settlements.find(x => x.id === o.tid);
+  if (!s) { b.order = null; b.pathGoal = null; b.noMerge = false; return; }
+  const c = settCenter(s);
+  o.x = c.x; o.y = c.y;
+  if (dist(b.x, b.y, c.x, c.y) <= blobRadius(b) + 1.9) {
+    b.path = null; b.pathGoal = null; // in siege range — stand and fight
+    return;
+  }
+  if (!b.path || !b.path.length || pathBlocked(game, b) || game.tick % 20 === 0) {
+    if (!ensurePath(game, b, o.x, o.y, avoidTiles(game, b, null))) {
       b.order = null; b.pathGoal = null;
       game.events.push({ owner: b.owner, msg: '⛰️ No way through — order cancelled', x: b.x, y: b.y });
       return;
     }
-    const arrived = moveBlob(game, b);
-    if (arrived) {
-      b.order = null;
-      b.pathGoal = null;
-      b.noMerge = false; // completed a deliberate move — mergeable again
-      // working farmers walking to a new field cell stay in the fields
-      if (o.type === 'move' && b.working == null) {
-        const s = game.settlements.find(s2 => s2.owner === b.owner && dist(s2.x + 1, s2.y + 1, b.x, b.y) < 1.9);
-        if (s) { // garrison
-          s.garrison.deploy += b.count.deploy;
-          s.garrison.supply += b.count.supply;
-          s.garrison.farm += b.count.farm;
-          s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + b.food);
-          b.dead = true;
-        }
-      }
-    }
   }
+  moveBlob(game, b);
 }
 
 // -- supply carriers
@@ -1103,7 +1238,7 @@ function shelterFarmers(game, s) {
   let any = false;
   for (const b of game.blobs) {
     if (b.dead || b.working !== s.id) continue;
-    if (opMove(game, b, s.x + 1, s.y + 1, false).ok) any = true;
+    if (opMove(game, b, s.x + 1, s.y + 1).ok) any = true;
     else b.working = null; // no path home — at least stop working
   }
   if (any && game.tick - game.farmAlarmT > 100) {
@@ -1737,6 +1872,10 @@ export function deserialize(data, prev) {
     game.settlements.push(s);
   }
   for (const bd of data.blobs) {
+    // pre-rework saves distinguished move vs attack-move; both map onto
+    // the unified move order (same x/y fields)
+    const order = bd.order && bd.order.type === 'attack'
+      ? { ...bd.order, type: 'move' } : bd.order;
     const units = (bd.units && bd.units.length
       // clamp HP to the role's max: v2 saves stored farmers at up to 100 HP
       ? bd.units.map(u => ({ role: u.role, hp: Math.min(u.hp, unitMaxHP(u.role)), seed: u.seed }))
@@ -1746,7 +1885,7 @@ export function deserialize(data, prev) {
       id: bd.id, owner: bd.owner, x: bd.x, y: bd.y,
       prevX: bd.x, prevY: bd.y,
       units, count: { deploy: 0, supply: 0, farm: 0 },
-      food: bd.food, order: bd.order,
+      food: bd.food, order,
       path: null, pathGoal: null,
       pillaging: bd.pillaging, working: bd.working != null ? bd.working : null,
       engagedT: -999, chaseId: null, dead: false, mergedInto: null,
