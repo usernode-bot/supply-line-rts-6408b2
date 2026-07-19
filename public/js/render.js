@@ -139,8 +139,10 @@ export function createRenderer(canvas, minimap) {
     if (sid) {
       const WOB_LEN = 14, WOB_AMP = 1.2;        // waviness wavelength / amplitude (px)
       const hash = (sid * 2654435761) >>> 0;
-      const theta = ((hash >>> 3) & 7) * (Math.PI / 8); // 8 quantized row angles
-      const cos = Math.cos(theta), sin = Math.sin(theta);
+      // rows are strictly horizontal or vertical (~50/50 per plot) — exact
+      // 0/1 axis vectors, no diagonals
+      const vert = (hash >>> 3) & 1;
+      const cos = vert ? 1 : 0, sin = vert ? 0 : 1;
       const period = 5 + (hash & 3);            // 5–8 px between furrows
       const lw = 2 + ((hash >>> 2) & 1);        // 2 or 3 px furrow width
       const phase = (hash >>> 6) % period;
