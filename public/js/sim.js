@@ -17,6 +17,9 @@ export const C = {
   SETT_HP: 100,
   SETT_COST: 5,
   SETT_MIN_DIST: 8,
+  SETT_BUILD_TICKS: 150,   // construction time in sim ticks: the main loop runs the
+                           // sim at speed × 0.5 of the native 10 ticks/s, so 150
+                           // ticks ≈ 30 real seconds at the 1× default (#95)
   STOCK_CAP: 500,
   TRAIN_TICKS: 250,        // baseline 25 s per unit (surplus income trains faster — see investProduction)
   TRAIN_COST: 15,
@@ -386,11 +389,17 @@ function tillFields(game, s) {
   }
 }
 
-function foundSettlement(game, owner, x, y) {
+function foundSettlement(game, owner, x, y, opts) {
+  const construction = !!(opts && opts.construction);
   const s = {
     id: game.nextId++, owner,
     x: Math.floor(x), y: Math.floor(y),
-    hp: C.SETT_HP, mode: 'farm', stockpile: 40,
+    // construction sites (#95) start at 0 HP and tick up to SETT_HP over
+    // SETT_BUILD_TICKS; they're inert (no income/feeding/training) and
+    // attackable the whole time. Match-start settlements skip all that.
+    hp: construction ? 0 : C.SETT_HP,
+    building: construction,
+    mode: 'farm', stockpile: 40,
     garrison: { deploy: 0, supply: 0, farm: 0 },
     trainAcc: 0, garrLoss: 0, lastHitT: -999,
     tilled: [],
@@ -400,7 +409,8 @@ function foundSettlement(game, owner, x, y) {
     partsWin: [],              // last 10 ticks of parts — the panel's live 1 s window (transient, #92)
   };
   claimFootprint(game, s);
-  tillFields(game, s);
+  // farmland appears only when construction completes (tickSettlement)
+  if (!construction) tillFields(game, s);
   game.settlements.push(s);
   // units can't share a square with an enemy settlement — nudge them off
   const foot = new Set(settTiles(game.map, s));
@@ -460,9 +470,10 @@ export function opMove(game, b, x, y, target) {
 }
 
 // Field blobs may only become farmers at a friendly settlement.
+// Construction sites don't count as home (#95): no healing, no farming.
 export function isAtHome(game, b) {
   return game.settlements.some(s =>
-    s.owner === b.owner && dist(s.x + 1, s.y + 1, b.x, b.y) <= C.TERRITORY);
+    s.owner === b.owner && !s.building && dist(s.x + 1, s.y + 1, b.x, b.y) <= C.TERRITORY);
 }
 
 export function opSetRole(game, b, role) {
@@ -477,7 +488,7 @@ export function opSetRole(game, b, role) {
     if (b.working != null) return { err: 'Already working the fields' };
     let s = null, bd = Infinity;
     for (const st of game.settlements) {
-      if (st.owner !== b.owner) continue;
+      if (st.owner !== b.owner || st.building) continue;
       const d = dist(st.x + 1, st.y + 1, b.x, b.y);
       if (d <= C.TERRITORY && d < bd) { bd = d; s = st; }
     }
@@ -561,9 +572,11 @@ export function footprintFits(game, ax, ay) {
   return true;
 }
 
-export function canBuildAt(game, b) {
-  const tx = Math.floor(b.x), ty = Math.floor(b.y);
-  // try the four 2×2 placements that include the builder's tile
+// Snapped anchor for a settlement covering tile (tx, ty): try the four
+// 2×2 placements that include the tile, then check spacing. Shared by
+// build-in-place, the travel-to-site order (#94) and the UI's placement
+// previews, so preview and dispatch can never disagree on snapping.
+export function buildAnchorAt(game, tx, ty) {
   let anchor = null;
   for (const [ax, ay] of [[tx, ty], [tx - 1, ty], [tx, ty - 1], [tx - 1, ty - 1]]) {
     if (footprintFits(game, ax, ay)) { anchor = { x: ax, y: ay }; break; }
@@ -577,16 +590,45 @@ export function canBuildAt(game, b) {
   return { ok: true, x: anchor.x, y: anchor.y };
 }
 
+export function canBuildAt(game, b) {
+  return buildAnchorAt(game, Math.floor(b.x), Math.floor(b.y));
+}
+
+// Consume 5 units from b and start a construction site at the anchor.
+function startConstruction(game, b, ax, ay) {
+  b.units.splice(0, C.SETT_COST); // lowest-seed units settle down
+  recount(b);
+  b.food = Math.min(b.food, foodCap(b));
+  const s = foundSettlement(game, b.owner, ax, ay, { construction: true });
+  if (total(b) === 0) b.dead = true;
+  return s;
+}
+
 export function opBuild(game, b) {
   if (total(b) < C.SETT_COST) return { err: `Needs ${C.SETT_COST} units` };
   const spot = canBuildAt(game, b);
   if (spot.err) return spot;
-  b.units.splice(0, C.SETT_COST); // lowest-seed units settle down
-  recount(b);
-  b.food = Math.min(b.food, foodCap(b));
-  const s = foundSettlement(game, b.owner, spot.x, spot.y);
-  if (total(b) === 0) b.dead = true;
+  const s = startConstruction(game, b, spot.x, spot.y);
   return { ok: true, settlement: s };
+}
+
+// Travel-to-site build (#94): pick the spot anywhere on the map; the
+// blob walks there like a plain move and, on arrival, founds the
+// settlement (re-validating the site — see tickMove's arrived branch).
+export function opBuildAt(game, b, x, y) {
+  if (b.dead) return { err: 'Gone' };
+  if (total(b) < C.SETT_COST) return { err: `Needs ${C.SETT_COST} units` };
+  const spot = buildAnchorAt(game, Math.floor(x), Math.floor(y));
+  if (spot.err) return spot;
+  leaveRoute(game, b);
+  b.working = null;
+  const cx = spot.x + 1, cy = spot.y + 1;
+  b.order = { type: 'move', x: cx, y: cy, build: { x: spot.x, y: spot.y } };
+  b.chaseId = null;
+  const p = findPath(game.map, b.x, b.y, cx, cy, pathFog(game, b.owner), blockedTiles(game, b.owner));
+  if (!p) { b.order = null; return { err: 'No path there' }; }
+  b.path = p; b.pathGoal = { x: cx, y: cy };
+  return { ok: true, site: { x: spot.x, y: spot.y } };
 }
 
 // Pillaging is a persistent stance, fully independent of movement
@@ -610,12 +652,14 @@ export function opRoute(game, b, target) {
 }
 
 export function opSetMode(game, s, mode) {
+  if (s.building) return { err: 'Still under construction' };
   if (!['farm', 'supply', 'deploy', 'off'].includes(mode)) return { err: 'Bad mode' };
   s.mode = mode;
   return { ok: true };
 }
 
 export function opFieldGarrison(game, s) {
+  if (s.building) return { err: 'Still under construction' };
   const g = garrisonTotal(s);
   if (g === 0) return { err: 'No garrison' };
   const spot = nearestPassable(game.map, s.x + 2, s.y + 1, 4, null, new Set(settTiles(game.map, s)))
@@ -629,6 +673,7 @@ export function opFieldGarrison(game, s) {
 }
 
 export function opFieldRole(game, s, role, n) {
+  if (s.building) return { err: 'Still under construction' };
   const avail = s.garrison[role];
   n = Math.min(n == null ? avail : n, avail);
   if (n <= 0) return { err: 'None to field' };
@@ -658,6 +703,7 @@ export function opFieldRole(game, s, role, n) {
 }
 
 export function opGarrisonRole(game, s, role) {
+  if (s.building) return { err: 'Still under construction' };
   const g = garrisonTotal(s);
   if (g === 0) return { err: 'No garrison' };
   s.garrison = { deploy: 0, supply: 0, farm: 0 };
@@ -671,7 +717,7 @@ export function opGarrisonRole(game, s, role) {
 // op (opBackToWork) so the count always matches what a click does.
 
 function backToWorkPlan(game, owner) {
-  const setts = game.settlements.filter(s => s.owner === owner);
+  const setts = game.settlements.filter(s => s.owner === owner && !s.building);
   // farmers only return to *safe* settlements; unsafe ones take none
   // (no field-slot cap — a farm takes any number of returning hands)
   const safe = new Set();
@@ -975,12 +1021,30 @@ function tickOrder(game, b) {
   }
   const arrived = moveBlob(game, b);
   if (arrived) {
+    const build = o.build;
     b.order = null;
     b.pathGoal = null;
     b.noMerge = false; // completed a deliberate move — mergeable again
+    // founding party arrived (#94): re-validate the site (terrain can
+    // change during the march), then consume 5 units into a construction
+    // site. Any remainder stays put — never garrisoned into the new site.
+    if (build) {
+      if (total(b) < C.SETT_COST) {
+        game.events.push({ owner: b.owner, msg: '⚠️ Not enough units left to found a settlement', x: b.x, y: b.y });
+      } else {
+        const spot = buildAnchorAt(game, build.x, build.y);
+        if (spot.err) {
+          game.events.push({ owner: b.owner, msg: '🔨 Can\'t build there anymore — order cancelled', x: b.x, y: b.y });
+        } else {
+          startConstruction(game, b, spot.x, spot.y);
+          game.events.push({ owner: b.owner, msg: '🔨 Construction started', x: spot.x + 1, y: spot.y + 1 });
+        }
+      }
+      return;
+    }
     // working farmers walking to a new field cell stay in the fields
     if (b.working == null) {
-      const s = game.settlements.find(s2 => s2.owner === b.owner && dist(s2.x + 1, s2.y + 1, b.x, b.y) < 1.9);
+      const s = game.settlements.find(s2 => s2.owner === b.owner && !s2.building && dist(s2.x + 1, s2.y + 1, b.x, b.y) < 1.9);
       if (s) { // garrison
         s.garrison.deploy += b.count.deploy;
         s.garrison.supply += b.count.supply;
@@ -1690,6 +1754,24 @@ function wheatFxSource(game, s) {
 
 function tickSettlement(game, s) {
   if (!game.settlements.includes(s)) return;
+  // construction (#95): health IS build progress — it ticks up toward
+  // SETT_HP while siege damage (tickCombat) pulls it down. Until it
+  // completes the settlement is inert: no income, upkeep, feeding or
+  // training (all below the early return), and no farmland yet.
+  if (s.building) {
+    s.hp = Math.min(C.SETT_HP, s.hp + C.SETT_HP / C.SETT_BUILD_TICKS);
+    if (s.hp >= C.SETT_HP) {
+      s.building = false;
+      tillFields(game, s);
+      game.events.push({ owner: s.owner, msg: '🏠 Settlement completed', x: s.x + 1, y: s.y + 1 });
+    }
+    // keep the panel's rolling flow window well-formed while inert
+    if (!s.partsWin) s.partsWin = [];
+    s.partsWin.push(s.parts);
+    if (s.partsWin.length > 10) s.partsWin.shift();
+    s.parts = newFlowParts();
+    return;
+  }
   // farmland income accrues in every mode: the base trickle plus one
   // share per plot actually being worked — training modes pick what the
   // surplus becomes
@@ -1964,6 +2046,7 @@ export function serialize(game) {
     })),
     settlements: game.settlements.map(s => ({
       id: s.id, owner: s.owner, x: s.x, y: s.y, hp: s.hp,
+      building: !!s.building,
       mode: s.mode, stockpile: s.stockpile, garrison: s.garrison,
       trainAcc: s.trainAcc, flow: s.flow,
     })),
@@ -2040,6 +2123,7 @@ export function deserialize(data, prev) {
   for (const sd of data.settlements) {
     const s = {
       id: sd.id, owner: sd.owner, x: sd.x, y: sd.y, hp: sd.hp,
+      building: !!sd.building, // older saves lack the flag → completed
       mode: sd.mode, stockpile: sd.stockpile,
       garrison: sd.garrison,
       // older saves stored tick-based progress; convert to invested food
@@ -2069,7 +2153,7 @@ export function deserialize(data, prev) {
       }
     }
     claimFootprint(game, s);
-    tillFields(game, s);
+    if (!s.building) tillFields(game, s); // sites till on completion (#95)
     game.settlements.push(s);
   }
   for (const bd of data.blobs) {

@@ -248,5 +248,12 @@ export function createInput({ canvas, minimap, view, handlers }) {
     }
   }
 
-  return { update, worldFromScreen, setMapSize, clampView, get attackHeld() { return isAttackHeld(); } };
+  return {
+    update, worldFromScreen, setMapSize, clampView,
+    get attackHeld() { return isAttackHeld(); },
+    // last known mouse position in world coords (null before any mouse
+    // move — i.e. on touch-only devices); drives the build-placement
+    // hover preview (#94)
+    get mouseWorld() { return mousePos ? worldFromScreen(mousePos.x, mousePos.y) : null; },
+  };
 }

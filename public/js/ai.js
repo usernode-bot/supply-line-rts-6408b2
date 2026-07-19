@@ -56,6 +56,7 @@ function develop(game, S, setts, mine) {
   for (const s of setts) { supplyCount += s.garrison.supply; deployCount += s.garrison.deploy; }
 
   for (const s of setts) {
+    if (s.building) continue; // construction sites can't train or field (#95)
     if (s.stockpile < 50) S.opSetMode(game, s, 'farm');
     else if (s.stockpile > 150 && s.mode === 'farm') {
       S.opSetMode(game, s, supplyCount < Math.max(3, deployCount / 4) ? 'supply' : 'deploy');
@@ -69,8 +70,11 @@ function develop(game, S, setts, mine) {
 }
 
 function rallyPoint(game, setts) {
-  let best = setts[0];
-  for (const s of setts) if (s.stockpile > best.stockpile) best = s;
+  // never rally at a construction site — it can't feed the muster (#95)
+  const ready = setts.filter(s => !s.building);
+  const pool = ready.length ? ready : setts;
+  let best = pool[0];
+  for (const s of pool) if (s.stockpile > best.stockpile) best = s;
   // stay inside the settlement's feed radius so the mustering army eats
   const cx = game.map.w / 2, cy = game.map.h / 2;
   const dx = cx - best.x, dy = cy - best.y;
