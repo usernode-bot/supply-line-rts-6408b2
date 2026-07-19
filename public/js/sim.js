@@ -41,8 +41,13 @@ export const C = {
   TERRITORY: 5,            // settlement territory radius: feeds friendly blobs, farmer reach, drawn ring
   UNIT_HP: 100,            // individual unit health (deploy / supply)
   UNIT_HP_FARM: 10,        // farmers are 1/10th as tough
+  FLOW_FX_TICKS: 10,       // resource-flow particle travel time in ticks (< fx prune window)
+  WHEAT_FX_FOOD: 1.0,      // food earned per wheat particle (farm income → settlement)
+  LOOT_FX_FOOD: 0.5,       // food foraged per loot particle (pillaged land → army)
   SEP_PUSH: 1.2,           // max separation push speed, tiles/sec (= SPEED_DEPLOY)
   SEP_SLACK: 0.03,         // minimum overlap before separation acts (damps jitter)
+  MERGE_FRAC: 0.6,         // merge when centers are within this fraction of touching distance (rA + rB)
+  MERGE_MIN: 0.8,          // floor on the merge trigger — tiny blobs keep the old fixed-0.8 feel
 };
 
 export const DIFF = {
@@ -933,7 +938,8 @@ function tickCarrier(game, b) {
 // overlap is load-bearing are exempt: working farmers (one per tilled
 // cell by design), a carrier unloading onto its own route's target blob
 // (touching distance can exceed the 2.0 unload radius), and potentially
-// mergeable same-owner pairs (merge fires at ≤0.8, well inside touching).
+// mergeable same-owner pairs (merge fires at MERGE_FRAC of touching
+// distance — a deep overlap the push would otherwise make unreachable).
 
 function sepExempt(game, a, b) {
   if (a.working != null || b.working != null) return true;
@@ -947,7 +953,7 @@ function sepExempt(game, a, b) {
     const r = SUP.findRoute(game, b.order.routeId);
     if (r && r.targetKind === 'blob' && r.targetId === a.id) return true;
   }
-  return a.owner === b.owner && a.pillaging === b.pillaging
+  return a.owner === b.owner
     && !(a.noMerge && b.noMerge) && !aRoute && !bRoute;
 }
 
@@ -1057,17 +1063,31 @@ function tickCombat(game) {
   }
   for (const [b, d] of dmg) {
     // working farmers under fire: alert their settlement (drives the AI's
-    // defend reflex) and send the whole field crew running for shelter
+    // defend reflex). AI field crews run for shelter; human-owned farmers
+    // stay on the fields and the owner just gets a warning (issue #52).
     if (b.working != null) {
       const s = game.settlements.find(x => x.id === b.working);
-      if (s) { s.lastHitT = game.tick; shelterFarmers(game, s); }
+      if (s) {
+        s.lastHitT = game.tick;
+        if (autoShelters(game, s)) shelterFarmers(game, s);
+        else warnFarmers(game, s);
+      }
     }
     applyLosses(game, b, d);
   }
 }
 
-// -- farmer safety: working farmers shelter in their settlement when
-// threatened, then walk back out to the fields once the area is quiet.
+// -- farmer safety: AI-owned working farmers shelter in their settlement
+// when threatened, then walk back out to the fields once the area is
+// quiet. Human-owned farmers are never auto-recalled (issue #52): they
+// get a throttled warning instead, and only the manual "Recall farmers" /
+// "Field" / "Back to work" actions move them.
+
+// Only the scripted AI keeps the automatic shelter/return reflex; in PvP
+// both owners are human, so nobody does.
+function autoShelters(game, s) {
+  return !game.pvp && s.owner === 1;
+}
 
 // An enemy war party close enough that fielded farmers would immediately
 // re-shelter — shared by the auto-return tick and opBackToWork.
@@ -1092,6 +1112,13 @@ function shelterFarmers(game, s) {
   }
 }
 
+// Human owners keep working through danger — just tell them about it.
+function warnFarmers(game, s) {
+  if (game.tick - game.farmAlarmT <= 100) return;
+  game.farmAlarmT = game.tick;
+  game.events.push({ owner: s.owner, msg: '⚠️ Your farmers are in danger!', x: s.x + 1, y: s.y + 1 });
+}
+
 function tickFarmerSafety(game) {
   // flee: an enemy war party near any working farmer (or a fresh hit on
   // the settlement) sends that settlement's whole field crew home
@@ -1108,11 +1135,15 @@ function tickFarmerSafety(game) {
   }
   for (const id of threatened) {
     const s = game.settlements.find(x => x.id === id);
-    if (s) shelterFarmers(game, s);
+    if (!s) continue;
+    if (autoShelters(game, s)) shelterFarmers(game, s);
+    else warnFarmers(game, s);
   }
-  // return: sheltered farmers head back out once it's been quiet a while
+  // return: sheltered AI farmers head back out once it's been quiet a
+  // while; human garrisons stay put until the player fields them
   if (game.tick % 50 === 0) {
     for (const s of game.settlements) {
+      if (!autoShelters(game, s)) continue;
       if (s.garrison.farm <= 0 || game.tick - s.lastHitT <= 300) continue;
       if (!settlementInDanger(game, s)) opFieldRole(game, s, 'farm', s.garrison.farm);
     }
@@ -1244,6 +1275,22 @@ function tickFood(game, b) {
           game.dirty.add(i);
         }
         b.food = Math.min(foodCap(b), b.food + gained);
+        // loot-flow fx: one particle per LOOT_FX_FOOD foraged, from one
+        // of this tick's yielding cells into the army. Deterministic cell
+        // pick (no Math.random() — host/guest dead-reckoning stays aligned).
+        b.lootFxAcc = (b.lootFxAcc || 0) + gained;
+        let burst = 0;
+        while (b.lootFxAcc >= C.LOOT_FX_FOOD && burst < 3) {
+          b.lootFxAcc -= C.LOOT_FX_FOOD;
+          const ci = cells[(game.tick * 7 + burst * 11) % cells.length];
+          pushFx(game, {
+            kind: 'loot',
+            x: (ci % game.map.w) + 0.5, y: ((ci / game.map.w) | 0) + 0.5,
+            bid: b.id, tx: b.x, ty: b.y, t: game.tick,
+          });
+          burst++;
+        }
+        if (b.lootFxAcc >= C.LOOT_FX_FOOD) b.lootFxAcc = 0; // never backlog past a burst
       }
     }
     if (gained > 0.001) b.lastYieldT = game.tick;
@@ -1331,6 +1378,22 @@ export function incomeRate(game, s, farmers) {
   return fertSum * C.FARM_PER_FARMER * (C.FARM_BASE_FARMERS + effectiveFarmers(n)) * aiMult;
 }
 
+// Deterministic source spot for a wheat particle: rotate through the
+// settlement's working farmers; with none out, rotate through its tilled
+// cells (the land still earns its base rate). No Math.random() — host
+// and guest dead-reckoning emit identical fx.
+function wheatFxSource(game, s) {
+  const farmers = [];
+  for (const b of game.blobs) if (!b.dead && b.working === s.id) farmers.push(b);
+  if (farmers.length) {
+    const b = farmers[game.tick % farmers.length];
+    return { x: b.x, y: b.y };
+  }
+  if (!s.tilled.length) return null;
+  const i = s.tilled[(game.tick * 7 + s.id) % s.tilled.length];
+  return { x: (i % game.map.w) + 0.5, y: ((i / game.map.w) | 0) + 0.5 };
+}
+
 function tickSettlement(game, s) {
   if (!game.settlements.includes(s)) return;
   // farmland income accrues in every mode (boosted by farmers actually
@@ -1338,6 +1401,15 @@ function tickSettlement(game, s) {
   const income = incomeRate(game, s);
   s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + income);
   s.flowAcc = (s.flowAcc || 0) + income;
+  // wheat-flow fx: one particle per WHEAT_FX_FOOD earned, from a working
+  // farmer (or a tilled cell) toward the settlement — same throttled
+  // accumulator pattern as hpFxAcc. Transient; never serialized.
+  s.wheatFxAcc = (s.wheatFxAcc || 0) + income;
+  if (s.wheatFxAcc >= C.WHEAT_FX_FOOD) {
+    s.wheatFxAcc -= C.WHEAT_FX_FOOD;
+    const src = wheatFxSource(game, s);
+    if (src) pushFx(game, { kind: 'wheat', x: src.x, y: src.y, tx: s.x + 1, ty: s.y + 1, t: game.tick });
+  }
   if (s.mode === 'farm') {
     // healthy farms grow population: surplus food becomes new farmers who
     // walk straight out to the fields, up to the break-even crew (where a
@@ -1410,14 +1482,25 @@ function tickMerge(game) {
     for (let j = i + 1; j < alive.length; j++) {
       const b = alive[j];
       if (b.dead || b.order || b.working != null || a.owner !== b.owner) continue;
-      if (a.pillaging !== b.pillaging) continue;
       if (a.noMerge && b.noMerge) continue; // freshly split pair — stays apart
-      if (dist(a.x, a.y, b.x, b.y) > 0.8) continue;
+      // trigger scales with blob size: deep overlap, not mere touching
+      const trigger = Math.max(C.MERGE_MIN, C.MERGE_FRAC * (blobRadius(a) + blobRadius(b)));
+      if (dist(a.x, a.y, b.x, b.y) > trigger) continue;
       const keep = total(a) >= total(b) ? a : b;
       const gone = keep === a ? b : a;
+      // mass-weighted centroid, taken before the union changes the counts;
+      // the survivor keeps its own pillaging stance (bigger blob wins)
+      const mk = total(keep), mg = total(gone);
+      const cx = (keep.x * mk + gone.x * mg) / (mk + mg);
+      const cy = (keep.y * mk + gone.y * mg) / (mk + mg);
       keep.units = keep.units.concat(gone.units).sort((u, v) => u.seed - v.seed);
       recount(keep);
       keep.food = Math.min(foodCap(keep), keep.food + gone.food);
+      // settle between the two groups so the absorbed half doesn't
+      // teleport; skip onto-mountain / onto-settlement centroids
+      if (passable(game.map, Math.floor(cx), Math.floor(cy)) && !game.settAt[tileIdx(game, cx, cy)]) {
+        keep.x = cx; keep.y = cy;
+      }
       gone.dead = true;
       gone.mergedInto = keep.id;
       game.mergeLog[gone.id] = keep.id;
