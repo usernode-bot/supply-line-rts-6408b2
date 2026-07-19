@@ -5,8 +5,9 @@
 export const CARRY_PER_UNIT = 10;      // food capacity per supply unit
 export const HEALTH_WINDOW_TICKS = 300; // 30 s rolling window
 
-export function createRoute(game, blob, target) {
+export function createRoute(game, blob, target, initialCargo) {
   // target: { kind: 'blob'|'settlement', id }
+  // initialCargo: food carried over from a previous route (#103).
   // Source settlement = nearest friendly settlement to the carrier.
   const src = nearestSettlement(game, blob.owner, blob.x, blob.y);
   if (!src) return { err: 'No friendly settlement to load from' };
@@ -27,7 +28,12 @@ export function createRoute(game, blob, target) {
     window: [], // [{t, amt}]
   };
   game.routes.push(route);
-  blob.order = { type: 'route', routeId: route.id, phase: 'load', cargo: 0, wait: 0 };
+  // carried-over cargo stays aboard (#103): a full carrier heads straight
+  // out; a partial one loads first (the load phase tops up, never resets)
+  const cap = (blob.count.deploy + blob.count.supply + blob.count.farm) * CARRY_PER_UNIT;
+  const cargo = Math.min(initialCargo || 0, cap);
+  const phase = cargo >= cap - 0.01 ? 'go' : 'load';
+  blob.order = { type: 'route', routeId: route.id, phase, cargo, wait: 0 };
   blob.path = null;
   return { route };
 }

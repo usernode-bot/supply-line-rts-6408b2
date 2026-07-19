@@ -1619,7 +1619,9 @@ function renderPanelInner(force) {
       ['farmers', '🌱 Farmers working plots'],
       ['routeIn', '🚚 Route deliveries in'],
       ['upkeep', '🛡️ Garrison upkeep'],
-      ['fed', '🍖 Feeding armies in territory'],
+      ['fedDeploy', '⚔️ Feeding armies'],
+      ['fedSupply', '🚚 Feeding supply units'],
+      ['fedFarm', '🌱 Feeding farmers'],
       ['routeOut', '🚚 Routes loading out'],
       ['train', '⚒️ Growing/training unit'],
     ];
@@ -1637,10 +1639,9 @@ function renderPanelInner(force) {
     if (st.mode === 'off') {
       prog = '<div class="text-xs text-zinc-500 mt-1">📦 Stockpiling food — no units trained.</div>';
     } else if (st.mode === 'farm') {
-      const hungry = st.stockpile < S.C.FARM_GROW_FLOOR ? `<span class="text-red-400">(needs ${S.C.FARM_GROW_FLOOR} food)</span>` : '';
       prog = wc >= y.worthwhileCells
         ? `<div class="text-xs text-zinc-400 mt-1">Every worthwhile plot is manned (${y.worthwhileCells}) — stockpiling surplus food.</div>`
-        : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each ${hungry}</div>`;
+        : `<div class="text-xs text-zinc-400 mt-1">Growing farmer unit: ${pct}% · ${S.C.TRAIN_COST}🌾 each</div>`;
     } else if (gated && st.stockpile > 0) {
       prog = pausedNote;
     } else {

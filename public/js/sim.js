@@ -16,7 +16,6 @@ export const C = {
   K_SIEGE: 0.0067,         // settlement HP per deploy-unit per tick
   SETT_HP: 100,
   SETT_COST: 5,
-  SETT_MIN_DIST: 8,
   SETT_BUILD_TICKS: 150,   // construction time in sim ticks: the main loop runs the
                            // sim at speed × 0.5 of the native 10 ticks/s, so 150
                            // ticks ≈ 30 real seconds at the 1× default (#95)
@@ -25,7 +24,6 @@ export const C = {
   TRAIN_COST: 15,
   FARM_PER_FARMER: 0.002,  // base-income rate: stockpile per tick per unit of tilled fertility per farmer-equivalent
   FARM_BASE_FARMERS: 2,    // built-in farmer-equivalents every settlement gets for free
-  FARM_GROW_FLOOR: 50,     // farm-mode settlements grow farmers only above this stockpile
   FARM_PER_CELL: 0.04,     // stockpile per tick per unit of fertility of a worked plot
                            // (= the old reference ring 20 × FARM_PER_FARMER, so a farmer
                            // on a Lush plot matches the old full share — see farmYield)
@@ -93,7 +91,11 @@ function tileIdx(game, x, y) { return Math.floor(y) * game.map.w + Math.floor(x)
 // breakdown (#76). The panel shows a live 1 s window of these (#92).
 // Transient — never serialized; rebuilt each session.
 function newFlowParts() {
-  return { base: 0, farmers: 0, routeIn: 0, upkeep: 0, fed: 0, routeOut: 0, train: 0 };
+  return {
+    base: 0, farmers: 0, routeIn: 0, upkeep: 0,
+    fedDeploy: 0, fedSupply: 0, fedFarm: 0, // territory feeding, split by role (#99)
+    routeOut: 0, train: 0,
+  };
 }
 
 // -- settlement footprint: every settlement occupies a 2×2 block of
@@ -573,21 +575,17 @@ export function footprintFits(game, ax, ay) {
 }
 
 // Snapped anchor for a settlement covering tile (tx, ty): try the four
-// 2×2 placements that include the tile, then check spacing. Shared by
-// build-in-place, the travel-to-site order (#94) and the UI's placement
-// previews, so preview and dispatch can never disagree on snapping.
+// 2×2 placements that include the tile. No spacing minimum (#101) —
+// footprintFits is the only rule (clear ground, no farmland, no
+// settlement), so overlap-adjacent packing is allowed and neighbors
+// simply till smaller rings. Shared by build-in-place, the
+// travel-to-site order (#94) and the UI's placement previews, so
+// preview and dispatch can never disagree on snapping.
 export function buildAnchorAt(game, tx, ty) {
-  let anchor = null;
   for (const [ax, ay] of [[tx, ty], [tx - 1, ty], [tx, ty - 1], [tx - 1, ty - 1]]) {
-    if (footprintFits(game, ax, ay)) { anchor = { x: ax, y: ay }; break; }
+    if (footprintFits(game, ax, ay)) return { ok: true, x: ax, y: ay };
   }
-  if (!anchor) return { err: 'No room for a settlement here — needs a clear 2×2 area' };
-  for (const s of game.settlements) {
-    if (dist(s.x + 1, s.y + 1, anchor.x + 1, anchor.y + 1) < C.SETT_MIN_DIST) {
-      return { err: 'Too close to another settlement' };
-    }
-  }
-  return { ok: true, x: anchor.x, y: anchor.y };
+  return { err: 'No room for a settlement here — needs a clear 2×2 area' };
 }
 
 export function canBuildAt(game, b) {
@@ -646,9 +644,19 @@ export function opRoute(game, b, target) {
   if (b.count.supply !== total(b) || total(b) === 0) {
     return { err: 'Only pure supply blobs can run routes' };
   }
+  // reassignment keeps the carried cargo (#103): stash it so leaveRoute
+  // doesn't fold it into the (usually full) food meter, then seed the
+  // new route with it
+  let prevCargo = 0;
+  if (b.order && b.order.type === 'route') {
+    prevCargo = b.order.cargo || 0;
+    b.order.cargo = 0;
+  }
   leaveRoute(game, b);
   b.order = null; b.path = null;
-  return SUP.createRoute(game, b, target);
+  const res = SUP.createRoute(game, b, target, prevCargo);
+  if (res.err) b.food = Math.min(foodCap(b), b.food + prevCargo);
+  return res;
 }
 
 export function opSetMode(game, s, mode) {
@@ -1130,9 +1138,12 @@ function friendlyAvoidTiles(game, b, route) {
   const tgt = SUP.routeTarget(game, route);
   const sc = src ? settCenter(src) : null;
   const tc = tgt ? targetPos(tgt, route.targetKind) : null;
+  // under escalated right-of-way (#102) even moving friendlies are
+  // planned around — slow shuffling crowds otherwise stay invisible here
+  const row = b.order && b.order.rowUntil > game.tick;
   for (const e of game.blobs) {
     if (e.dead || e.owner !== b.owner || e.id === b.id || e.working != null) continue;
-    if (e.path && e.path.length) continue; // moving — will clear on its own
+    if (!row && e.path && e.path.length) continue; // moving — will clear on its own
     if (route.targetKind === 'blob' && e.id === route.targetId) continue;
     const reach = blobRadius(e) + 1;
     const span = Math.ceil(reach);
@@ -1159,11 +1170,27 @@ function friendlyAvoidTiles(game, b, route) {
 function carrierStalled(game, b, o) {
   const moved = o.lx != null ? dist(b.x, b.y, o.lx, o.ly) : Infinity;
   o.lx = b.x; o.ly = b.y;
+  // stall episodes expire when they stop recurring
+  if (o.stalls && game.tick - (o.stallT || 0) > 100) o.stalls = 0;
   if (!b.path || !b.path.length) { o.stuck = 0; return; }
   if (moved < blobSpeed(b) * C.DT * 0.2) {
     o.stuck = (o.stuck || 0) + 1;
-    if (o.stuck >= 20) { o.stuck = 0; b.path = null; }
-  } else o.stuck = 0;
+    o.prog = 0;
+    if (o.stuck >= 20) {
+      o.stuck = 0; b.path = null;
+      // escalation (#102): a second stall within ~10 s grants 5 s of
+      // convoy right-of-way — separation can't push the carrier and its
+      // replans avoid even moving friendlies (tickSeparation /
+      // friendlyAvoidTiles check rowUntil)
+      o.stalls = (o.stalls || 0) + 1;
+      o.stallT = game.tick;
+      if (o.stalls >= 2) o.rowUntil = game.tick + 50;
+    }
+  } else {
+    o.stuck = 0;
+    o.prog = (o.prog || 0) + 1;
+    if (o.prog >= 20) { o.stalls = 0; o.prog = 0; }
+  }
 }
 
 // No way through to this leg's destination (revealed mountains walled it
@@ -1310,6 +1337,9 @@ function tickSeparation(game) {
     // squatter can't stall garrisoning / field walks / AI settle parties
     if (b.order && (b.order.type === 'move' || b.order.type === 'attack')
       && b.path && b.path.length <= 1) continue;
+    // convoy right-of-way (#102): a repeatedly-stalled carrier pushes
+    // through the crowd — it shoves others but is never shoved itself
+    if (b.order && b.order.type === 'route' && b.order.rowUntil > game.tick) continue;
     let vx = v.x, vy = v.y;
     const m = Math.sqrt(vx * vx + vy * vy);
     if (m < 1e-6) continue;
@@ -1837,17 +1867,29 @@ function tickSettlement(game, s) {
     if (s.stockpile >= eat) { s.stockpile -= eat; s.flowAcc -= eat; s.parts.upkeep -= eat; }
     else { s.flowAcc -= s.stockpile; s.parts.upkeep -= s.stockpile; s.stockpile = 0; applyGarrisonLosses(game, s, g * C.STARVE_FRAC); }
   }
-  // feed friendly blobs inside the territory
+  // feed friendly blobs inside the territory — armies eat first, then
+  // supply units, then farmers, hungriest first within a category (#99).
+  // With a healthy stockpile everyone still gets their full share; the
+  // order only matters during shortages.
   if (s.stockpile > 0.01) {
+    const rank = (b) => b.count.deploy > 0 ? 0 : b.count.supply > 0 ? 1 : 2;
+    const hungry = [];
     for (const b of game.blobs) {
       if (b.dead || b.owner !== s.owner) continue;
       if (dist(b.x, b.y, s.x + 1, s.y + 1) > C.TERRITORY) continue;
-      const need = foodCap(b) - b.food;
-      if (need <= 0) continue;
-      const give = Math.min(need, s.stockpile, total(b) * 0.1);
+      if (foodCap(b) - b.food <= 0) continue;
+      hungry.push(b);
+    }
+    hungry.sort((a, b) => rank(a) - rank(b) || fedMeter(a) - fedMeter(b));
+    for (const b of hungry) {
+      const give = Math.min(foodCap(b) - b.food, s.stockpile, total(b) * 0.1);
       s.stockpile -= give;
       s.flowAcc -= give;
-      s.parts.fed -= give;
+      // ledger split by the group's role composition (#99)
+      const t = total(b);
+      s.parts.fedDeploy -= give * b.count.deploy / t;
+      s.parts.fedSupply -= give * b.count.supply / t;
+      s.parts.fedFarm -= give * b.count.farm / t;
       b.food += give;
       if (s.stockpile <= 0.01) break;
     }
@@ -1863,9 +1905,10 @@ function tickSettlement(game, s) {
     // (workingCount includes crews still walking out, so growth doesn't
     // overshoot); after that the farm invests nothing and surplus banks,
     // like 'off'. Growth is deliberately not gated on the flow EMA — an
-    // army feeding in territory shouldn't stall population growth;
-    // FARM_GROW_FLOOR is the brake.
-    if (s.stockpile >= C.FARM_GROW_FLOOR && workingCount(game, s) < y.worthwhileCells) {
+    // army feeding in territory shouldn't stall population growth — and
+    // there is no stockpile floor (#100): investProduction already
+    // clamps investment to what's actually banked.
+    if (workingCount(game, s) < y.worthwhileCells) {
       if (investProduction(game, s)) {
         const f = spawnWorkingFarmer(game, s);
         const give = Math.min(s.stockpile, foodCap(f));
