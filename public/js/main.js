@@ -18,7 +18,7 @@ let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1; // displayed speed step 1–4; the sim multiplier is speed × 0.5
 let paused = false;
-let ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null };
+let ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null };
 let renderer = null, input = null;
 let groups = {};                      // control groups (#69): n -> {kind:'blobs', ids} | {kind:'settlement', id}
 let lastGroupTap = { n: 0, t: 0 };    // for double-tap-to-center
@@ -576,6 +576,7 @@ function applyGuestCommand(c) {
     case 'setRole': if (b) S.opSetRole(game, b, c.role); break;
     case 'split': if (b) S.opSplit(game, b, c.take | 0); break;
     case 'build': if (b) S.opBuild(game, b); break;
+    case 'buildAt': if (b) S.opBuildAt(game, b, +c.x || 0, +c.y || 0); break;
     case 'pillage': if (b) S.opPillage(game, b, !!c.on); break;
     case 'route':
       if (b && c.target) {
@@ -675,6 +676,10 @@ function doBuild(b) {
   if (isGuest()) { sendCmd({ op: 'build', blobId: b.id }); return QUEUED; }
   return S.opBuild(game, b);
 }
+function doBuildAt(b, x, y) {
+  if (isGuest()) { sendCmd({ op: 'buildAt', blobId: b.id, x, y }); return QUEUED; }
+  return S.opBuildAt(game, b, x, y);
+}
 function doPillage(b, on) {
   if (isGuest()) { sendCmd({ op: 'pillage', blobId: b.id, on: !!on }); return QUEUED; }
   return S.opPillage(game, b, on);
@@ -705,7 +710,7 @@ function doGarrisonRole(st, role) {
 function startMatch(g) {
   game = g;
   resultPosted = false;
-  ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null };
+  ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null };
   groups = {};
   hideOrderPopup();
   acc = 0; speed = 1; paused = false; lastSaveTick = g.tick;
@@ -720,7 +725,7 @@ function startMatch(g) {
 
   if (!renderer) {
     renderer = createRenderer($('game-canvas'), $('minimap'));
-    input = createInput({ canvas: $('game-canvas'), minimap: $('minimap'), view, handlers: { tap: onTap, box: onBox, rightClick: onRightClick, cancel: onCancel, gesture: hideOrderPopup, groupKey: onGroupKey } });
+    input = createInput({ canvas: $('game-canvas'), minimap: $('minimap'), view, handlers: { tap: onTap, box: onBox, rightClick: onRightClick, cancel: onCancel, gesture: onGesture, groupKey: onGroupKey } });
   }
   input.setMapSize(g.map.w, g.map.h);
   const start = g.map.starts[me] || g.map.starts[0];
@@ -900,7 +905,7 @@ function selectedSettlement() {
 function onTap(world, pointerType, screen) {
   if (!game || game.result) return;
   const hitR = 24 / view.scale;
-  if (ui.pending) { resolvePending(world); return; }
+  if (ui.pending) { resolvePending(world, pointerType, screen); return; }
   // a tap while the order popup is open only dismisses it
   if (!orderPopup.classList.contains('hidden')) { hideOrderPopup(); return; }
   // prefer own blob, then own settlement
@@ -1132,9 +1137,23 @@ $('groups-bar').addEventListener('click', (e) => {
   }
 });
 
+// Pan/pinch/wheel dismiss the inline order popup — except the build ✓/✕
+// pair, which must survive panning so the player can frame the site and
+// still confirm (#94). It's screen-anchored, so it simply stays put.
+function onGesture() {
+  if (ui.pending === 'build' && ui.buildSite) return;
+  hideOrderPopup();
+}
+
 function onCancel() {
+  if (ui.pending) {
+    ui.pending = null;
+    ui.buildSite = null;
+    hideOrderPopup(); // the build-confirm popup rides on the pending state
+    updateHint();
+    return;
+  }
   if (!orderPopup.classList.contains('hidden')) { hideOrderPopup(); return; }
-  if (ui.pending) { ui.pending = null; updateHint(); return; }
   ui.selected = null;
   renderPanel(true);
 }
@@ -1166,6 +1185,41 @@ function showOrderPopup(world, screen, target) {
   orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
 }
 
+// Touch build placement (#94): the armed outline sits at ui.buildSite;
+// this floating ✓/✕ pair beside it commits or abandons the site. Re-taps
+// on the map move the outline (resolvePending runs before the popup's
+// tap-dismiss check in onTap), so the popup just follows the last tap.
+function showBuildConfirm(screen) {
+  ui.orderTarget = null;
+  ui.orderTargetEnt = null;
+  const ok = ui.buildSite && ui.buildSite.ok;
+  orderPopup.innerHTML = `
+    <button data-act="pbuild" class="btn px-3 rounded-lg text-left ${ok ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-500 opacity-40'}" ${ok ? '' : 'disabled'}>✓ Found here</button>
+    <button data-act="pbuildx" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Cancel</button>`;
+  orderPopup.classList.remove('hidden');
+  const px = screen ? screen.x : window.innerWidth / 2;
+  const py = screen ? screen.y : window.innerHeight / 2;
+  const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
+  orderPopup.style.left = Math.max(4, Math.min(window.innerWidth - w - 4, px + 10)) + 'px';
+  orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
+}
+
+function confirmBuild() {
+  const site = ui.buildSite;
+  const b = selectedBlobs()[0];
+  ui.pending = null;
+  ui.buildSite = null;
+  updateHint();
+  if (!site || !b) { renderPanel(true); return; }
+  const r = doBuildAt(b, site.x + 0.5, site.y + 0.5);
+  if (r.err) toast(r.err);
+  else {
+    pingOrder({ x: site.x + 1, y: site.y + 1 }, null);
+    toast('🏠 Founding party dispatched');
+  }
+  renderPanel(true);
+}
+
 orderPopup.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-act]');
   if (!btn || !game) return;
@@ -1173,6 +1227,8 @@ orderPopup.addEventListener('click', (e) => {
   const world = ui.orderTarget;
   const targetEnt = ui.orderTargetEnt;
   hideOrderPopup();
+  if (act === 'pbuild') { confirmBuild(); return; }
+  if (act === 'pbuildx') { onCancel(); renderPanel(true); return; }
   if (act === 'pclose') { ui.selected = null; renderPanel(true); return; }
   if (!world) return;
   const target = act === 'pattack' ? targetEnt : null;
@@ -1186,7 +1242,34 @@ orderPopup.addEventListener('click', (e) => {
   renderPanel(true);
 });
 
-function resolvePending(world) {
+function resolvePending(world, pointerType, screen) {
+  // build placement (#94): mouse dispatches on the click; touch/pen goes
+  // two-step — the tap places (or moves) the snapped outline and the ✓
+  // confirm popup commits it, so placement stays armed between taps.
+  if (ui.pending === 'build') {
+    const b = selectedBlobs()[0];
+    if (!b) { ui.pending = null; ui.buildSite = null; updateHint(); return; }
+    if (pointerType === 'mouse') {
+      ui.pending = null;
+      ui.buildSite = null;
+      updateHint();
+      const r = doBuildAt(b, world.x, world.y);
+      if (r.err) toast(r.err);
+      else {
+        pingOrder({ x: r.site ? r.site.x + 1 : world.x, y: r.site ? r.site.y + 1 : world.y }, null);
+        toast('🏠 Founding party dispatched');
+      }
+      renderPanel(true);
+      return;
+    }
+    const tx = Math.floor(world.x), ty = Math.floor(world.y);
+    if (tx < 0 || ty < 0 || tx >= game.map.w || ty >= game.map.h) return; // off-map — keep the previous site
+    const a = S.buildAnchorAt(game, tx, ty);
+    ui.buildSite = a.err ? { x: tx, y: ty, ok: false } : { x: a.x, y: a.y, ok: true };
+    showBuildConfirm(screen);
+    updateHint();
+    return;
+  }
   const pending = ui.pending;
   ui.pending = null;
   updateHint();
@@ -1227,7 +1310,10 @@ function updateHint() {
   const el = $('hint');
   if (!ui.pending) { el.classList.add('hidden'); return; }
   const text = ui.pending === 'move' ? 'Tap a destination — or an enemy to attack…'
-    : 'Tap the army or settlement to supply…';
+    : ui.pending === 'build'
+      ? (ui.buildSite ? 'Tap ✓ to found here — or tap elsewhere to move the site'
+        : 'Tap where to found the settlement…')
+      : 'Tap the army or settlement to supply…';
   $('hint-text').textContent = text;
   el.classList.remove('hidden');
 }
@@ -1286,16 +1372,9 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'build': {
-      const b = blobs[0];
-      if (b) {
-        r = doBuild(b);
-        if (r.err) toast(r.err);
-        else if (r.queued) toast('🏠 Build ordered');
-        else {
-          toast('🏠 Settlement founded');
-          if (b.dead || S.total(b) === 0) ui.selected = { kind: 'settlement', id: r.settlement.id };
-        }
-      }
+      // arms map placement (#94): pick the site by tap (touch confirms
+      // with ✓) or hover+click (mouse) — see resolvePending
+      if (blobs[0]) { ui.pending = 'build'; ui.buildSite = null; updateHint(); }
       break;
     }
     case 'pillage': {
@@ -1445,14 +1524,14 @@ function renderPanelInner(force) {
     panel.classList.remove('hidden');
     if (S.settVisible(game, est)) {
       const pct = Math.max(0, Math.min(100, Math.round(100 * est.hp / S.C.SETT_HP)));
-      const barCol = pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
+      const barCol = est.building ? 'bg-amber-500' : pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
       setPanelHTML(`
         <div class="flex items-center justify-between mb-1">
-          <span class="font-semibold text-red-300">🏠 Enemy settlement</span>
-          <span class="text-xs ${est.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-400'}">HP ${Math.ceil(est.hp)}/${S.C.SETT_HP}</span>
+          <span class="font-semibold text-red-300">${est.building ? '🔨 Enemy construction site' : '🏠 Enemy settlement'}</span>
+          <span class="text-xs ${!est.building && est.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-400'}">HP ${Math.ceil(est.hp)}/${S.C.SETT_HP}</span>
         </div>
         <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full ${barCol}" style="width:${pct}%"></div></div>
-        <div class="text-xs text-zinc-400">${est.hp >= S.C.SETT_HP ? 'Walls intact.' : est.hp > S.C.SETT_HP / 2 ? 'Damaged.' : 'Heavily damaged!'} Tap it with deploy units selected to lay siege.</div>`);
+        <div class="text-xs text-zinc-400">${est.building ? 'Under construction — raze it before it finishes.' : est.hp >= S.C.SETT_HP ? 'Walls intact.' : est.hp > S.C.SETT_HP / 2 ? 'Damaged.' : 'Heavily damaged!'} Tap it with deploy units selected to lay siege.</div>`);
     } else {
       setPanelHTML(`
         <div class="font-semibold text-red-300 mb-1">🏠 Enemy settlement <span class="text-zinc-500 font-normal">(last seen)</span></div>
@@ -1500,6 +1579,19 @@ function renderPanelInner(force) {
     return;
   }
   panel.classList.remove('hidden');
+
+  if (st && st.building) {
+    // construction site (#95): progress only — no controls until complete
+    const pct = Math.max(0, Math.min(100, Math.round(100 * st.hp / S.C.SETT_HP)));
+    setPanelHTML(`
+      <div class="flex items-center justify-between mb-1">
+        <span class="font-semibold">🔨 Settlement under construction</span>
+        <span class="text-xs text-amber-300">${pct}%</span>
+      </div>
+      <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-amber-500" style="width:${pct}%"></div></div>
+      <div class="text-xs text-zinc-400">The founding party is building. It produces nothing, feeds no one and trains no units until the bar is full — and enemies can attack it the whole time. Construction health climbs to ${S.C.SETT_HP}; damage taken now sets it back.</div>`);
+    return;
+  }
 
   if (st) {
     const g = st.garrison;
@@ -1709,6 +1801,8 @@ function frame(ts) {
   }
 
   input.update(dt);
+  // desktop build-placement preview follows the mouse (#94)
+  ui.hover = ui.pending === 'build' ? input.mouseWorld : null;
   renderer.draw(game, view, ui, Math.max(0, Math.min(1, acc / 100)));
 
   if (ts - lastPanel > 400) {

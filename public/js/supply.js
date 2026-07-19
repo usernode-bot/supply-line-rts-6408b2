@@ -13,6 +13,10 @@ export function createRoute(game, blob, target) {
   if (target.kind === 'settlement' && target.id === src.id) {
     return { err: 'Route must lead away from its source' };
   }
+  if (target.kind === 'settlement') {
+    const tgt = game.settlements.find(s => s.id === target.id);
+    if (tgt && tgt.building) return { err: 'Still under construction' };
+  }
   const route = {
     id: game.nextId++,
     owner: blob.owner,
@@ -31,7 +35,7 @@ export function createRoute(game, blob, target) {
 export function nearestSettlement(game, owner, x, y) {
   let best = null, bd = Infinity;
   for (const s of game.settlements) {
-    if (s.owner !== owner) continue;
+    if (s.owner !== owner || s.building) continue; // sites can't load routes (#95)
     // measure from the 2×2 footprint center
     const dx = s.x + 1 - x, dy = s.y + 1 - y, d = dx * dx + dy * dy;
     if (d < bd) { bd = d; best = s; }
