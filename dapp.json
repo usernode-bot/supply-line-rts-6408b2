@@ -14,6 +14,7 @@
     { "name": "Speed dropdown (1×–4×) present in top bar", "path": "/?demo=1", "expectSelector": "#sel-speed" },
     { "name": "Very small map option in solo picker", "path": "/?demo=1", "expectSelector": "#sel-mapsize option[value=xsmall]" },
     { "name": "Very small map option in multiplayer picker", "path": "/?demo=1", "expectSelector": "#mp-size option[value=xsmall]" },
-    { "name": "Per-unit health strip container present", "path": "/?demo=1", "expectSelector": "#unit-strip" }
+    { "name": "Per-unit health strip container present", "path": "/?demo=1", "expectSelector": "#unit-strip" },
+    { "name": "How to Play pillage-stance paragraph present", "path": "/?demo=1", "expectSelector": "#help-pillage" }
   ]
 }

@@ -18,7 +18,7 @@ export const C = {
   SETT_COST: 5,
   SETT_MIN_DIST: 8,
   STOCK_CAP: 500,
-  TRAIN_TICKS: 250,        // 25 s per unit
+  TRAIN_TICKS: 250,        // baseline 25 s per unit (surplus income trains faster — see investProduction)
   TRAIN_COST: 15,
   FARM_PER_FARMER: 0.002,  // stockpile per tick per unit of tilled fertility per farmer-equivalent
   FARM_BASE_FARMERS: 2,    // built-in farmer-equivalents every settlement gets for free
@@ -289,6 +289,7 @@ function makeBlob(game, owner, x, y, count, units) {
     noMerge: false,               // set on split; cleared when a move order completes
     lastYieldT: game.tick,        // last tick pillaging yielded food (transient)
     starving: false,              // one-shot starvation toast latch (transient)
+    foodTrend: 0,                 // EMA of food change per tick (transient — drives the panel's ▲/▼)
   };
   recount(b);
   game.blobs.push(b);
@@ -331,7 +332,7 @@ function foundSettlement(game, owner, x, y) {
     x: Math.floor(x), y: Math.floor(y),
     hp: C.SETT_HP, mode: 'farm', stockpile: 40,
     garrison: { deploy: 0, supply: 0, farm: 0 },
-    trainTicks: 0, garrLoss: 0, lastHitT: -999,
+    trainAcc: 0, garrLoss: 0, lastHitT: -999,
     tilled: [],
     flow: 0,       // EMA of net stockpile flow (food/tick) — gates training
     flowAcc: 0,    // this tick's flow components (transient)
@@ -377,13 +378,13 @@ function destroySettlement(game, s, why) {
 // One unified move command with attack-move semantics. Optional `target`
 // ({kind:'blob'|'settlement', id}) makes it a targeted order: the blob
 // heads for that entity (following blobs while visible, besieging
-// settlements until destroyed) and never diverts en route. Issuing any
-// move exits the pillaging stance.
+// settlements until destroyed) and never diverts en route. Moving never
+// touches the pillaging stance — pillage is a persistent toggle (#63)
+// and armies forage on the march (#66).
 export function opMove(game, b, x, y, target) {
   if (b.dead) return { err: 'Gone' };
   leaveRoute(game, b);
   b.working = null;
-  b.pillaging = false;
   const o = { type: 'move', x, y };
   if (target && target.kind && target.id != null) { o.tkind = target.kind; o.tid = target.id; }
   b.order = o;
@@ -522,17 +523,13 @@ export function opBuild(game, b) {
   return { ok: true, settlement: s };
 }
 
-// Pillaging is a stationary stance: toggling it on stops the blob where
-// it stands (dropping any march, supply route, or field work) and it
-// camps and forages until a move order — which clears the stance — or a
-// manual toggle-off.
+// Pillaging is a persistent stance, fully independent of movement
+// (#63, #66): while toggled on the blob forages the land around it every
+// tick — camped or on the march — until it is toggled off. It only drops
+// field work (a farmer can't till and burn at once); orders, supply
+// routes and paths are untouched.
 export function opPillage(game, b, on) {
-  if (on && !b.pillaging) b.lastYieldT = game.tick;
-  if (on) {
-    leaveRoute(game, b);
-    b.order = null; b.path = null; b.pathGoal = null; b.chaseId = null;
-    b.working = null;
-  }
+  if (on && !b.pillaging) { b.lastYieldT = game.tick; b.working = null; }
   b.pillaging = on;
   return { ok: true };
 }
@@ -739,6 +736,7 @@ export function step(game) {
   for (const b of game.blobs) {
     if (b.dead) continue;
     b.prevX = b.x; b.prevY = b.y; // for render interpolation
+    b.prevFood = b.food;          // for the fed-trend EMA below
     if (b.order && b.order.type === 'route') tickCarrier(game, b);
     else tickOrder(game, b);
   }
@@ -747,6 +745,14 @@ export function step(game) {
   tickCombat(game);
   for (const b of game.blobs) if (!b.dead) tickFood(game, b);
   for (const s of [...game.settlements]) tickSettlement(game, s);
+
+  // fed trend: EMA (~3.5 s half-life) of each blob's net food change per
+  // tick, once all transfers have landed — shown as ▲/▼ in the panel (#64)
+  for (const b of game.blobs) {
+    if (b.dead) continue;
+    const d = b.food - (b.prevFood != null ? b.prevFood : b.food);
+    b.foodTrend = (b.foodTrend || 0) + (d - (b.foodTrend || 0)) * 0.02;
+  }
 
   if (game.tick % 10 === 0) tickRegen(game);
   if (game.tick % 5 === 0) { tickFarmerSafety(game); tickMerge(game); updateVision(game); }
@@ -1545,40 +1551,6 @@ function tickSettlement(game, s) {
     const src = wheatFxSource(game, s);
     if (src) pushFx(game, { kind: 'wheat', x: src.x, y: src.y, tx: s.x + 1, ty: s.y + 1, t: game.tick });
   }
-  if (s.mode === 'farm') {
-    // healthy farms grow population: surplus food becomes new farmers who
-    // walk straight out to the fields, up to the break-even crew (where a
-    // new farmer only grows what they eat); after that the farm trains
-    // nothing and surplus banks in the stockpile, like 'off'. Growth is
-    // deliberately not gated on the flow EMA — an army feeding in
-    // territory shouldn't stall population growth; FARM_GROW_FLOOR is the
-    // brake. Players can still assign more than the crew manually (those
-    // extras are a net drain, as the curve dictates).
-    if (s.stockpile >= C.FARM_GROW_FLOOR && workingCount(game, s) < C.FARM_NEUTRAL_AT) {
-      s.trainTicks++;
-      if (s.trainTicks >= C.TRAIN_TICKS) {
-        s.trainTicks = 0;
-        s.stockpile -= C.TRAIN_COST;
-        const f = spawnWorkingFarmer(game, s);
-        const give = Math.min(s.stockpile, foodCap(f));
-        s.stockpile -= give;
-        f.food = give;
-      }
-    } else {
-      s.trainTicks = 0;
-    }
-  } else if (s.mode === 'supply' || s.mode === 'deploy') {
-    if (s.stockpile >= C.TRAIN_COST && !trainGated(s)) {
-      s.trainTicks++;
-      if (s.trainTicks >= C.TRAIN_TICKS) {
-        s.trainTicks = 0;
-        s.stockpile -= C.TRAIN_COST;
-        s.garrison[s.mode === 'supply' ? 'supply' : 'deploy']++;
-      }
-    }
-  } else {
-    s.trainTicks = 0; // 'off': stockpile food, train nothing
-  }
   // garrison eats from the stockpile; starves when it's empty
   const g = garrisonTotal(s);
   if (g > 0) {
@@ -1600,11 +1572,52 @@ function tickSettlement(game, s) {
       if (s.stockpile <= 0.01) break;
     }
   }
+  // production (after everyone has eaten, so it only takes true surplus):
+  // in a training mode the tick's net surplus is invested into the unit
+  // under construction instead of banking in the stockpile (#65) — the
+  // stockpile only grows in 'off' mode, at farm break-even, or while the
+  // flow gate pauses training. Paid-in progress (trainAcc) is kept across
+  // mode switches and pauses; it's food already spent.
+  if (s.mode === 'farm') {
+    // healthy farms grow population up to the break-even crew (where a
+    // new farmer only grows what they eat); after that the farm invests
+    // nothing and surplus banks, like 'off'. Growth is deliberately not
+    // gated on the flow EMA — an army feeding in territory shouldn't
+    // stall population growth; FARM_GROW_FLOOR is the brake.
+    if (s.stockpile >= C.FARM_GROW_FLOOR && workingCount(game, s) < C.FARM_NEUTRAL_AT) {
+      if (investProduction(game, s)) {
+        const f = spawnWorkingFarmer(game, s);
+        const give = Math.min(s.stockpile, foodCap(f));
+        s.stockpile -= give;
+        f.food = give;
+      }
+    }
+  } else if (s.mode === 'supply' || s.mode === 'deploy') {
+    if (!trainGated(s) && investProduction(game, s)) {
+      s.garrison[s.mode === 'supply' ? 'supply' : 'deploy']++;
+    }
+  }
   // fold this tick's flow into the EMA (~10 s half-life). One-time
-  // transfers (train costs, garrison deposits, fielding grants) are
-  // deliberately excluded from flowAcc so the gate doesn't oscillate.
+  // transfers (production investment, garrison deposits, fielding
+  // grants) are deliberately excluded from flowAcc so the gate doesn't
+  // oscillate.
   s.flow += ((s.flowAcc || 0) - s.flow) * 0.007;
   s.flowAcc = 0;
+}
+
+// Invest food into the unit under construction: the tick's positive net
+// flow (income minus everything eaten/shipped), floored at the old fixed
+// drip TRAIN_COST/TRAIN_TICKS so banked stockpile still converts when
+// income is thin. Returns true when a full unit's cost has been paid.
+function investProduction(game, s) {
+  const drip = C.TRAIN_COST / C.TRAIN_TICKS;
+  const surplus = Math.max(0, s.flowAcc || 0);
+  const invest = Math.min(s.stockpile, Math.max(surplus, drip));
+  if (invest <= 0) return false;
+  s.stockpile -= invest;
+  s.trainAcc += invest; // remainder past the cost rolls into the next unit
+  if (s.trainAcc >= C.TRAIN_COST - 1e-9) { s.trainAcc -= C.TRAIN_COST; return true; }
+  return false;
 }
 
 // -- merge / cleanup / vision / result
@@ -1768,7 +1781,7 @@ export function serialize(game) {
     settlements: game.settlements.map(s => ({
       id: s.id, owner: s.owner, x: s.x, y: s.y, hp: s.hp,
       mode: s.mode, stockpile: s.stockpile, garrison: s.garrison,
-      trainTicks: s.trainTicks, flow: s.flow,
+      trainAcc: s.trainAcc, flow: s.flow,
     })),
     routes: game.routes.map(r => ({
       id: r.id, owner: r.owner, settlementId: r.settlementId,
@@ -1844,7 +1857,10 @@ export function deserialize(data, prev) {
     const s = {
       id: sd.id, owner: sd.owner, x: sd.x, y: sd.y, hp: sd.hp,
       mode: sd.mode, stockpile: sd.stockpile,
-      garrison: sd.garrison, trainTicks: sd.trainTicks,
+      garrison: sd.garrison,
+      // older saves stored tick-based progress; convert to invested food
+      trainAcc: sd.trainAcc != null ? sd.trainAcc
+        : (sd.trainTicks ? sd.trainTicks / C.TRAIN_TICKS * C.TRAIN_COST : 0),
       garrLoss: 0, lastHitT: -999, tilled: [],
       flow: sd.flow || 0, flowAcc: 0,
     };
@@ -1890,6 +1906,7 @@ export function deserialize(data, prev) {
       pillaging: bd.pillaging, working: bd.working != null ? bd.working : null,
       engagedT: -999, chaseId: null, dead: false, mergedInto: null,
       noMerge: !!bd.noMerge, lastYieldT: data.tick, starving: false,
+      foodTrend: 0,
     };
     recount(b);
     game.blobs.push(b);
