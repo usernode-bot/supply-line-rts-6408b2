@@ -476,12 +476,44 @@ export function createRenderer(canvas, minimap) {
       for (const [ax, ay, ang] of arrows) arrowAt(ax, ay, ang, 6);
     }
 
-    // floating damage numbers
+    // floating damage numbers + resource-flow particles (wheat: farmers →
+    // settlement; loot: pillaged land → army). Particles ride the same
+    // fx channel: the sim emits deterministically per tick, motion here
+    // derives from game.tick + alpha so they pause/speed with the game.
     if (game.fx && game.fx.length) {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+      let flowBlobs = null; // lazy live-blob map for loot particle targets
+      const DUR = S.C.FLOW_FX_TICKS;
       for (const f of game.fx) {
         const age = game.tick - f.t + alpha;
+        if (f.kind === 'wheat' || f.kind === 'loot') {
+          if (age < 0 || age >= DUR) continue;
+          const p = age / DUR;
+          let tx2 = f.tx, ty2 = f.ty;
+          if (f.kind === 'loot') {
+            // track the (possibly marching) army; fall back to the
+            // emit-time position if it died or merged away mid-flight
+            if (!flowBlobs) {
+              flowBlobs = new Map();
+              for (const b of game.blobs) if (!b.dead) flowBlobs.set(b.id, b);
+            }
+            const tb = flowBlobs.get(f.bid);
+            if (tb) { tx2 = bx(tb); ty2 = by(tb); }
+          }
+          const e = p * p; // ease-in: drawn toward the destination
+          const lift = Math.sin(p * Math.PI) * (f.kind === 'wheat' ? 0.4 : 0.15);
+          const cx2 = lerp(f.x, tx2, e), cy2 = lerp(f.y, ty2, e) - lift;
+          if (!S.isVisible(game, cx2, cy2)) continue; // same fog rule as damage numbers
+          const fade = p < 0.15 ? p / 0.15 : p > 0.8 ? (1 - p) / 0.2 : 1;
+          ctx.beginPath();
+          ctx.arc(wx(cx2), wy(cy2), Math.max(1.5, 0.09 * s), 0, Math.PI * 2);
+          ctx.fillStyle = f.kind === 'wheat' ? '#fbbf24' : '#fb923c';
+          ctx.globalAlpha = Math.max(0, Math.min(1, fade));
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          continue;
+        }
         if (age < 0 || age > 12) continue;
         if (!S.isVisible(game, f.x, f.y)) continue;
         const fade = Math.max(0, 1 - age / 12);

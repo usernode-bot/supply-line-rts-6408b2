@@ -38,6 +38,9 @@ export const C = {
   TERRITORY: 5,            // settlement territory radius: feeds friendly blobs, farmer reach, drawn ring
   UNIT_HP: 100,            // individual unit health (deploy / supply)
   UNIT_HP_FARM: 10,        // farmers are 1/10th as tough
+  FLOW_FX_TICKS: 10,       // resource-flow particle travel time in ticks (< fx prune window)
+  WHEAT_FX_FOOD: 1.0,      // food earned per wheat particle (farm income → settlement)
+  LOOT_FX_FOOD: 0.5,       // food foraged per loot particle (pillaged land → army)
   SEP_PUSH: 1.2,           // max separation push speed, tiles/sec (= SPEED_DEPLOY)
   SEP_SLACK: 0.03,         // minimum overlap before separation acts (damps jitter)
 };
@@ -1255,6 +1258,22 @@ function tickFood(game, b) {
           game.dirty.add(i);
         }
         b.food = Math.min(foodCap(b), b.food + gained);
+        // loot-flow fx: one particle per LOOT_FX_FOOD foraged, from one
+        // of this tick's yielding cells into the army. Deterministic cell
+        // pick (no Math.random() — host/guest dead-reckoning stays aligned).
+        b.lootFxAcc = (b.lootFxAcc || 0) + gained;
+        let burst = 0;
+        while (b.lootFxAcc >= C.LOOT_FX_FOOD && burst < 3) {
+          b.lootFxAcc -= C.LOOT_FX_FOOD;
+          const ci = cells[(game.tick * 7 + burst * 11) % cells.length];
+          pushFx(game, {
+            kind: 'loot',
+            x: (ci % game.map.w) + 0.5, y: ((ci / game.map.w) | 0) + 0.5,
+            bid: b.id, tx: b.x, ty: b.y, t: game.tick,
+          });
+          burst++;
+        }
+        if (b.lootFxAcc >= C.LOOT_FX_FOOD) b.lootFxAcc = 0; // never backlog past a burst
       }
     }
     if (gained > 0.001) b.lastYieldT = game.tick;
@@ -1318,6 +1337,22 @@ export function incomeRate(game, s) {
   return fertSum * C.FARM_BASE * (1 + 0.1 * workingCount(game, s)) * aiMult;
 }
 
+// Deterministic source spot for a wheat particle: rotate through the
+// settlement's working farmers; with none out, rotate through its tilled
+// cells (the land still earns its base rate). No Math.random() — host
+// and guest dead-reckoning emit identical fx.
+function wheatFxSource(game, s) {
+  const farmers = [];
+  for (const b of game.blobs) if (!b.dead && b.working === s.id) farmers.push(b);
+  if (farmers.length) {
+    const b = farmers[game.tick % farmers.length];
+    return { x: b.x, y: b.y };
+  }
+  if (!s.tilled.length) return null;
+  const i = s.tilled[(game.tick * 7 + s.id) % s.tilled.length];
+  return { x: (i % game.map.w) + 0.5, y: ((i / game.map.w) | 0) + 0.5 };
+}
+
 function tickSettlement(game, s) {
   if (!game.settlements.includes(s)) return;
   // farmland income accrues in every mode (boosted by farmers actually
@@ -1325,6 +1360,15 @@ function tickSettlement(game, s) {
   const income = incomeRate(game, s);
   s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + income);
   s.flowAcc = (s.flowAcc || 0) + income;
+  // wheat-flow fx: one particle per WHEAT_FX_FOOD earned, from a working
+  // farmer (or a tilled cell) toward the settlement — same throttled
+  // accumulator pattern as hpFxAcc. Transient; never serialized.
+  s.wheatFxAcc = (s.wheatFxAcc || 0) + income;
+  if (s.wheatFxAcc >= C.WHEAT_FX_FOOD) {
+    s.wheatFxAcc -= C.WHEAT_FX_FOOD;
+    const src = wheatFxSource(game, s);
+    if (src) pushFx(game, { kind: 'wheat', x: src.x, y: src.y, tx: s.x + 1, ty: s.y + 1, t: game.tick });
+  }
   if (s.mode === 'farm') {
     // healthy farms grow population: surplus food becomes new farmers who
     // walk straight out to the fields; past the cap, growth trains deploy
