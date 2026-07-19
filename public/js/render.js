@@ -303,6 +303,19 @@ export function createRenderer(canvas, minimap) {
       }
     }
 
+    // ruins (#106): permanent, neutral battle scars where settlements
+    // fell — drawn under everything living, full-strength when the spot
+    // is visible, dimmed like ghosts when merely explored
+    for (const r of game.ruins || []) {
+      let seen = 0; // 0 unseen, 1 explored, 2 visible
+      for (let dy = 0; dy <= 1; dy++) {
+        for (let dx = 0; dx <= 1; dx++) {
+          seen = Math.max(seen, game.fog[(r.y + dy) * game.map.w + (r.x + dx)]);
+        }
+      }
+      if (seen > 0) drawRuin(r, wx, wy, s, seen === 2);
+    }
+
     // ghost settlements (remembered but not visible)
     for (const [id, k] of Object.entries(knownOf(game))) {
       if (S.settVisible(game, k)) continue;
@@ -759,6 +772,29 @@ export function createRenderer(canvas, minimap) {
     ctx.fill();
   }
 
+  // a burnt-out 2×2 plot: charcoal fill, broken grey outline, 🏚️ when
+  // zoomed in. No owner tint, no bars, no chips — ruins are scenery (#106).
+  function drawRuin(r, wx, wy, s, visible) {
+    const x0 = wx(r.x), y0 = wy(r.y);
+    const size = 2 * s;
+    ctx.globalAlpha = visible ? 0.9 : 0.4;
+    ctx.fillStyle = '#27272a';
+    ctx.fillRect(x0, y0, size, size);
+    ctx.strokeStyle = '#52525b';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.strokeRect(x0, y0, size, size);
+    ctx.setLineDash([]);
+    if (s >= 5) {
+      const fs = Math.max(10, Math.min(22, s * 0.9));
+      ctx.font = `${fs}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('🏚️', x0 + size / 2, y0 + size / 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   function drawSettlement(game, st, wx, wy, s, ghost, sel, workingN) {
     // fills the 2×2 footprint exactly: a plain square keep — no roof
     // triangle (#67) — with unit counts inside in a loose triangle (#40)
@@ -842,6 +878,12 @@ export function createRenderer(canvas, minimap) {
     mctx.drawImage(terrain, 0, 0, mw, mh);
     mctx.drawImage(fogCanvas, 0, 0, mw, mh);
     const sx = mw / game.map.w, sy = mh / game.map.h;
+    // ruins: dim grey dots on explored ground, under the settlement dots
+    mctx.fillStyle = 'rgba(82,82,91,0.5)';
+    for (const r of game.ruins || []) {
+      if (game.fog[r.y * game.map.w + r.x] === 0) continue;
+      mctx.fillRect((r.x + 1) * sx - 2, (r.y + 1) * sy - 2, 4, 4);
+    }
     for (const st of game.settlements) {
       if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
       mctx.fillStyle = ownerColor(game, st.owner);

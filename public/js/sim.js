@@ -277,6 +277,8 @@ export function newGame(seedStr, sizeKey, difficulty, pvp) {
     result: null,                          // 'win' | 'loss' | 'surrender'
     farmAlarmT: -999,                      // last "farmers ran to shelter" toast (transient)
     pillageAlarmT: -999,                   // last "land stripped bare" toast (transient)
+    supplyAlarmT: [-999, -999],            // last "low supplies" toast per owner (transient, #105)
+    ruins: [],                             // destroyed settlements' footprints {id,x,y,owner,t} — cosmetic (#106)
     ai: { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
   if (pvp) {
@@ -324,6 +326,8 @@ function makeBlob(game, owner, x, y, count, units) {
     noMerge: false,               // set on split; cleared when a move order completes
     lastYieldT: game.tick,        // last tick pillaging yielded food (transient)
     starving: false,              // one-shot starvation toast latch (transient)
+    lowFood: false,               // one-shot low-supplies toast latch (transient, #105)
+    zeroSince: -1,                // tick food first hit zero; -1 while above zero (transient, #105)
     foodWin: [],                  // last 10 ticks of food change (transient — drives the panel's live ▲/▼, #92)
   };
   recount(b);
@@ -411,6 +415,9 @@ function foundSettlement(game, owner, x, y, opts) {
     partsWin: [],              // last 10 ticks of parts — the panel's live 1 s window (transient, #92)
   };
   claimFootprint(game, s);
+  // building over rubble clears it: any ruin whose 2×2 footprint overlaps
+  // the new one is swept away (#106)
+  game.ruins = game.ruins.filter(r => Math.abs(r.x - s.x) > 1 || Math.abs(r.y - s.y) > 1);
   // farmland appears only when construction completes (tickSettlement)
   if (!construction) tillFields(game, s);
   game.settlements.push(s);
@@ -432,6 +439,12 @@ function destroySettlement(game, s, why) {
   for (const i of settTiles(game.map, s)) {
     if (game.settAt[i] === s.id) game.settAt[i] = 0;
     game.dirty.add(i);
+  }
+  // a completed settlement leaves a permanent ruin on its footprint —
+  // pure scenery: passable, neutral, uninteractive (#106). Knocked-down
+  // construction scaffolds just vanish.
+  if (!s.building) {
+    game.ruins.push({ id: game.nextId++, x: s.x, y: s.y, owner: s.owner, t: game.tick });
   }
   for (const b of game.blobs) if (b.working === s.id) b.working = null;
   game.settlements = game.settlements.filter(x => x.id !== s.id);
@@ -1703,14 +1716,34 @@ function tickFood(game, b) {
       game.events.push({ owner: b.owner, msg: '🍂 The land here is stripped bare!', x: b.x, y: b.y });
     }
   }
+  // two-tier supply warnings (#105): a mild nudge when an army drops out
+  // of its well-fed combat bonus (< 75%, the fedMult boundary), the skull
+  // only once it's genuinely starving — stuck at zero food long enough to
+  // be losing HP — so momentary dips right after a split / fielding /
+  // between caravan deliveries stay quiet.
+  const meter = fedMeter(b);
+  if (b.count.deploy > 0 && b.working == null) {
+    // armies only — route carriers and farmers have their own indicators
+    if (!b.lowFood && meter < 0.75) {
+      b.lowFood = true;
+      if (game.tick - game.supplyAlarmT[b.owner] > 150) {
+        game.supplyAlarmT[b.owner] = game.tick;
+        game.events.push({ owner: b.owner, msg: '🍞 Low supplies — your army is getting hungry', x: b.x, y: b.y });
+      }
+    } else if (b.lowFood && meter >= 0.9) {
+      b.lowFood = false;
+    }
+  }
   if (b.food <= 0.0001) {
-    if (!b.starving) {
+    if (b.zeroSince < 0) b.zeroSince = game.tick;
+    if (!b.starving && game.tick - b.zeroSince >= 20) {
       b.starving = true;
       game.events.push({ owner: b.owner, msg: '💀 Your army is starving!', x: b.x, y: b.y });
     }
     applyStarvation(game, b);
-  } else if (b.starving && fedMeter(b) > 0.1) {
-    b.starving = false;
+  } else {
+    b.zeroSince = -1;
+    if (b.starving && meter >= 0.25) b.starving = false;
   }
 }
 
@@ -2137,6 +2170,7 @@ export function serialize(game) {
       id: r.id, owner: r.owner, settlementId: r.settlementId,
       targetKind: r.targetKind, targetId: r.targetId, carrierIds: r.carrierIds,
     })),
+    ruins: game.ruins,
     fertDelta,
   };
   if (game.pvp) {
@@ -2187,6 +2221,8 @@ export function deserialize(data, prev) {
     result: data.result || null,
     farmAlarmT: -999,
     pillageAlarmT: -999,
+    supplyAlarmT: [-999, -999],
+    ruins: data.ruins || [], // older saves have none
     ai: data.ai || { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
   if (data.pvp) {
@@ -2258,6 +2294,7 @@ export function deserialize(data, prev) {
       pillaging: bd.pillaging, working: bd.working != null ? bd.working : null,
       engagedT: -999, meleeT: -999, chaseId: null, dead: false, mergedInto: null,
       noMerge: !!bd.noMerge, lastYieldT: data.tick, starving: false,
+      lowFood: false, zeroSince: -1,
       foodWin: [],
     };
     recount(b);
