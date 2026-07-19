@@ -266,6 +266,7 @@ export function createRenderer(canvas, minimap) {
     }
     ctx.lineWidth = 2;
     for (const st of game.settlements) {
+      if (st.building) continue; // construction sites feed nobody — no ring yet (#95)
       if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
       ctx.strokeStyle = ownerColor(game, st.owner);
       ctx.globalAlpha = 0.55;
@@ -618,6 +619,44 @@ export function createRenderer(canvas, minimap) {
     ctx.lineWidth = 2;
     ctx.strokeRect(ox, oy, game.map.w * s, game.map.h * s);
 
+    // settlement placement (#94), above fog so outlines stay readable:
+    // dashed 2×2 markers at every in-flight founding site, plus the
+    // armed snapped preview (touch buildSite / desktop hover) coloured
+    // by live validity — buildAnchorAt is re-run each frame so a site
+    // that turns invalid while the player deliberates shows red.
+    function dashedPlot(ax, ay, color, fill) {
+      const px0 = wx(ax), py0 = wy(ay);
+      if (fill) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(px0, py0, 2 * s, 2 * s);
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(px0, py0, 2 * s, 2 * s);
+      ctx.setLineDash([]);
+    }
+    for (const b of game.blobs) {
+      if (b.dead || b.owner !== viewer(game)) continue;
+      if (!b.order || b.order.type !== 'move' || !b.order.build) continue;
+      dashedPlot(b.order.build.x, b.order.build.y, 'rgba(255,255,255,0.75)');
+    }
+    if (ui.pending === 'build') {
+      let plot = null;
+      if (ui.buildSite) plot = ui.buildSite;
+      else if (ui.hover) {
+        const tx = Math.floor(ui.hover.x), ty = Math.floor(ui.hover.y);
+        if (tx >= 0 && ty >= 0 && tx < game.map.w && ty < game.map.h) plot = { x: tx, y: ty };
+      }
+      if (plot) {
+        const a = S.buildAnchorAt(game, plot.x, plot.y);
+        const ax = a.err ? plot.x : a.x, ay = a.err ? plot.y : a.y;
+        dashedPlot(ax, ay,
+          a.err ? 'rgba(248,113,113,0.95)' : 'rgba(74,222,128,0.95)',
+          a.err ? 'rgba(248,113,113,0.14)' : 'rgba(74,222,128,0.14)');
+      }
+    }
+
     // order-confirmation ping: a single collapsing ring at the ordered
     // destination so a tap visibly lands (#71, #78) — red for an attack
     // order, white for a plain move. Above fog: the destination may
@@ -727,7 +766,10 @@ export function createRenderer(canvas, minimap) {
     const size = 2 * s;
     const cx = x0 + size / 2, cy = y0 + size / 2;
     const hit = !ghost && st.lastHitT != null && game.tick - st.lastHitT < 3;
-    ctx.globalAlpha = ghost ? 0.4 : 1;
+    const building = !ghost && st.building;
+    // construction sites (#95) read as scaffolding: translucent body,
+    // dashed outline, a 🔨 instead of the garrison chips, amber bar
+    ctx.globalAlpha = ghost ? 0.4 : building ? 0.7 : 1;
     // body: the whole plot as one square
     ctx.fillStyle = ownerDark(game, st.owner);
     ctx.fillRect(x0, y0, size, size);
@@ -738,11 +780,20 @@ export function createRenderer(canvas, minimap) {
     // outline around the full plot (white when selected, red when hit)
     ctx.strokeStyle = hit ? '#f87171' : sel ? '#ffffff' : ownerColor(game, st.owner);
     ctx.lineWidth = sel || hit ? 3 : 2;
+    if (building) ctx.setLineDash([5, 4]);
     ctx.strokeRect(x0, y0, size, size);
+    ctx.setLineDash([]);
+    if (building && s >= 5) {
+      const fs = Math.max(10, Math.min(22, s * 0.9));
+      ctx.font = `${fs}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('🔨', cx, cy);
+    }
     // unit counts inside, loose triangle: ⚔️ upper-left, 🚚 upper-right,
     // 🌱 (garrisoned + working the fields) bottom-center; own settlements
     // also show the 🌾 stockpile top-center (#86 — the enemy's stays private)
-    if (!ghost && st.garrison && s >= 8) {
+    if (!ghost && !building && st.garrison && s >= 8) {
       const fs = Math.max(9, Math.min(12, s * 0.55));
       ctx.font = `600 ${fs}px system-ui`;
       ctx.textAlign = 'center';
@@ -763,12 +814,13 @@ export function createRenderer(canvas, minimap) {
         ctx.fillText(label, lx, ly);
       }
     }
-    // health / production bars just below the plot
+    // health / production bars just below the plot — amber while under
+    // construction, so the fill reads as build progress (#95)
     let barY = y0 + size + 2;
     if (!ghost && st.hp < S.C.SETT_HP) {
       ctx.fillStyle = '#111827';
       ctx.fillRect(x0, barY, size, 4);
-      ctx.fillStyle = '#f87171';
+      ctx.fillStyle = building ? '#fbbf24' : '#f87171';
       ctx.fillRect(x0, barY, size * (st.hp / S.C.SETT_HP), 4);
       barY += 5;
     }

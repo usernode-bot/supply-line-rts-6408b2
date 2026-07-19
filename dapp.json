@@ -20,6 +20,7 @@
     { "name": "Move-vs-attack help paragraph present", "path": "/?demo=1", "expectSelector": "#help-move-attack" },
     { "name": "Control-groups help paragraph present", "path": "/?demo=1", "expectSelector": "#help-groups" },
     { "name": "Healing help paragraph present", "path": "/?demo=1", "expectSelector": "#help-healing" },
-    { "name": "Groups bar container present", "path": "/?demo=1", "expectSelector": "#groups-bar" }
+    { "name": "Groups bar container present", "path": "/?demo=1", "expectSelector": "#groups-bar" },
+    { "name": "How to Play settlement placement & construction paragraph present", "path": "/?demo=1", "expectSelector": "#help-settlements" }
   ]
 }
