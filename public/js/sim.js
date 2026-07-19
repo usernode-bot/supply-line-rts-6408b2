@@ -1069,17 +1069,31 @@ function tickCombat(game) {
   }
   for (const [b, d] of dmg) {
     // working farmers under fire: alert their settlement (drives the AI's
-    // defend reflex) and send the whole field crew running for shelter
+    // defend reflex). AI field crews run for shelter; human-owned farmers
+    // stay on the fields and the owner just gets a warning (issue #52).
     if (b.working != null) {
       const s = game.settlements.find(x => x.id === b.working);
-      if (s) { s.lastHitT = game.tick; shelterFarmers(game, s); }
+      if (s) {
+        s.lastHitT = game.tick;
+        if (autoShelters(game, s)) shelterFarmers(game, s);
+        else warnFarmers(game, s);
+      }
     }
     applyLosses(game, b, d);
   }
 }
 
-// -- farmer safety: working farmers shelter in their settlement when
-// threatened, then walk back out to the fields once the area is quiet.
+// -- farmer safety: AI-owned working farmers shelter in their settlement
+// when threatened, then walk back out to the fields once the area is
+// quiet. Human-owned farmers are never auto-recalled (issue #52): they
+// get a throttled warning instead, and only the manual "Recall farmers" /
+// "Field" / "Back to work" actions move them.
+
+// Only the scripted AI keeps the automatic shelter/return reflex; in PvP
+// both owners are human, so nobody does.
+function autoShelters(game, s) {
+  return !game.pvp && s.owner === 1;
+}
 
 // An enemy war party close enough that fielded farmers would immediately
 // re-shelter — shared by the auto-return tick and opBackToWork.
@@ -1104,6 +1118,13 @@ function shelterFarmers(game, s) {
   }
 }
 
+// Human owners keep working through danger — just tell them about it.
+function warnFarmers(game, s) {
+  if (game.tick - game.farmAlarmT <= 100) return;
+  game.farmAlarmT = game.tick;
+  game.events.push({ owner: s.owner, msg: '⚠️ Your farmers are in danger!', x: s.x + 1, y: s.y + 1 });
+}
+
 function tickFarmerSafety(game) {
   // flee: an enemy war party near any working farmer (or a fresh hit on
   // the settlement) sends that settlement's whole field crew home
@@ -1120,11 +1141,15 @@ function tickFarmerSafety(game) {
   }
   for (const id of threatened) {
     const s = game.settlements.find(x => x.id === id);
-    if (s) shelterFarmers(game, s);
+    if (!s) continue;
+    if (autoShelters(game, s)) shelterFarmers(game, s);
+    else warnFarmers(game, s);
   }
-  // return: sheltered farmers head back out once it's been quiet a while
+  // return: sheltered AI farmers head back out once it's been quiet a
+  // while; human garrisons stay put until the player fields them
   if (game.tick % 50 === 0) {
     for (const s of game.settlements) {
+      if (!autoShelters(game, s)) continue;
       if (s.garrison.farm <= 0 || game.tick - s.lastHitT <= 300) continue;
       const capLeft = C.FARM_CAP - workingCount(game, s);
       if (capLeft <= 0) continue;

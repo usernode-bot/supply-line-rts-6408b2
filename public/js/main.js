@@ -830,7 +830,7 @@ $('btn-backtowork').addEventListener('click', () => {
     if (r.fielded > 0) parts.push(`${r.fielded} farmer${r.fielded === 1 ? '' : 's'} back in the fields`);
     if (r.walking > 0) parts.push(`${r.walking} walking home`);
     toast('🌱 ' + parts.join(' · '));
-  } else if (r.reason === 'danger') toast('⚠️ Enemies nearby — farmers stay sheltered');
+  } else if (r.reason === 'danger') toast('⚠️ Enemies nearby — farmers stay home');
   else if (r.reason === 'cap') toast(`Farms at capacity (${S.C.FARM_CAP})`);
   else toast('No idle farmers');
   updateHUD();
@@ -1298,7 +1298,7 @@ function renderPanel(force) {
         <span class="text-xs text-zinc-500">🌱 ${wc}/${S.C.FARM_CAP} farmers working the fields · <b class="${wc > 0 ? 'text-emerald-400' : 'text-zinc-400'}">+${wc * 10}% food</b></span>
         ${wc > 0 ? '<button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall farmers</button>' : ''}
       </div>
-      <div class="text-xs text-zinc-500 mt-1">Each farmer working the fields adds +10% to this settlement's food income. Sheltered or garrisoned farmers don't count — send them back out to the fields.</div>
+      <div class="text-xs text-zinc-500 mt-1">Each farmer working the fields adds +10% to this settlement's food income. Garrisoned farmers don't count — send them back out to the fields.</div>
       <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}</div>
         ${gTot > 0 ? `
