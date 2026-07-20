@@ -1,30 +1,32 @@
 // Scripted opponent. Evaluated every ~2 s (20 ticks) from the main loop.
 // Uses the same sim ops as the player. Terrain is fully known to it, but
-// player positions must be discovered by scouting (its own vision +
-// memory) — no fog cheating on player entities at any difficulty.
+// enemy positions must be discovered by scouting (its own vision +
+// memory) — no fog cheating on enemy entities at any difficulty.
 //
 // State machine per the spec: Expand → Develop → Scout → Attack → Defend.
-// All persistent state lives on game.ai so it survives save/resume.
+// In a real match the AI drives owner 1 with state on game.ai (so it
+// survives save/resume). Attract mode drives BOTH sides by calling
+// aiTick once per owner with its own state object — the defaults keep
+// every existing call site behaving exactly as before.
 
 import { dist } from './mapgen.js';
 
 const SETT_TARGETS = { small: 3, medium: 4, large: 5 };
 
-export function aiTick(game, S) {
+export function aiTick(game, S, owner = 1, state = game.ai) {
   if (game.result) return;
-  const ai = game.ai;
   const diff = S.DIFF[game.difficulty];
-  const mine = game.blobs.filter(b => !b.dead && b.owner === 1);
-  const setts = game.settlements.filter(s => s.owner === 1);
+  const mine = game.blobs.filter(b => !b.dead && b.owner === owner);
+  const setts = game.settlements.filter(s => s.owner === owner);
   if (setts.length === 0) return;
 
-  updateMemory(game, S, mine, setts);
+  updateMemory(game, S, mine, setts, owner, state);
   develop(game, S, setts, mine);
-  defend(game, S, setts, mine, ai);
-  expand(game, S, setts, mine, ai, diff);
-  scout(game, S, setts, mine, ai, diff);
-  attack(game, S, setts, mine, ai, diff);
-  muster(game, S, setts, mine, ai, diff);
+  defend(game, S, setts, mine, state);
+  expand(game, S, setts, mine, state, diff);
+  scout(game, S, setts, mine, state, diff, owner);
+  attack(game, S, setts, mine, state, diff);
+  muster(game, S, setts, mine, state, diff);
 }
 
 // -- memory: what the AI has actually seen ----------------------------
@@ -35,10 +37,10 @@ function canSee(mine, setts, x, y, S) {
   return false;
 }
 
-function updateMemory(game, S, mine, setts) {
-  const known = game.ai.known;
+function updateMemory(game, S, mine, setts, owner, state) {
+  const known = state.known;
   for (const s of game.settlements) {
-    if (s.owner === 0 && canSee(mine, setts, s.x, s.y, S)) known[s.id] = { x: s.x, y: s.y };
+    if (s.owner === 1 - owner && canSee(mine, setts, s.x, s.y, S)) known[s.id] = { x: s.x, y: s.y };
   }
   for (const id of Object.keys(known)) {
     const k = known[id];
@@ -89,31 +91,31 @@ function sendToRally(game, S, setts, b) {
 
 // -- expand: found new settlements on good land ------------------------
 
-function expand(game, S, setts, mine, ai, diff) {
+function expand(game, S, setts, mine, state, diff) {
   // finish an in-flight expansion first
-  if (ai.expand) {
-    const b = mine.find(x => x.id === ai.expand.blobId);
-    if (!b) { ai.expand = null; }
+  if (state.expand) {
+    const b = mine.find(x => x.id === state.expand.blobId);
+    if (!b) { state.expand = null; }
     else if (!b.order) {
-      if (dist(b.x, b.y, ai.expand.x, ai.expand.y) < 2.5) {
+      if (dist(b.x, b.y, state.expand.x, state.expand.y) < 2.5) {
         const res = S.opBuild(game, b);
-        ai.expand = null;
+        state.expand = null;
         if (res.err) { /* site got contested; try again later */ }
       } else {
         // stalled — retry the move once, then give up on this site
-        if (S.opMove(game, b, ai.expand.x, ai.expand.y).err) ai.expand = null;
-        else ai.expand.retried = (ai.expand.retried || 0) + 1;
-        if (ai.expand && ai.expand.retried > 2) { ai.expand = null; }
+        if (S.opMove(game, b, state.expand.x, state.expand.y).err) state.expand = null;
+        else state.expand.retried = (state.expand.retried || 0) + 1;
+        if (state.expand && state.expand.retried > 2) { state.expand = null; }
       }
     }
     return;
   }
   const target = SETT_TARGETS[game.sizeKey] || 4;
   if (setts.length >= target) return;
-  if (game.tick - ai.lastExpand < diff.expandTicks) return;
+  if (game.tick - state.lastExpand < diff.expandTicks) return;
 
   // need 5+ deploy: prefer an idle field blob, else field from a garrison
-  let b = mine.find(x => !x.order && x.count.deploy >= 6 && x.id !== ai.armyId && x.id !== ai.scoutId);
+  let b = mine.find(x => !x.order && x.count.deploy >= 6 && x.id !== state.armyId && x.id !== state.scoutId);
   if (!b) {
     const s = setts.find(x => x.garrison.deploy >= 9); // 5 to build + keep guard
     if (!s) return;
@@ -121,15 +123,15 @@ function expand(game, S, setts, mine, ai, diff) {
     if (!r.ok) return;
     b = r.blob;
   }
-  const site = pickSite(game, S, setts, ai);
+  const site = pickSite(game, S, setts, state);
   if (!site) return;
   if (S.opMove(game, b, site.x + 1, site.y + 1).ok) {
-    ai.expand = { blobId: b.id, x: site.x + 1, y: site.y + 1 };
-    ai.lastExpand = game.tick;
+    state.expand = { blobId: b.id, x: site.x + 1, y: site.y + 1 };
+    state.lastExpand = game.tick;
   }
 }
 
-function pickSite(game, S, setts, ai) {
+function pickSite(game, S, setts, state) {
   const { w, h, orig } = game.map;
   let best = null, bestScore = -Infinity;
   for (let y = 4; y < h - 4; y += 3) {
@@ -140,7 +142,7 @@ function pickSite(game, S, setts, ai) {
       for (const s of game.settlements) {
         const d = dist(s.x, s.y, x, y);
         if (d < 9) { ok = false; break; }
-        if (s.owner === 1 && d < nearest) nearest = d;
+        if (setts.includes(s) && d < nearest) nearest = d;
       }
       if (!ok || nearest > 26) continue;
       // score the farmland ring around the footprint center
@@ -153,7 +155,7 @@ function pickSite(game, S, setts, ai) {
         fert += orig[ty * w + tx];
       }
       let danger = 0;
-      for (const k of Object.values(ai.known)) danger += Math.max(0, 30 - dist(k.x, k.y, x, y));
+      for (const k of Object.values(state.known)) danger += Math.max(0, 30 - dist(k.x, k.y, x, y));
       const score = fert - nearest * 0.15 - danger * 0.2;
       if (score > bestScore) { bestScore = score; best = { x, y }; }
     }
@@ -161,58 +163,58 @@ function pickSite(game, S, setts, ai) {
   return best;
 }
 
-// -- scout: find the player -------------------------------------------
+// -- scout: find the enemy ----------------------------------------------
 
-function scout(game, S, setts, mine, ai, diff) {
-  if (ai.scoutId) {
-    const b = mine.find(x => x.id === ai.scoutId);
-    if (!b) ai.scoutId = null;
+function scout(game, S, setts, mine, state, diff, owner) {
+  if (state.scoutId) {
+    const b = mine.find(x => x.id === state.scoutId);
+    if (!b) state.scoutId = null;
     else if (b.order) return;
-    else ai.scoutId = null; // arrived; free it up
+    else state.scoutId = null; // arrived; free it up
   }
-  if (game.tick - ai.lastScout < diff.scoutTicks) return;
+  if (game.tick - state.lastScout < diff.scoutTicks) return;
   const s = setts.find(x => x.garrison.deploy >= 2);
   if (!s) return;
   const r = S.opFieldRole(game, s, 'deploy', 1);
   if (!r.ok) return;
-  // probe toward a known player settlement, else the mirrored start,
+  // probe toward a known enemy settlement, else the mirrored start,
   // else a random quadrant
-  const knowns = Object.values(ai.known);
+  const knowns = Object.values(state.known);
   let tx, ty;
   if (knowns.length && Math.random() < 0.6) {
     const k = knowns[Math.floor(Math.random() * knowns.length)];
     tx = k.x; ty = k.y;
   } else if (Math.random() < 0.6) {
-    tx = game.map.starts[0].x; ty = game.map.starts[0].y;
+    tx = game.map.starts[1 - owner].x; ty = game.map.starts[1 - owner].y;
   } else {
     tx = 4 + Math.random() * (game.map.w - 8);
     ty = 4 + Math.random() * (game.map.h - 8);
   }
   if (S.opMove(game, r.blob, tx, ty).ok) {
-    ai.scoutId = r.blob.id;
-    ai.lastScout = game.tick;
+    state.scoutId = r.blob.id;
+    state.lastScout = game.tick;
   }
 }
 
 // -- muster & attack ---------------------------------------------------
 
-function muster(game, S, setts, mine, ai, diff) {
-  if (ai.attacking) return;
+function muster(game, S, setts, mine, state, diff) {
+  if (state.attacking) return;
   // idle deploy blobs (not tasked) drift to the rally and merge up
   for (const b of mine) {
-    if (b.order || b.pillaging || b.id === ai.armyId || b.id === ai.scoutId) continue;
-    if (ai.expand && ai.expand.blobId === b.id) continue;
+    if (b.order || b.pillaging || b.id === state.armyId || b.id === state.scoutId) continue;
+    if (state.expand && state.expand.blobId === b.id) continue;
     if (b.count.deploy === 0) continue;
     const r = rallyPoint(game, setts);
     if (dist(b.x, b.y, r.x, r.y) > 3) S.opMove(game, b, r.x, r.y);
   }
 }
 
-function attack(game, S, setts, mine, ai, diff) {
+function attack(game, S, setts, mine, state, diff) {
   // manage an army already in the field
-  if (ai.armyId) {
-    const army = mine.find(b => b.id === ai.armyId);
-    if (!army) { ai.armyId = null; ai.attacking = false; return; }
+  if (state.armyId) {
+    const army = mine.find(b => b.id === state.armyId);
+    if (!army) { state.armyId = null; state.attacking = false; return; }
     const meter = S.fedMeter(army);
     // live off the land while campaigning: pillage is a persistent
     // stance independent of movement, so a hungry army forages on the
@@ -224,7 +226,7 @@ function attack(game, S, setts, mine, ai, diff) {
       const home = setts[0];
       S.opPillage(game, army, false);
       S.opMove(game, army, home.x + 2.5, home.y + 1);
-      ai.armyId = null; ai.attacking = false; ai.siege = null;
+      state.armyId = null; state.attacking = false; state.siege = null;
       return;
     }
     // siege stall guard (#108): walls now protect garrisons, so a siege
@@ -233,42 +235,42 @@ function attack(game, S, setts, mine, ai, diff) {
     if (army.order && army.order.type === 'move' && army.order.tkind === 'settlement') {
       const st = game.settlements.find(x => x.id === army.order.tid);
       const g = st ? st.garrison.deploy + st.garrison.supply + st.garrison.farm : 0;
-      if (!st || g === 0) ai.siege = null;
-      else if (!ai.siege || ai.siege.settId !== st.id || g < ai.siege.g) {
-        ai.siege = { settId: st.id, g, t: game.tick };
-      } else if (game.tick - ai.siege.t > 1200) {
-        ai.siege = null;
+      if (!st || g === 0) state.siege = null;
+      else if (!state.siege || state.siege.settId !== st.id || g < state.siege.g) {
+        state.siege = { settId: st.id, g, t: game.tick };
+      } else if (game.tick - state.siege.t > 1200) {
+        state.siege = null;
         const home = setts[0];
         S.opPillage(game, army, false);
         S.opMove(game, army, home.x + 2.5, home.y + 1);
-        ai.armyId = null; ai.attacking = false;
+        state.armyId = null; state.attacking = false;
         return;
       }
-    } else ai.siege = null;
+    } else state.siege = null;
     if (!army.order && !army.pillaging) {
       // arrived / target gone — pick the next known target or head home.
       // Plain moves no longer attack-move (#74), so offensives are
       // explicit siege orders on the remembered settlement.
-      const t = nearestKnown(ai, army.x, army.y, game);
+      const t = nearestKnown(state, army.x, army.y, game);
       if (t) S.opMove(game, army, t.x + 1, t.y + 1, { kind: 'settlement', id: t.id });
-      else { ai.attacking = false; ai.armyId = null; }
+      else { state.attacking = false; state.armyId = null; }
     }
     return;
   }
-  if (ai.attacking) { ai.attacking = false; return; }
+  if (state.attacking) { state.attacking = false; return; }
 
   // launch a new offensive when the rally blob is big enough
   const candidates = mine.filter(b =>
-    b.count.deploy >= diff.muster && b.id !== ai.scoutId &&
-    !(ai.expand && ai.expand.blobId === b.id));
+    b.count.deploy >= diff.muster && b.id !== state.scoutId &&
+    !(state.expand && state.expand.blobId === b.id));
   if (!candidates.length) return;
   const army = candidates[0];
-  const t = nearestKnown(ai, army.x, army.y, game);
-  if (!t) return; // scouts haven't found the player yet
+  const t = nearestKnown(state, army.x, army.y, game);
+  if (!t) return; // scouts haven't found the enemy yet
   if (!S.opMove(game, army, t.x + 1, t.y + 1, { kind: 'settlement', id: t.id }).ok) return;
-  ai.armyId = army.id;
-  ai.attacking = true;
-  ai.lastAttack = game.tick;
+  state.armyId = army.id;
+  state.attacking = true;
+  state.lastAttack = game.tick;
 
   // attach a supply chain sized to distance: reuse an idle pure-supply
   // blob if one is sitting around, else field from a garrison. Carriers
@@ -288,9 +290,9 @@ function attack(game, S, setts, mine, ai, diff) {
   if (carrier) S.opRoute(game, carrier, { kind: 'blob', id: army.id });
 }
 
-function nearestKnown(ai, x, y, game) {
+function nearestKnown(state, x, y, game) {
   let best = null, bd = Infinity;
-  for (const [id, k] of Object.entries(ai.known)) {
+  for (const [id, k] of Object.entries(state.known)) {
     const d = dist(k.x, k.y, x, y);
     if (d < bd) { bd = d; best = { id: +id, x: k.x, y: k.y }; }
   }
@@ -299,7 +301,7 @@ function nearestKnown(ai, x, y, game) {
 
 // -- defend -------------------------------------------------------------
 
-function defend(game, S, setts, mine, ai) {
+function defend(game, S, setts, mine, state) {
   const hit = setts.find(s => game.tick - s.lastHitT < 100);
   if (!hit) return;
   // divert the nearest deploy blob with some strength
@@ -311,6 +313,6 @@ function defend(game, S, setts, mine, ai) {
   }
   if (best && bd > 3) {
     S.opMove(game, best, hit.x + 1, hit.y + 1);
-    if (best.id === ai.armyId) { ai.armyId = null; ai.attacking = false; }
+    if (best.id === state.armyId) { state.armyId = null; state.attacking = false; }
   }
 }
