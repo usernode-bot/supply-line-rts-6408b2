@@ -17,9 +17,9 @@ const LINGER_MS = 6000;      // hold the final scene before restarting
 const FADE_MS = 700;         // slightly past the CSS 600 ms transition
 const ATTRACT_SCALE = 38;    // fixed zoom (px/tile) — close enough that blobs and
                              // settlements read as the subject, not map texture (#119)
-const PAN_SPEED = 1.3;       // cruise speed in tiles/s while gliding between POIs
-const VEL_SMOOTH_MS = 900;   // velocity relaxation time — heading changes become curves
-const DWELL_MS = 5000;       // hold on a POI (soft-following it if it marches) before moving on
+const PAN_SPEED = 1.3;       // the one and only camera speed (tiles/s) — never varies
+const TURN_SMOOTH_MS = 900;  // heading relaxation time — heading changes become curves
+const ARRIVE = 2;            // tiles from a POI at which it counts as visited
 const HOP_MIN = 5;           // preferred next-POI distance band (tiles) — far enough
 const HOP_MAX = 32;          // to feel like a pan, near enough to arrive within ~25 s
 const CONE_ANY = -0.17;      // min heading·dir dot for the next stop (~±100° forward cone)
@@ -44,11 +44,8 @@ let rafId = 0;
 
 // camera: tours points of interest (settlements, armies, fights)
 const view = { cx: 0, cy: 0, scale: ATTRACT_SCALE };
-const vel = { x: 0, y: 0 };  // actual camera velocity (tiles/s), smoothly steered
-let heading = null;          // unit vector of the last travel leg — survives dwells
+let heading = null;          // unit travel direction; the camera always moves along it at PAN_SPEED
 let poi = null;              // { kind: 'combat'|'army'|'sett'|'center', ref, x, y }
-let camMode = 'dwell';       // 'travel' (gliding to poi) | 'dwell' (holding on it)
-let dwellUntil = 0;          // ts when the current dwell ends
 
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -70,8 +67,7 @@ export function stopAttract() {
   if (fetchCtl) { fetchCtl.abort(); fetchCtl = null; }
   game = null; ai0 = null; ai1 = null;
   warmupTarget = 0; revealed = false; acc = 0; endedAt = 0;
-  poi = null; camMode = 'dwell'; dwellUntil = 0;
-  vel.x = 0; vel.y = 0; heading = null;
+  poi = null; heading = null;
   $('menu-canvas').classList.remove('attract-visible');
 }
 
@@ -133,9 +129,7 @@ function reveal() {
   poi = openingPoi();
   view.cx = poi.x; view.cy = poi.y; view.scale = ATTRACT_SCALE;
   clampView();
-  camMode = 'dwell';
-  dwellUntil = performance.now() + DWELL_MS;
-  vel.x = 0; vel.y = 0; heading = null;
+  heading = null;
   revealed = true;
   acc = 0;
   renderer.draw(game, view, UI, 0);
@@ -191,7 +185,7 @@ function frame(ts) {
     game.events.length = 0;
   }
 
-  updateCamera(dt, ts);
+  updateCamera(dt);
   renderer.draw(game, view, UI, Math.max(0, Math.min(1, acc / 100)));
 }
 
@@ -209,12 +203,12 @@ function restart() {
   }, FADE_MS);
 }
 
-// -- camera: close zoom, slow glide between points of interest ------------
+// -- camera: close zoom, one constant-speed glide through the POIs --------
 //
-// The camera tours the match like a spectator: glide to a settlement,
-// army or fight, hold on it for DWELL_MS (soft-following it if it
-// marches), then pick the next stop and glide again. Fights always win
-// the pick; otherwise it's a random settlement/army a medium hop away.
+// The camera tours the match like a spectator drone: it moves at exactly
+// PAN_SPEED at all times, sweeping from one settlement/army/fight to the
+// next, curving smoothly onto each new target as it passes the current
+// one. It never stops, slows down or speeds up — only the heading turns.
 
 // Everything worth looking at right now. Combat entries come from the
 // engagement links ({kind:'bb', a, b} blob ids / {kind:'bs', b, s}).
@@ -294,39 +288,43 @@ function refreshPoi() {
   poi.x = poi.ref.x; poi.y = poi.ref.y;
 }
 
-function updateCamera(dt, ts) {
-  if (!poiAlive()) { poi = nextPoi(); camMode = 'travel'; }
+function updateCamera(dt) {
   refreshPoi();
   // head for where the camera can actually center — a poi hugging the
   // map edge is unreachable past the clamp, so aim at the clamped spot
-  const t = clampPoint(poi.x, poi.y);
+  let t = clampPoint(poi.x, poi.y);
+  if (!poiAlive() || Math.hypot(t.x - view.cx, t.y - view.cy) < ARRIVE) {
+    // flew over the subject (or it died) — pick the next stop and keep going
+    poi = nextPoi();
+    t = clampPoint(poi.x, poi.y);
+  }
+  // Constant-speed steering: the camera always moves at exactly
+  // PAN_SPEED; only the heading changes, relaxing toward the target
+  // direction so every retarget is a smooth curve, never a snap, a
+  // slowdown or a stop.
   const dx = t.x - view.cx, dy = t.y - view.cy;
   const d = Math.hypot(dx, dy);
-  if (camMode === 'travel' && d < 0.3) {
-    camMode = 'dwell';
-    dwellUntil = ts + DWELL_MS;
-  } else if (camMode === 'dwell' && ts >= dwellUntil) {
-    poi = nextPoi();
-    camMode = 'travel';
+  if (d > 1e-6) {
+    if (!heading) heading = { x: dx / d, y: dy / d };
+    const k = 1 - Math.exp(-dt / TURN_SMOOTH_MS);
+    heading.x += (dx / d - heading.x) * k;
+    heading.y += (dy / d - heading.y) * k;
+    const hl = Math.hypot(heading.x, heading.y);
+    if (hl > 1e-6) { heading.x /= hl; heading.y /= hl; } else heading = { x: dx / d, y: dy / d };
   }
-  // One steering law for both modes: aim at the target at a speed that
-  // eases to a crawl on approach, and relax the real velocity toward
-  // that aim — so every retarget bends the path into a curve instead of
-  // snapping the heading, and dwells double as soft-follow of a
-  // marching subject.
-  const speed = Math.min(PAN_SPEED, d * 1.2);
-  const aimX = d > 1e-6 ? (dx / d) * speed : 0;
-  const aimY = d > 1e-6 ? (dy / d) * speed : 0;
-  const k = 1 - Math.exp(-dt / VEL_SMOOTH_MS);
-  vel.x += (aimX - vel.x) * k;
-  vel.y += (aimY - vel.y) * k;
-  view.cx += vel.x * (dt / 1000);
-  view.cy += vel.y * (dt / 1000);
-  // remember the leg's direction (only while actually moving) so the
-  // next pick after a dwell continues the flow instead of reversing
-  const sp = Math.hypot(vel.x, vel.y);
-  if (sp > PAN_SPEED * 0.4) heading = { x: vel.x / sp, y: vel.y / sp };
+  if (!heading) { clampView(); return; }
+  view.cx += heading.x * PAN_SPEED * (dt / 1000);
+  view.cy += heading.y * PAN_SPEED * (dt / 1000);
+  const px = view.cx, py = view.cy;
   clampView();
+  // an edge ate part of the step — slide along the wall at full speed
+  // instead of grinding into it at a reduced apparent rate
+  if (view.cx !== px || view.cy !== py) {
+    if (view.cx !== px) heading.x = 0;
+    if (view.cy !== py) heading.y = 0;
+    const hl = Math.hypot(heading.x, heading.y);
+    if (hl > 1e-6) { heading.x /= hl; heading.y /= hl; } else heading = null;
+  }
 }
 
 // The nearest point to (x, y) the camera center can reach under clampView.
