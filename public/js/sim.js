@@ -13,7 +13,10 @@ export const C = {
   EAT_PER_SEC: 1 / 12,     // food per unit per second
   STARVE_FRAC: 0.005,      // fraction of blob lost per tick at 0 food (5%/s — dead in ~20 s)
   K_COMBAT: 0.0035,        // casualties per enemy deploy-unit per tick
-  K_SIEGE: 0.0067,         // settlement HP per deploy-unit per tick
+  K_SIEGE: 0.134,          // settlement HP per deploy-unit per tick — ~20× the old
+                           // 0.0067 (#108): an UNGARRISONED settlement falls in
+                           // seconds (effectively ~5 HP of the old scale); while a
+                           // garrison holds, structure HP is untouchable
   SETT_HP: 100,
   SETT_COST: 5,
   SETT_BUILD_TICKS: 150,   // construction time in sim ticks: the main loop runs the
@@ -51,6 +54,16 @@ export const C = {
   SEP_SLACK: 0.03,         // minimum overlap before separation acts (damps jitter)
   MERGE_FRAC: 0.6,         // merge when centers are within this fraction of touching distance (rA + rB)
   MERGE_MIN: 0.8,          // floor on the merge trigger — tiny blobs keep the old fixed-0.8 feel
+  // -- #108 combat overhaul --
+  MELEE_RANGE: 1.2,        // blob-center-to-center engagement distance; attackers close to this
+  SIEGE_RANGE: 2.4,        // blob center to settlement footprint center — "at the walls"
+  BESIEGE_RANGE: 3.5,      // enemy war party within this of the footprint center ⇒ besieged
+  REAR_ARC: Math.PI * 7 / 12, // 105°: "behind" a locked attacker / a distinct attack direction
+  REAR_MULT: 1.5,          // full rear-attack damage multiplier (locked victims)
+  WALL_PROT: 3,            // garrisoned units take 1/3 open-field damage
+  WALL_DEF: 1.5,           // garrison return fire vs besiegers, × the open-field rate
+  FARM_FLEE_RADIUS: 4,     // a hit farmer group pulls friendly farmers within this radius home
+  CONVERT_TICKS: 100,      // 10 native seconds to arm units into the deploy role
 };
 
 export const DIFF = {
@@ -321,6 +334,8 @@ function makeBlob(game, owner, x, y, count, units) {
     food: 0,
     order: null, path: null, pathGoal: null,
     pillaging: false, working: null,
+    facing: 0,                    // radians; movement/combat facing (#108, serialized)
+    convert: null,                // pending arm-up {role:'deploy', done:tick} (#108, serialized)
     engagedT: -999, meleeT: -999, chaseId: null,
     dead: false, mergedInto: null,
     noMerge: false,               // set on split; cleared when a move order completes
@@ -408,6 +423,7 @@ function foundSettlement(game, owner, x, y, opts) {
     mode: 'farm', stockpile: 40,
     garrison: { deploy: 0, supply: 0, farm: 0 },
     trainAcc: 0, garrLoss: 0, lastHitT: -999,
+    convert: null,             // pending garrison arm-up (#108, serialized)
     tilled: [],
     flow: 0,       // EMA of net stockpile flow (food/tick) — gates training
     flowAcc: 0,    // this tick's flow components (transient)
@@ -495,6 +511,16 @@ export function opSetRole(game, b, role) {
   if (b.dead) return { err: 'Gone' };
   if (!['deploy', 'supply', 'farm'].includes(role)) return { err: 'Bad role' };
   const n = total(b);
+  if (role === 'deploy') {
+    // arming takes time (#108): the group keeps its old role — and old
+    // combat value / fragility — until the countdown completes (step()).
+    // Any other role order cancels the pending conversion.
+    if (b.count.deploy === n) { b.convert = null; return { err: 'Already in that role' }; }
+    if (b.convert && b.convert.role === 'deploy') return { ok: true }; // already arming
+    b.convert = { role: 'deploy', done: game.tick + C.CONVERT_TICKS };
+    return { ok: true };
+  }
+  b.convert = null;
   if (role === 'farm') {
     // farmers disperse into individual working units on the nearest
     // friendly settlement's fields — no cap; each earns only from the
@@ -523,12 +549,25 @@ export function opSetRole(game, b, role) {
     b.dead = true;
     return { ok: true };
   }
+  // supply — instant (disarming is easy); a carrier keeps its route
   if (b.count[role] === n) return { err: 'Already in that role' };
-  if (role !== 'supply') leaveRoute(game, b);
   b.working = null;
   for (const u of b.units) convertRole(u, role);
   recount(b);
   return { ok: true };
+}
+
+// Complete a pending arm-up (#108): every unit becomes a fighter. A
+// route carrier releases its route (cargo folds into its food meter —
+// mixed/deploy blobs can't run routes) and field hands stop working.
+function finishConvert(game, b) {
+  const role = b.convert.role;
+  b.convert = null;
+  leaveRoute(game, b);
+  b.working = null;
+  for (const u of b.units) convertRole(u, role);
+  recount(b);
+  b.food = Math.min(b.food, foodCap(b));
 }
 
 export function opSplit(game, b, takeN) {
@@ -536,6 +575,7 @@ export function opSplit(game, b, takeN) {
   if (n < 2) return { err: 'Too small to split' };
   leaveRoute(game, b);
   b.order = null; b.path = null; b.chaseId = null;
+  b.convert = null; // splitting cancels a pending arm-up (#108)
   const take = Math.max(1, Math.min(n - 1, Math.round(takeN)));
   const newCount = { deploy: 0, supply: 0, farm: 0 };
   for (const role of ['deploy', 'supply', 'farm']) {
@@ -653,7 +693,7 @@ export function opPillage(game, b, on) {
   return { ok: true };
 }
 
-export function opRoute(game, b, target) {
+export function opRoute(game, b, target, sourceId) {
   if (b.count.supply !== total(b) || total(b) === 0) {
     return { err: 'Only pure supply blobs can run routes' };
   }
@@ -667,9 +707,33 @@ export function opRoute(game, b, target) {
   }
   leaveRoute(game, b);
   b.order = null; b.path = null;
-  const res = SUP.createRoute(game, b, target, prevCargo);
+  const res = SUP.createRoute(game, b, target, prevCargo, sourceId);
   if (res.err) b.food = Math.min(foodCap(b), b.food + prevCargo);
   return res;
+}
+
+// Settlement-to-settlement supply line (#108): field this settlement's
+// garrisoned supply units as one carrier blob and put it on a route
+// pinned to THIS settlement as its source.
+export function opSupplyRoute(game, s, target) {
+  if (s.building) return { err: 'Still under construction' };
+  if (s.garrison.supply <= 0) return { err: 'No supply units garrisoned' };
+  if (!target || !target.kind || target.id == null) return { err: 'Bad target' };
+  if (target.kind === 'settlement') {
+    if (target.id === s.id) return { err: 'Route must lead away from its source' };
+    const tgt = game.settlements.find(x => x.id === target.id);
+    if (!tgt) return { err: 'No destination there' };
+    if (tgt.building) return { err: 'Still under construction' };
+    if (tgt.owner !== s.owner) return { err: 'Destination must be friendly' };
+  } else {
+    const tb = game.blobs.find(x => x.id === target.id && !x.dead);
+    if (!tb || tb.owner !== s.owner) return { err: 'No friendly target there' };
+  }
+  const r = opFieldRole(game, s, 'supply', s.garrison.supply);
+  if (r.err) return r;
+  const res = opRoute(game, r.blob, target, s.id);
+  if (res.err) return res; // carriers stay fielded beside the settlement
+  return { ok: true, blob: r.blob };
 }
 
 export function opSetMode(game, s, mode) {
@@ -683,6 +747,7 @@ export function opFieldGarrison(game, s) {
   if (s.building) return { err: 'Still under construction' };
   const g = garrisonTotal(s);
   if (g === 0) return { err: 'No garrison' };
+  s.convert = null; // fielding cancels a pending garrison arm-up (#108)
   const spot = nearestPassable(game.map, s.x + 2, s.y + 1, 4, null, new Set(settTiles(game.map, s)))
     || { x: s.x + 2, y: s.y + 1 };
   const b = makeBlob(game, s.owner, spot.x + 0.5, spot.y + 0.5, s.garrison);
@@ -695,6 +760,7 @@ export function opFieldGarrison(game, s) {
 
 export function opFieldRole(game, s, role, n) {
   if (s.building) return { err: 'Still under construction' };
+  s.convert = null; // fielding cancels a pending garrison arm-up (#108)
   const avail = s.garrison[role];
   n = Math.min(n == null ? avail : n, avail);
   if (n <= 0) return { err: 'None to field' };
@@ -727,6 +793,14 @@ export function opGarrisonRole(game, s, role) {
   if (s.building) return { err: 'Still under construction' };
   const g = garrisonTotal(s);
   if (g === 0) return { err: 'No garrison' };
+  if (role === 'deploy') {
+    // arming the garrison takes time too (#108); completes in tickSettlement
+    if (s.garrison.deploy === g) { s.convert = null; return { ok: true }; }
+    if (s.convert && s.convert.role === 'deploy') return { ok: true };
+    s.convert = { role: 'deploy', done: game.tick + C.CONVERT_TICKS };
+    return { ok: true };
+  }
+  s.convert = null;
   s.garrison = { deploy: 0, supply: 0, farm: 0 };
   s.garrison[role] = g;
   return { ok: true };
@@ -870,8 +944,13 @@ export function step(game) {
     if (b.dead) continue;
     b.prevX = b.x; b.prevY = b.y; // for render interpolation
     b.prevFood = b.food;          // for the fed-trend EMA below
+    if (b.convert && game.tick >= b.convert.done) finishConvert(game, b);
     if (b.order && b.order.type === 'route') tickCarrier(game, b);
     else tickOrder(game, b);
+    // movement facing (#108): marching groups face the way they walk;
+    // combat overrides this below (locked target / primary threat)
+    const mdx = b.x - b.prevX, mdy = b.y - b.prevY;
+    if (mdx * mdx + mdy * mdy > 1e-6) b.facing = Math.atan2(mdy, mdx);
   }
 
   tickSeparation(game);
@@ -1092,8 +1171,8 @@ function tickTargetedMove(game, b, o) {
     const seen = ownerSees(game, b.owner, t.x, t.y);
     b.chaseId = seen ? t.id : null; // drives the renderer's targeting line
     if (seen) { o.x = t.x; o.y = t.y; } // last-known position while visible
-    if (seen && dist(b.x, b.y, t.x, t.y) <= blobRadius(b) + blobRadius(t) + 0.15) {
-      b.path = null; b.pathGoal = null; // in contact — combat takes it from here
+    if (seen && dist(b.x, b.y, t.x, t.y) <= C.MELEE_RANGE) {
+      b.path = null; b.pathGoal = null; // at melee range — combat takes it from here (#108)
       return;
     }
     const stale = !b.pathGoal || dist(b.pathGoal.x, b.pathGoal.y, o.x, o.y) > 0.75;
@@ -1116,8 +1195,8 @@ function tickTargetedMove(game, b, o) {
   if (!s) { b.order = null; b.pathGoal = null; b.noMerge = false; return; }
   const c = settCenter(s);
   o.x = c.x; o.y = c.y;
-  if (dist(b.x, b.y, c.x, c.y) <= blobRadius(b) + 1.9) {
-    b.path = null; b.pathGoal = null; // in siege range — stand and fight
+  if (dist(b.x, b.y, c.x, c.y) <= C.SIEGE_RANGE) {
+    b.path = null; b.pathGoal = null; // at the walls — stand and fight (#108)
     return;
   }
   if (!b.path || !b.path.length || pathBlocked(game, b) || game.tick % 20 === 0) {
@@ -1136,76 +1215,6 @@ function targetPos(tgt, kind) {
   return kind === 'blob' ? { x: tgt.x, y: tgt.y } : settCenter(tgt);
 }
 
-// Planning-only avoid set for supply carriers (#90), modeled on
-// avoidTiles: the footprint (+1 tile) of every stationary friendly
-// blob — a light carrier would otherwise be mass-shoved around a
-// camped army forever while steering back into it. Movers clear on
-// their own, working farmers carpet the fields by design, and the
-// route's endpoints must stay approachable, so all three are skipped.
-// Soft avoidance only — ensurePath falls back to the direct path when
-// no detour exists, so friendly traffic never strands a route.
-function friendlyAvoidTiles(game, b, route) {
-  const set = new Set();
-  const { w, h } = game.map;
-  const src = SUP.routeSource(game, route);
-  const tgt = SUP.routeTarget(game, route);
-  const sc = src ? settCenter(src) : null;
-  const tc = tgt ? targetPos(tgt, route.targetKind) : null;
-  // under escalated right-of-way (#102) even moving friendlies are
-  // planned around — slow shuffling crowds otherwise stay invisible here
-  const row = b.order && b.order.rowUntil > game.tick;
-  for (const e of game.blobs) {
-    if (e.dead || e.owner !== b.owner || e.id === b.id || e.working != null) continue;
-    if (!row && e.path && e.path.length) continue; // moving — will clear on its own
-    if (route.targetKind === 'blob' && e.id === route.targetId) continue;
-    const reach = blobRadius(e) + 1;
-    const span = Math.ceil(reach);
-    const cx = Math.floor(e.x), cy = Math.floor(e.y);
-    for (let dy = -span; dy <= span; dy++) {
-      for (let dx = -span; dx <= span; dx++) {
-        const tx = cx + dx, ty = cy + dy;
-        if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
-        if (dist(tx + 0.5, ty + 0.5, e.x, e.y) > reach) continue;
-        if (sc && dist(tx + 0.5, ty + 0.5, sc.x, sc.y) <= 2.7) continue;
-        if (tc && dist(tx + 0.5, ty + 0.5, tc.x, tc.y) <= 2.5) continue;
-        set.add(ty * w + tx);
-      }
-    }
-  }
-  return set;
-}
-
-// Stall recovery (#90): a carrier bodily pinned by friendly traffic —
-// it holds a path but barely moves for 2 s — drops the path so its
-// phase replans next call with the avoid set, which by then includes
-// whoever is pinning it. Position/counter live on the order (plain
-// numbers; harmless in saves, defaults safely when absent).
-function carrierStalled(game, b, o) {
-  const moved = o.lx != null ? dist(b.x, b.y, o.lx, o.ly) : Infinity;
-  o.lx = b.x; o.ly = b.y;
-  // stall episodes expire when they stop recurring
-  if (o.stalls && game.tick - (o.stallT || 0) > 100) o.stalls = 0;
-  if (!b.path || !b.path.length) { o.stuck = 0; return; }
-  if (moved < blobSpeed(b) * C.DT * 0.2) {
-    o.stuck = (o.stuck || 0) + 1;
-    o.prog = 0;
-    if (o.stuck >= 20) {
-      o.stuck = 0; b.path = null;
-      // escalation (#102): a second stall within ~10 s grants 5 s of
-      // convoy right-of-way — separation can't push the carrier and its
-      // replans avoid even moving friendlies (tickSeparation /
-      // friendlyAvoidTiles check rowUntil)
-      o.stalls = (o.stalls || 0) + 1;
-      o.stallT = game.tick;
-      if (o.stalls >= 2) o.rowUntil = game.tick + 50;
-    }
-  } else {
-    o.stuck = 0;
-    o.prog = (o.prog || 0) + 1;
-    if (o.prog >= 20) { o.stalls = 0; o.prog = 0; }
-  }
-}
-
 // No way through to this leg's destination (revealed mountains walled it
 // off) — release the carrier instead of pacing at the wall forever. It
 // keeps as much of its cargo as it can carry as its own food.
@@ -1221,7 +1230,6 @@ function tickCarrier(game, b) {
   const route = SUP.findRoute(game, o.routeId);
   if (!route) { b.order = null; return; }
   if (pathBlocked(game, b)) b.path = null; // discovered a mountain; each phase replans below
-  carrierStalled(game, b, o); // pinned by friendly traffic? drop the path and replan around it (#90)
   const src = SUP.routeSource(game, route);
   const tgt = SUP.routeTarget(game, route);
   if (!src || !tgt) { SUP.dissolveRoute(game, route); return; }
@@ -1229,7 +1237,7 @@ function tickCarrier(game, b) {
 
   if (o.phase === 'load') {
     if (dist(b.x, b.y, src.x + 1, src.y + 1) > 2.7) {
-      if (!b.path || !b.path.length) { if (!ensurePath(game, b, src.x + 1, src.y + 1, friendlyAvoidTiles(game, b, route))) { SUP.removeCarrier(game, route, b.id); b.order = null; return; } }
+      if (!b.path || !b.path.length) { if (!ensurePath(game, b, src.x + 1, src.y + 1)) { SUP.removeCarrier(game, route, b.id); b.order = null; return; } }
       moveBlob(game, b);
       return;
     }
@@ -1247,14 +1255,27 @@ function tickCarrier(game, b) {
     }
   } else if (o.phase === 'go') {
     const tp = targetPos(tgt, route.targetKind);
+    // siege line (#108): deliveries to a besieged settlement are blocked —
+    // the caravan holds off outside and resumes when the siege breaks
+    if (route.targetKind === 'settlement' && besieged(game, tgt)
+      && dist(b.x, b.y, tp.x, tp.y) <= C.BESIEGE_RANGE + 1.5) {
+      b.path = null;
+      if (!o.holding) {
+        o.holding = true;
+        game.events.push({ owner: b.owner, msg: '🚧 Caravan waiting out a siege', x: b.x, y: b.y });
+      }
+      return;
+    }
+    o.holding = false;
     if (dist(b.x, b.y, tp.x, tp.y) <= 2.5) { o.phase = 'unload'; b.path = null; return; }
     const stale = b.pathGoal && dist(b.pathGoal.x, b.pathGoal.y, tp.x, tp.y) > 2.5;
     if (!b.path || !b.path.length || (stale && game.tick % 20 === 0)) {
-      if (!ensurePath(game, b, tp.x, tp.y, friendlyAvoidTiles(game, b, route))) { releaseBlockedCarrier(game, b, route); return; }
+      if (!ensurePath(game, b, tp.x, tp.y)) { releaseBlockedCarrier(game, b, route); return; }
     }
     moveBlob(game, b);
   } else if (o.phase === 'unload') {
     const tp = targetPos(tgt, route.targetKind);
+    if (route.targetKind === 'settlement' && besieged(game, tgt)) { o.phase = 'go'; return; }
     if (dist(b.x, b.y, tp.x, tp.y) > 3.1) { o.phase = 'go'; return; }
     const give = Math.min(o.cargo, cap / 20);
     let taken = 0;
@@ -1275,44 +1296,32 @@ function tickCarrier(game, b) {
   } else { // return
     if (dist(b.x, b.y, src.x + 1, src.y + 1) <= 2.7) { o.phase = 'load'; o.wait = 0; b.path = null; return; }
     if (!b.path || !b.path.length) {
-      if (!ensurePath(game, b, src.x + 1, src.y + 1, friendlyAvoidTiles(game, b, route))) { releaseBlockedCarrier(game, b, route); return; }
+      if (!ensurePath(game, b, src.x + 1, src.y + 1)) { releaseBlockedCarrier(game, b, route); return; }
     }
     moveBlob(game, b);
   }
 }
 
-// -- separation: soft push-apart so blobs never rest overlapped (#28).
-// Stateless per tick; runs after movement, before combat. Pairs whose
-// overlap is load-bearing are exempt: working farmers (one per tilled
-// cell by design), a carrier unloading onto its own route's target blob
-// (touching distance can exceed the 2.0 unload radius), and potentially
-// mergeable same-owner pairs (merge fires at MERGE_FRAC of touching
-// distance — a deep overlap the push would otherwise make unreachable).
-
-function sepExempt(game, a, b) {
-  if (a.working != null || b.working != null) return true;
-  const aRoute = a.order && a.order.type === 'route';
-  const bRoute = b.order && b.order.type === 'route';
-  if (aRoute) {
-    const r = SUP.findRoute(game, a.order.routeId);
-    if (r && r.targetKind === 'blob' && r.targetId === b.id) return true;
-  }
-  if (bRoute) {
-    const r = SUP.findRoute(game, b.order.routeId);
-    if (r && r.targetKind === 'blob' && r.targetId === a.id) return true;
-  }
-  return a.owner === b.owner
-    && !(a.noMerge && b.noMerge) && !aRoute && !bRoute;
-}
+// -- separation: pass-through movement (#108) — a group's circle is a
+// selection target, not a physical body. Moving groups (and route
+// carriers) walk straight through everything; enemies interpenetrate
+// freely (combat is range-based); idle same-owner overlaps are merge's
+// job; working farmers carpet the fields by design. The only pairs
+// still nudged apart are freshly split, stationary same-owner blobs
+// (both noMerge) so a split stays readable on screen.
 
 function tickSeparation(game) {
   const alive = game.blobs.filter(b => !b.dead);
   if (alive.length < 2) return;
+  const moving = b => (b.path && b.path.length > 0) || (b.order && b.order.type === 'route');
   const push = new Map(); // blob -> accumulated displacement {x, y}
   for (let i = 0; i < alive.length; i++) {
     for (let j = i + 1; j < alive.length; j++) {
       const a = alive[i], b = alive[j];
-      if (sepExempt(game, a, b)) continue;
+      if (a.owner !== b.owner) continue;
+      if (a.working != null || b.working != null) continue;
+      if (!(a.noMerge && b.noMerge)) continue; // mergeable pair — tickMerge owns the overlap
+      if (moving(a) || moving(b)) continue;
       const d = dist(a.x, a.y, b.x, b.y);
       const ov = blobRadius(a) + blobRadius(b) - d;
       if (ov <= C.SEP_SLACK) continue;
@@ -1345,14 +1354,6 @@ function tickSeparation(game) {
   };
   const max = C.SEP_PUSH * C.DT;
   for (const [b, v] of push) {
-    // final approach: an ordered blob one waypoint from its goal has
-    // right-of-way — it pushes others but is never pushed itself, so a
-    // squatter can't stall garrisoning / field walks / AI settle parties
-    if (b.order && (b.order.type === 'move' || b.order.type === 'attack')
-      && b.path && b.path.length <= 1) continue;
-    // convoy right-of-way (#102): a repeatedly-stalled carrier pushes
-    // through the crowd — it shoves others but is never shoved itself
-    if (b.order && b.order.type === 'route' && b.order.rowUntil > game.tick) continue;
     let vx = v.x, vy = v.y;
     const m = Math.sqrt(vx * vx + vy * vy);
     if (m < 1e-6) continue;
@@ -1366,50 +1367,143 @@ function tickSeparation(game) {
 
 // -- combat
 
+// Absolute angular difference, normalized to [0, π].
+function angDiff(a, b) {
+  let d = Math.abs(a - b) % (Math.PI * 2);
+  return d > Math.PI ? Math.PI * 2 - d : d;
+}
+
+// The facing a blob is committed to (#108): the bearing to its own
+// attack target while in contact. A locked blob never wheels to meet
+// flankers — anyone striking its rear arc gets the full bonus.
+// Returns { dir, excludeId } or null when not locked.
+function lockedFacing(game, b) {
+  const o = b.order;
+  if (!o || o.type !== 'move' || !o.tkind) return null;
+  if (o.tkind === 'blob') {
+    const t = game.blobs.find(x => x.id === o.tid && !x.dead);
+    if (t && dist(b.x, b.y, t.x, t.y) <= C.MELEE_RANGE + 0.2) {
+      return { dir: Math.atan2(t.y - b.y, t.x - b.x), excludeId: t.id };
+    }
+    return null;
+  }
+  const s = game.settlements.find(x => x.id === o.tid);
+  if (s) {
+    const c = settCenter(s);
+    if (dist(b.x, b.y, c.x, c.y) <= C.SIEGE_RANGE + 0.2) {
+      return { dir: Math.atan2(c.y - b.y, c.x - b.x), excludeId: null };
+    }
+  }
+  return null;
+}
+
+// A settlement is besieged while any enemy war party stands at its
+// walls (#108): farm income stops and route deliveries are blocked.
+// Derived fresh each call — never serialized.
+export function besieged(game, s) {
+  for (const b of game.blobs) {
+    if (b.dead || b.owner === s.owner || b.count.deploy === 0) continue;
+    if (dist(b.x, b.y, s.x + 1, s.y + 1) <= C.BESIEGE_RANGE) return true;
+  }
+  return false;
+}
+
 function tickCombat(game) {
   game.combat = []; // rebuilt every tick — engaged pairs re-register while in contact
   const alive = game.blobs.filter(b => !b.dead);
   const dmg = new Map();
   const hitBy = new Map(); // victim -> Map(attacker -> damage this tick); attributes caravan kills for cargo raiding
+  // pass 1: register engaged pairs at melee range (#108 — fixed
+  // close-quarters distance, not circle-touching) with base damage rates
+  const engagements = new Map(); // victim blob -> [{attacker, base, link, off}]
   for (let i = 0; i < alive.length; i++) {
     for (let j = i + 1; j < alive.length; j++) {
       const a = alive[i], b = alive[j];
       if (a.owner === b.owner) continue;
       const d = dist(a.x, a.y, b.x, b.y);
-      if (d > blobRadius(a) + blobRadius(b) + 0.2) continue;
+      if (d > C.MELEE_RANGE + 0.2) continue;
       a.engagedT = game.tick; b.engagedT = game.tick;
       a.meleeT = game.tick; b.meleeT = game.tick; // blob melee only — settlement contact never sets meleeT (#82)
-      game.combat.push({ kind: 'bb', a: a.id, b: b.id });
-      const da = b.count.deploy * fedMult(fedMeter(b)) * C.K_COMBAT;
+      const link = { kind: 'bb', a: a.id, b: b.id };
+      game.combat.push(link);
+      const da = b.count.deploy * fedMult(fedMeter(b)) * C.K_COMBAT; // damage TO a FROM b
       const db = a.count.deploy * fedMult(fedMeter(a)) * C.K_COMBAT;
-      dmg.set(a, (dmg.get(a) || 0) + da);
-      dmg.set(b, (dmg.get(b) || 0) + db);
-      if (da > 0) {
-        if (!hitBy.has(a)) hitBy.set(a, new Map());
-        hitBy.get(a).set(b, (hitBy.get(a).get(b) || 0) + da);
+      if (!engagements.has(a)) engagements.set(a, []);
+      if (!engagements.has(b)) engagements.set(b, []);
+      engagements.get(a).push({ attacker: b, base: da, link });
+      engagements.get(b).push({ attacker: a, base: db, link });
+    }
+  }
+  // pass 2: per victim, resolve facing and rear/flank multipliers (#108).
+  // Locked victims (attack order, target in contact) keep facing their
+  // target — full REAR_MULT from anyone in their rear arc. Defenders
+  // wheel to their strongest attacker; the formation splits to cover
+  // additional directions, so each off-axis attacker gets a partial
+  // bonus that grows with the number of directions covered.
+  for (const [v, atts] of engagements) {
+    const lock = lockedFacing(game, v);
+    let primary = null;
+    if (lock) {
+      v.facing = lock.dir;
+    } else {
+      for (const e of atts) {
+        if (!primary
+          || e.attacker.count.deploy > primary.attacker.count.deploy
+          || (e.attacker.count.deploy === primary.attacker.count.deploy
+            && e.attacker.id < primary.attacker.id)) primary = e;
       }
-      if (db > 0) {
-        if (!hitBy.has(b)) hitBy.set(b, new Map());
-        hitBy.get(b).set(a, (hitBy.get(b).get(a) || 0) + db);
+      v.facing = Math.atan2(primary.attacker.y - v.y, primary.attacker.x - v.x);
+    }
+    let offAxis = 0;
+    if (!lock) {
+      for (const e of atts) {
+        if (e === primary) continue;
+        const dir = Math.atan2(e.attacker.y - v.y, e.attacker.x - v.x);
+        if (angDiff(dir, v.facing) > C.REAR_ARC) { e.off = true; offAxis++; }
+      }
+    }
+    for (const e of atts) {
+      let mult = 1;
+      if (lock) {
+        if (e.attacker.id !== lock.excludeId) {
+          const dir = Math.atan2(e.attacker.y - v.y, e.attacker.x - v.x);
+          if (angDiff(dir, v.facing) > C.REAR_ARC) mult = C.REAR_MULT;
+        }
+      } else if (e.off) {
+        // split-formation partial bonus: 1.25 with one flanker (f=2),
+        // ~1.33 each with two (f=3), asymptoting toward REAR_MULT
+        const f = 1 + offAxis;
+        mult = 1 + (C.REAR_MULT - 1) * (1 - 1 / f);
+      }
+      const amt = e.base * mult;
+      dmg.set(v, (dmg.get(v) || 0) + amt);
+      if (amt > 0) {
+        if (!hitBy.has(v)) hitBy.set(v, new Map());
+        hitBy.get(v).set(e.attacker, (hitBy.get(v).get(e.attacker) || 0) + amt);
+        if (mult > 1) e.link.rear = true; // renderer highlights the bonus link
       }
     }
   }
-  // settlements
+  // settlements: garrisons fight from behind walls (#108) — they take
+  // 1/3 open-field damage and return fire at WALL_DEF×; structure HP is
+  // only attackable once the garrison is gone, and then falls fast.
   for (const s of [...game.settlements]) {
     for (const b of alive) {
       if (b.dead || b.owner === s.owner || b.count.deploy === 0) continue;
       const d = dist(b.x, b.y, s.x + 1, s.y + 1);
-      if (d > blobRadius(b) + 1.9) continue;
+      if (d > C.SIEGE_RANGE) continue;
       b.engagedT = game.tick;
       s.lastHitT = game.tick;
+      // a sieger not brawling with a blob faces the walls it's battering
+      if (!engagements.has(b)) b.facing = Math.atan2(s.y + 1 - b.y, s.x + 1 - b.x);
       game.combat.push({ kind: 'bs', b: b.id, s: s.id });
       const attack = b.count.deploy * fedMult(fedMeter(b));
       const gd = s.garrison.deploy;
       if (garrisonTotal(s) > 0) {
         // garrison defends first; fed from stockpile
         const gMult = s.stockpile > 0 ? 1.25 : 0.5;
-        dmg.set(b, (dmg.get(b) || 0) + gd * gMult * C.K_COMBAT);
-        applyGarrisonLosses(game, s, attack * C.K_COMBAT);
+        dmg.set(b, (dmg.get(b) || 0) + gd * gMult * C.WALL_DEF * C.K_COMBAT);
+        applyGarrisonLosses(game, s, attack * C.K_COMBAT / C.WALL_PROT);
       } else {
         const hpDmg = attack * C.K_SIEGE;
         s.hp -= hpDmg;
@@ -1425,19 +1519,57 @@ function tickCombat(game) {
     }
   }
   for (const [b, d] of dmg) {
-    // working farmers under fire: alert their settlement (drives the AI's
-    // defend reflex). AI field crews run for shelter; human-owned farmers
-    // stay on the fields and the owner just gets a warning (issue #52).
+    // working farmers under fire alert their settlement (drives the AI's
+    // defend reflex and its whole-crew shelter); then the damage-triggered
+    // flight (#108) sends the victim and every nearby farmer group home.
     if (b.working != null) {
       const s = game.settlements.find(x => x.id === b.working);
       if (s) {
         s.lastHitT = game.tick;
         if (autoShelters(game, s)) shelterFarmers(game, s);
-        else warnFarmers(game, s);
       }
     }
+    if (isFarmerGroup(b)) fleeFarmers(game, b);
     applyLosses(game, b, d);
     if (b.dead) raidCargo(game, b, hitBy.get(b));
+  }
+}
+
+// A "farmer group" for flight purposes (#108): a working field hand, or
+// a pure-farm blob standing around. Mixed groups with soldiers or
+// suppliers never auto-flee.
+function isFarmerGroup(b) {
+  return b.working != null || (b.count.farm > 0 && b.count.farm === total(b));
+}
+
+// Damage-triggered farmer flight (#108): the hit farmer group and every
+// friendly farmer group within FARM_FLEE_RADIUS run for the settlement
+// and garrison on arrival (tickOrder's garrison branch — opMove clears
+// `working`, so arrival folds them into the garrison). Applies to all
+// owners; the pre-damage proximity warning (#52) still fires first.
+function fleeFarmers(game, victim) {
+  let any = false;
+  for (const b of game.blobs) {
+    if (b.dead || b.owner !== victim.owner || !isFarmerGroup(b)) continue;
+    if (b !== victim && dist(b.x, b.y, victim.x, victim.y) > C.FARM_FLEE_RADIUS) continue;
+    if (b.order && b.order.flee) continue; // already running
+    let s = b.working != null ? game.settlements.find(x => x.id === b.working) : null;
+    if (!s || s.building) {
+      s = null;
+      let bd = Infinity;
+      for (const st of game.settlements) {
+        if (st.owner !== b.owner || st.building) continue;
+        const d = dist(st.x + 1, st.y + 1, b.x, b.y);
+        if (d < bd) { bd = d; s = st; }
+      }
+    }
+    if (!s) continue; // nowhere to run — stand and take the warning
+    if (opMove(game, b, s.x + 1, s.y + 1).ok) { b.order.flee = true; any = true; }
+    else b.working = null; // no path home — at least stop working
+  }
+  if (any && game.tick - game.farmAlarmT > 100) {
+    game.farmAlarmT = game.tick;
+    game.events.push({ owner: victim.owner, msg: '🌱 Your farmers ran to shelter!', x: victim.x, y: victim.y });
   }
 }
 
@@ -1875,15 +2007,29 @@ function tickSettlement(game, s) {
     s.parts = newFlowParts();
     return;
   }
+  // pending garrison arm-up (#108): converts the whole garrison to the
+  // ordered role once the countdown completes
+  if (s.convert && game.tick >= s.convert.done) {
+    const gAll = garrisonTotal(s);
+    if (gAll > 0) {
+      s.garrison = { deploy: 0, supply: 0, farm: 0 };
+      s.garrison[s.convert.role] = gAll;
+    }
+    s.convert = null;
+  }
   // farmland income accrues in every mode: the base trickle plus one
   // share per plot actually being worked — training modes pick what the
-  // surplus becomes
+  // surplus becomes. A besieged settlement (#108) earns NOTHING — the
+  // fields are cut off — so its stockpile is the siege clock.
+  const sieged = besieged(game, s);
   const y = farmYield(game, s);
-  const income = y.base + y.farmers;
+  const income = sieged ? 0 : y.base + y.farmers;
   s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + income);
   s.flowAcc = (s.flowAcc || 0) + income;
-  s.parts.base += y.base;
-  s.parts.farmers += y.farmers;
+  if (!sieged) {
+    s.parts.base += y.base;
+    s.parts.farmers += y.farmers;
+  }
   // wheat-flow fx: one particle per WHEAT_FX_FOOD earned, from a working
   // farmer (or a tilled cell) toward the settlement — same throttled
   // accumulator pattern as hpFxAcc. Transient; never serialized.
@@ -2026,6 +2172,11 @@ function tickMerge(game) {
       keep.units = keep.units.concat(gone.units).sort((u, v) => u.seed - v.seed);
       recount(keep);
       keep.food = Math.min(foodCap(keep), keep.food + gone.food);
+      // pending arm-ups (#108): survive only when both halves were
+      // converting to the same role (earlier finish wins); mixed intent drops
+      keep.convert = keep.convert && gone.convert && keep.convert.role === gone.convert.role
+        ? { role: keep.convert.role, done: Math.min(keep.convert.done, gone.convert.done) }
+        : null;
       // settle between the two groups so the absorbed half doesn't
       // teleport; skip onto-mountain / onto-settlement centroids
       if (passable(game.map, Math.floor(cx), Math.floor(cy)) && !game.settAt[tileIdx(game, cx, cy)]) {
@@ -2158,13 +2309,14 @@ export function serialize(game) {
       id: b.id, owner: b.owner, x: b.x, y: b.y,
       count: b.count, food: b.food, order: b.order,
       pillaging: b.pillaging, working: b.working, noMerge: b.noMerge,
+      facing: b.facing || 0, convert: b.convert || null,
       units: b.units.map(u => ({ role: u.role, hp: u.hp, seed: u.seed })),
     })),
     settlements: game.settlements.map(s => ({
       id: s.id, owner: s.owner, x: s.x, y: s.y, hp: s.hp,
       building: !!s.building,
       mode: s.mode, stockpile: s.stockpile, garrison: s.garrison,
-      trainAcc: s.trainAcc, flow: s.flow,
+      trainAcc: s.trainAcc, flow: s.flow, convert: s.convert || null,
     })),
     routes: game.routes.map(r => ({
       id: r.id, owner: r.owner, settlementId: r.settlementId,
@@ -2250,6 +2402,7 @@ export function deserialize(data, prev) {
         : (sd.trainTicks ? sd.trainTicks / C.TRAIN_TICKS * C.TRAIN_COST : 0),
       garrLoss: 0, lastHitT: -999, tilled: [],
       flow: sd.flow || 0, flowAcc: 0,
+      convert: sd.convert || null,
       parts: newFlowParts(), partsWin: [],
     };
     // pre-v4 saves stored a single-tile settlement; the same (x, y) now
@@ -2292,6 +2445,7 @@ export function deserialize(data, prev) {
       food: bd.food, order,
       path: null, pathGoal: null,
       pillaging: bd.pillaging, working: bd.working != null ? bd.working : null,
+      facing: bd.facing || 0, convert: bd.convert || null,
       engagedT: -999, meleeT: -999, chaseId: null, dead: false, mergedInto: null,
       noMerge: !!bd.noMerge, lastYieldT: data.tick, starving: false,
       lowFood: false, zeroSince: -1,

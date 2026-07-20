@@ -5,11 +5,18 @@
 export const CARRY_PER_UNIT = 10;      // food capacity per supply unit
 export const HEALTH_WINDOW_TICKS = 300; // 30 s rolling window
 
-export function createRoute(game, blob, target, initialCargo) {
+export function createRoute(game, blob, target, initialCargo, sourceId) {
   // target: { kind: 'blob'|'settlement', id }
   // initialCargo: food carried over from a previous route (#103).
-  // Source settlement = nearest friendly settlement to the carrier.
-  const src = nearestSettlement(game, blob.owner, blob.x, blob.y);
+  // Source settlement = explicit sourceId when given (#108 —
+  // settlement-to-settlement lines stay pinned to their chosen source),
+  // else the nearest friendly settlement to the carrier.
+  let src = null;
+  if (sourceId != null) {
+    src = game.settlements.find(s =>
+      s.id === sourceId && s.owner === blob.owner && !s.building) || null;
+  }
+  if (!src) src = nearestSettlement(game, blob.owner, blob.x, blob.y);
   if (!src) return { err: 'No friendly settlement to load from' };
   if (target.kind === 'settlement' && target.id === src.id) {
     return { err: 'Route must lead away from its source' };

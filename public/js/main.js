@@ -19,7 +19,7 @@ let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1; // displayed speed step 1–4; the sim multiplier is speed × 0.5
 let paused = false;
-let ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null };
+let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null };
 let renderer = null, input = null;
 let groups = {};                      // control groups (#69): n -> {kind:'blobs', ids} | {kind:'settlement', id}
 let lastGroupTap = { n: 0, t: 0 };    // for double-tap-to-center
@@ -594,6 +594,19 @@ function applyGuestCommand(c) {
     case 'fieldGarrison': if (st) S.opFieldGarrison(game, st); break;
     case 'fieldRole': if (st) S.opFieldRole(game, st, c.role, Math.max(1, c.n | 0)); break;
     case 'garrisonRole': if (st) S.opGarrisonRole(game, st, c.role); break;
+    case 'supplyRoute':
+      // settlement-to-settlement line (#108): validate the target is the
+      // guest's own entity, then field + route host-side in one op
+      if (st && c.target) {
+        if (c.target.kind === 'settlement') {
+          const t = game.settlements.find(s => s.id === c.target.id && s.owner === 1);
+          if (t && t.id !== st.id) S.opSupplyRoute(game, st, { kind: 'settlement', id: t.id });
+        } else if (c.target.kind === 'blob') {
+          const t = resolveBlobFor(1, c.target.id);
+          if (t) S.opSupplyRoute(game, st, { kind: 'blob', id: t.id });
+        }
+      }
+      break;
   }
 }
 
@@ -705,13 +718,17 @@ function doGarrisonRole(st, role) {
   if (isGuest()) { sendCmd({ op: 'garrisonRole', settlementId: st.id, role }); return QUEUED; }
   return S.opGarrisonRole(game, st, role);
 }
+function doSupplyRoute(st, target) {
+  if (isGuest()) { sendCmd({ op: 'supplyRoute', settlementId: st.id, target }); return QUEUED; }
+  return S.opSupplyRoute(game, st, target);
+}
 
 // ---------------------------------------------------------------- match lifecycle
 
 function startMatch(g) {
   game = g;
   resultPosted = false;
-  ui = { selected: null, pending: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null };
+  ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null };
   groups = {};
   hideOrderPopup();
   acc = 0; speed = 1; paused = false; lastSaveTick = g.tick;
@@ -1303,6 +1320,26 @@ function resolvePending(world, pointerType, screen) {
         toast('Tap a friendly army or settlement to supply');
       }
     }
+  } else if (pending === 'route-sett') {
+    // settlement-to-settlement supply line (#108): source is the
+    // settlement that armed the pending, target is the tapped entity
+    const src = game.settlements.find(s2 => s2.id === ui.routeSrc && s2.owner === me && !s2.building);
+    ui.routeSrc = null;
+    if (!src) return;
+    const hitR = Math.max(1.5, 24 / view.scale);
+    const stT = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+    if (stT && stT.owner === me && stT.id !== src.id && !stT.building) {
+      const r = doSupplyRoute(src, { kind: 'settlement', id: stT.id });
+      toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
+    } else {
+      const tgt = S.blobAt(game, world.x, world.y, hitR);
+      if (tgt && tgt.owner === me) {
+        const r = doSupplyRoute(src, { kind: 'blob', id: tgt.id });
+        toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
+      } else {
+        toast('Tap a friendly settlement or army to supply');
+      }
+    }
   }
   renderPanel(true);
 }
@@ -1314,7 +1351,9 @@ function updateHint() {
     : ui.pending === 'build'
       ? (ui.buildSite ? 'Tap ✓ to found here — or tap elsewhere to move the site'
         : 'Tap where to found the settlement…')
-      : 'Tap the army or settlement to supply…';
+      : ui.pending === 'route-sett'
+        ? 'Tap the destination settlement (or army) to supply…'
+        : 'Tap the army or settlement to supply…';
   $('hint-text').textContent = text;
   el.classList.remove('hidden');
 }
@@ -1383,6 +1422,15 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'mode': if (st) doSetMode(st, btn.dataset.mode); break;
+    case 'settroute': {
+      // settlement-to-settlement supply line (#108): arm target pick
+      if (st && st.garrison.supply > 0) {
+        ui.pending = 'route-sett';
+        ui.routeSrc = st.id;
+        updateHint();
+      }
+      break;
+    }
     case 'field': {
       if (st) {
         r = doFieldGarrison(st);
@@ -1439,6 +1487,13 @@ panel.addEventListener('input', (e) => {
     if (btn) btn.textContent = `Field ${v}`;
   }
 });
+
+// Seconds of real time until a pending arm-up (#108) completes, at the
+// current display speed (sim runs at speed × 0.5 of native ticks).
+function convertEta(convert) {
+  const ticks = Math.max(0, convert.done - game.tick);
+  return Math.max(1, Math.ceil(ticks / (10 * Math.max(0.25, speed * 0.5))));
+}
 
 function roleBtn(role, label, active, disabled) {
   return `<button data-act="role" data-role="${role}" ${disabled ? 'disabled' : ''}
@@ -1669,6 +1724,7 @@ function renderPanelInner(force) {
         <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
       </div>
       <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full ${hpBarCol}" style="width:${hpBarPct}%"></div></div>
+      ${S.besieged(game, st) ? '<div class="text-xs text-amber-400 mb-1">⏳ <b>Besieged</b> — no farm income, supply deliveries blocked. The garrison eats from the stockpile: break the siege or watch the clock.</div>' : ''}
       <div class="text-xs text-zinc-400 mb-1">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾
         · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></div>
       <div class="mb-2 pl-2 border-l border-zinc-800">${flowRows}</div>
@@ -1693,7 +1749,9 @@ function renderPanelInner(force) {
           <div class="flex gap-1 mb-2">
             ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
           </div>
+          ${st.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(st.convert)}s (fielding cancels)</div>` : ''}
           ${fieldRows}
+          ${g.supply >= 1 ? '<button data-act="settroute" class="btn w-full rounded bg-sky-800 hover:bg-sky-700 mt-1">🚚 Supply route to another settlement…</button>' : ''}
           <button data-act="field" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>
         `.replaceAll('data-act="role"', 'data-act="grole"') : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the settlement.</div>'}
       </div>`);
@@ -1742,6 +1800,7 @@ function renderPanelInner(force) {
       ${roleBtn('supply', '🚚 Supply', pureSupply, false)}
       ${roleBtn('farm', '🌱 Farmer', cnt.farm === tot, !atHome)}
     </div>
+    ${blobs.some(b => b.convert) ? `<div class="text-xs text-amber-400 mb-2">⚔️ Arming… ready in ~${convertEta(blobs.filter(b => b.convert).reduce((a, b) => (a.convert.done >= b.convert.done ? a : b)).convert)}s — units fight as their old role until then; picking another role cancels</div>` : ''}
     <div class="grid grid-cols-2 gap-1 mb-2">
       <button data-act="move" class="btn rounded bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
       <button data-act="pillage" class="btn rounded ${blobs.some(b => b.pillaging) ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 Pillage</button>
