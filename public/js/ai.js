@@ -1,7 +1,9 @@
 // Scripted opponent. Evaluated every ~2 s (20 ticks) from the main loop.
 // Uses the same sim ops as the player. Terrain is fully known to it, but
 // enemy positions must be discovered by scouting (its own vision +
-// memory) — no fog cheating on enemy entities at any difficulty.
+// memory) — no fog cheating on enemy entities at any difficulty, and no
+// economy cheating either: difficulty scales decision-making via the
+// behavior flags on S.DIFF (see sim.js), never income.
 //
 // State machine per the spec: Expand → Develop → Scout → Attack → Defend.
 // In a real match the AI drives owner 1 with state on game.ai (so it
@@ -15,14 +17,16 @@ const SETT_TARGETS = { small: 3, medium: 4, large: 5 };
 
 export function aiTick(game, S, owner = 1, state = game.ai) {
   if (game.result) return;
-  const diff = S.DIFF[game.difficulty];
+  // state.diffKey lets a harness (or attract variant) pit difficulties
+  // against each other per-owner; real matches fall through to the game's
+  const diff = S.DIFF[state.diffKey || game.difficulty];
   const mine = game.blobs.filter(b => !b.dead && b.owner === owner);
   const setts = game.settlements.filter(s => s.owner === owner);
   if (setts.length === 0) return;
 
-  updateMemory(game, S, mine, setts, owner, state);
+  updateMemory(game, S, mine, setts, owner, state, diff);
   develop(game, S, setts, mine);
-  defend(game, S, setts, mine, state);
+  defend(game, S, setts, mine, state, diff);
   expand(game, S, setts, mine, state, diff);
   scout(game, S, setts, mine, state, diff, owner);
   attack(game, S, setts, mine, state, diff);
@@ -37,15 +41,44 @@ function canSee(mine, setts, x, y, S) {
   return false;
 }
 
-function updateMemory(game, S, mine, setts, owner, state) {
+function updateMemory(game, S, mine, setts, owner, state, diff) {
   const known = state.known;
   for (const s of game.settlements) {
-    if (s.owner === 1 - owner && canSee(mine, setts, s.x, s.y, S)) known[s.id] = { x: s.x, y: s.y };
+    if (s.owner === 1 - owner && canSee(mine, setts, s.x, s.y, S)) known[s.id] = { x: s.x, y: s.y, t: game.tick };
+  }
+  // public founding rumors queued by the sim: a rumor-following commander
+  // files them as known targets; everyone else discards them (drain
+  // either way so the queue can't grow)
+  const rumors = state.rumors;
+  if (rumors && rumors.length) {
+    if (diff.rumors) {
+      for (const r of rumors) {
+        if (game.settlements.some(s => s.id === r.id)) known[r.id] = { x: r.x, y: r.y, t: r.t };
+      }
+    }
+    rumors.length = 0;
   }
   for (const id of Object.keys(known)) {
     const k = known[id];
+    if (k.t == null) k.t = game.tick; // pre-timestamp saves
     if (canSee(mine, setts, k.x, k.y, S) && !game.settlements.some(s => s.id === +id)) {
       delete known[id];
+    } else if (diff.memoryTicks && game.tick - k.t > diff.memoryTicks) {
+      delete known[id]; // a forgetful commander loses stale intel
+    }
+  }
+  // sighted enemy war parties (fog-fair: recorded only while actually
+  // visible; entries are last-seen snapshots, not live tracking)
+  if (diff.threats) {
+    const threats = state.threats || (state.threats = {});
+    for (const b of game.blobs) {
+      if (b.dead || b.owner !== 1 - owner || b.count.deploy < 5) continue;
+      if (canSee(mine, setts, b.x, b.y, S)) threats[b.id] = { x: b.x, y: b.y, size: b.count.deploy, t: game.tick };
+    }
+    for (const id of Object.keys(threats)) {
+      const k = threats[id];
+      const gone = !game.blobs.some(b => !b.dead && b.id === +id && b.count.deploy > 0);
+      if (game.tick - k.t > 600 || (gone && canSee(mine, setts, k.x, k.y, S))) delete threats[id];
     }
   }
 }
@@ -123,7 +156,7 @@ function expand(game, S, setts, mine, state, diff) {
     if (!r.ok) return;
     b = r.blob;
   }
-  const site = pickSite(game, S, setts, state);
+  const site = pickSite(game, S, setts, state, diff);
   if (!site) return;
   if (S.opMove(game, b, site.x + 1, site.y + 1).ok) {
     state.expand = { blobId: b.id, x: site.x + 1, y: site.y + 1 };
@@ -131,7 +164,7 @@ function expand(game, S, setts, mine, state, diff) {
   }
 }
 
-function pickSite(game, S, setts, state) {
+function pickSite(game, S, setts, state, diff) {
   const { w, h, orig } = game.map;
   let best = null, bestScore = -Infinity;
   for (let y = 4; y < h - 4; y += 3) {
@@ -156,7 +189,10 @@ function pickSite(game, S, setts, state) {
       }
       let danger = 0;
       for (const k of Object.values(state.known)) danger += Math.max(0, 30 - dist(k.x, k.y, x, y));
-      const score = fert - nearest * 0.15 - danger * 0.2;
+      let score = fert - nearest * 0.15 - danger * 0.2;
+      // a sloppy surveyor mis-judges land quality, so the best site
+      // doesn't reliably win (easy)
+      if (diff.siteNoise) score *= 1 - Math.random() * diff.siteNoise;
       if (score > bestScore) { bestScore = score; best = { x, y }; }
     }
   }
@@ -247,11 +283,17 @@ function attack(game, S, setts, mine, state, diff) {
         return;
       }
     } else state.siege = null;
+    // resupply (hard): a campaigning army whose caravan was lost gets a
+    // replacement before the siege withers
+    if (diff.resupply && meter < 0.85 && !hasLiveRoute(game, army)) {
+      const home = rallyPoint(game, setts);
+      attachCarriers(game, S, setts, mine, army, dist(army.x, army.y, home.x, home.y));
+    }
     if (!army.order && !army.pillaging) {
       // arrived / target gone — pick the next known target or head home.
       // Plain moves no longer attack-move (#74), so offensives are
       // explicit siege orders on the remembered settlement.
-      const t = nearestKnown(state, army.x, army.y, game);
+      const t = nearestKnown(state, army.x, army.y, game, diff);
       if (t) S.opMove(game, army, t.x + 1, t.y + 1, { kind: 'settlement', id: t.id });
       else { state.attacking = false; state.armyId = null; }
     }
@@ -265,18 +307,23 @@ function attack(game, S, setts, mine, state, diff) {
     !(state.expand && state.expand.blobId === b.id));
   if (!candidates.length) return;
   const army = candidates[0];
-  const t = nearestKnown(state, army.x, army.y, game);
+  const t = nearestKnown(state, army.x, army.y, game, diff);
   if (!t) return; // scouts haven't found the enemy yet
   if (!S.opMove(game, army, t.x + 1, t.y + 1, { kind: 'settlement', id: t.id }).ok) return;
   state.armyId = army.id;
   state.attacking = true;
   state.lastAttack = game.tick;
 
-  // attach a supply chain sized to distance: reuse an idle pure-supply
-  // blob if one is sitting around, else field from a garrison. Carriers
-  // move at deploy speed now (#80), so ~1 supply feeds 2.5 fighters at a
-  // quarter-map haul instead of the old 5.
-  const d = dist(army.x, army.y, t.x, t.y);
+  // a careless commander (easy) marches without a supply chain and has
+  // to live off pillage alone — long campaigns starve out and turn back
+  if (diff.carriers !== false) attachCarriers(game, S, setts, mine, army, dist(army.x, army.y, t.x, t.y));
+}
+
+// attach a supply chain sized to the haul distance: reuse an idle
+// pure-supply blob if one is sitting around, else field from a garrison.
+// Carriers move at deploy speed now (#80), so ~1 supply feeds 2.5
+// fighters at a quarter-map haul instead of the old 5.
+function attachCarriers(game, S, setts, mine, army, d) {
   const wanted = Math.max(2, Math.ceil((army.count.deploy / 2.5) * (d / (game.map.w * 0.25))));
   let carrier = mine.find(b =>
     !b.order && b.count.supply > 0 && b.count.deploy === 0 && b.count.farm === 0 && b.id !== army.id);
@@ -290,10 +337,25 @@ function attack(game, S, setts, mine, state, diff) {
   if (carrier) S.opRoute(game, carrier, { kind: 'blob', id: army.id });
 }
 
-function nearestKnown(state, x, y, game) {
+// any route still feeding this army with at least one surviving carrier?
+function hasLiveRoute(game, army) {
+  for (const r of game.routes) {
+    if (r.owner !== army.owner || r.targetKind !== 'blob' || r.targetId !== army.id) continue;
+    if ((r.carrierIds || []).some(id => game.blobs.some(b => !b.dead && b.id === id))) return true;
+  }
+  return false;
+}
+
+function nearestKnown(state, x, y, game, diff) {
   let best = null, bd = Infinity;
   for (const [id, k] of Object.entries(state.known)) {
-    const d = dist(k.x, k.y, x, y);
+    let d = dist(k.x, k.y, x, y);
+    // an opportunist (hard) leans toward freshly discovered settlements —
+    // typically the enemy's newest, weakest outposts
+    if (diff && diff.recencyTarget && k.t != null) {
+      const age = game.tick - k.t;
+      if (age < 1500) d -= 15 * (1 - age / 1500);
+    }
     if (d < bd) { bd = d; best = { id: +id, x: k.x, y: k.y }; }
   }
   return best;
@@ -301,7 +363,34 @@ function nearestKnown(state, x, y, game) {
 
 // -- defend -------------------------------------------------------------
 
-function defend(game, S, setts, mine, state) {
+function defend(game, S, setts, mine, state, diff) {
+  // proactive (hard): a remembered enemy war party bearing down on one of
+  // our settlements arms its garrison NOW (arming takes ~10 s, so waiting
+  // for the first hit is too late) and vectors an intercept
+  if (diff.threats && state.threats) {
+    const range = S.C.TERRITORY + S.C.AGGRO; // settlementInDanger's radius
+    for (const s of setts) {
+      if (s.building) continue;
+      let close = null;
+      for (const k of Object.values(state.threats)) {
+        if (dist(k.x, k.y, s.x + 1, s.y + 1) <= range) { close = k; break; }
+      }
+      if (!close) continue;
+      if (S.garrisonTotal(s) > 0) S.opGarrisonRole(game, s, 'deploy');
+      let best = null, bd = Infinity;
+      for (const b of mine) {
+        if (b.count.deploy < Math.max(4, close.size / 2) || b.id === state.scoutId) continue;
+        if (state.expand && state.expand.blobId === b.id) continue;
+        const d = dist(b.x, b.y, s.x + 1, s.y + 1);
+        if (d < bd) { bd = d; best = b; }
+      }
+      if (best && bd > 3) {
+        S.opMove(game, best, s.x + 1, s.y + 1);
+        if (best.id === state.armyId) { state.armyId = null; state.attacking = false; }
+      }
+      break; // one proactive response per evaluation is plenty
+    }
+  }
   const hit = setts.find(s => game.tick - s.lastHitT < 100);
   if (!hit) return;
   // divert the nearest deploy blob with some strength

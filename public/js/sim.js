@@ -70,10 +70,22 @@ export const C = {
   CONVERT_TICKS: 100,      // 10 native seconds to arm units into the deploy role
 };
 
+// Difficulty is AI *skill*, not an economy cheat: every level earns food
+// by the player's rules (no income multiplier). The three pacing dials
+// (muster / expandTicks / scoutTicks) plus behavior flags shape how well
+// the AI plays. Absent flags mean "normal behavior" — normal is the
+// empty set, so its play is identical to the pre-flag AI.
+//   carriers: false — offensives march without supply caravans (easy)
+//   memoryTicks     — forget known enemy settlements unseen this long (easy)
+//   siteNoise       — 0..1 noise on expansion-site scoring (easy)
+//   threats         — remember sighted enemy war parties, defend proactively (hard)
+//   rumors          — act on public founding rumors (hard)
+//   resupply        — replace lost supply caravans mid-campaign (hard)
+//   recencyTarget   — prefer freshly discovered (newest, weakest) targets (hard)
 export const DIFF = {
-  easy:   { income: 0.8, muster: 24, expandTicks: 950, scoutTicks: 550 },
-  normal: { income: 1.0, muster: 18, expandTicks: 750, scoutTicks: 450 },
-  hard:   { income: 1.2, muster: 13, expandTicks: 570, scoutTicks: 350 },
+  easy:   { muster: 24, expandTicks: 950, scoutTicks: 550, carriers: false, memoryTicks: 3000, siteNoise: 0.4 },
+  normal: { muster: 18, expandTicks: 750, scoutTicks: 450 },
+  hard:   { muster: 13, expandTicks: 570, scoutTicks: 350, threats: true, rumors: true, resupply: true, recencyTarget: true },
 };
 
 // ---------------------------------------------------------------- helpers
@@ -304,7 +316,7 @@ export function newGame(seedStr, sizeKey, difficulty, pvp) {
     pillageAlarmT: -999,                   // last "land stripped bare" toast (transient)
     supplyAlarmT: [-999, -999],            // last "low supplies" toast per owner (transient, #105)
     ruins: [],                             // destroyed settlements' footprints {id,x,y,owner,t} — cosmetic (#106)
-    ai: { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
+    ai: { known: {}, threats: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
   if (pvp) {
     game.pvp = true;
@@ -2072,7 +2084,6 @@ export const FERT_WORTHWHILE = (C.EAT_PER_SEC * C.DT) / C.FARM_PER_CELL;
 // Shared by the sim tick, the settlement panel and the food breakdown
 // (#76) so displayed rates can never drift from what actually accrues.
 export function farmYield(game, s) {
-  const aiMult = (!game.pvp && s.owner === 1) ? DIFF[game.difficulty].income : 1;
   const w = game.map.w;
   let fertSum = 0, worthwhileCells = 0;
   for (const i of s.tilled) {
@@ -2090,8 +2101,8 @@ export function farmYield(game, s) {
     farmers += game.map.fert[i] * C.FARM_PER_CELL;
   }
   return {
-    base: fertSum * C.FARM_PER_FARMER * C.FARM_BASE_FARMERS * aiMult,
-    farmers: farmers * aiMult,
+    base: fertSum * C.FARM_PER_FARMER * C.FARM_BASE_FARMERS,
+    farmers,
     workedCells: worked.size,
     worthwhileCells,
   };
@@ -2132,6 +2143,14 @@ function tickSettlement(game, s) {
       tillFields(game, s);
       game.events.push({ owner: s.owner, msg: `🏠 ${s.name} founded — settlement complete`, x: s.x + 1, y: s.y + 1 });
       game.events.push({ owner: 1 - s.owner, msg: `🏘️ We've heard rumors of the founding of a new settlement, ${s.name}`, x: s.x + 1, y: s.y + 1 });
+      // the rumor is public news: in solo games queue it for the AI too
+      // (only a rumor-following commander acts on it — see updateMemory
+      // in ai.js, which drains the queue on every difficulty)
+      if (!game.pvp && s.owner === 0 && game.ai) {
+        const rumors = game.ai.rumors || (game.ai.rumors = []);
+        rumors.push({ id: s.id, x: s.x, y: s.y, t: game.tick });
+        if (rumors.length > 8) rumors.shift();
+      }
     }
     // keep the panel's rolling flow window well-formed while inert
     if (!s.partsWin) s.partsWin = [];
@@ -2521,7 +2540,7 @@ export function deserialize(data, prev) {
     pillageAlarmT: -999,
     supplyAlarmT: [-999, -999],
     ruins: data.ruins || [], // older saves have none
-    ai: data.ai || { known: {}, lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
+    ai: data.ai || { known: {}, threats: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
   if (data.pvp) {
     game.pvp = true;

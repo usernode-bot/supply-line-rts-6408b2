@@ -121,6 +121,19 @@ function refreshMenu() {
   $('btn-resume').classList.toggle('hidden', !loadSaveData());
 }
 
+// Every difficulty plays by the player's economic rules — the levels
+// differ only in how well the AI commander plays (see DIFF in sim.js).
+const DIFF_HINTS = {
+  easy: 'A fair economy, but a careless commander.',
+  normal: 'The standard opponent.',
+  hard: 'Alert, well-supplied, and opportunistic — but never cheats.',
+};
+function refreshDifficultyHint() {
+  $('difficulty-hint').textContent = DIFF_HINTS[$('sel-difficulty').value] || '';
+}
+$('sel-difficulty').addEventListener('change', refreshDifficultyHint);
+refreshDifficultyHint();
+
 function startNewMatch() {
   localStorage.removeItem(SAVE_KEY);
   const seed = $('inp-seed').value.trim() || Math.random().toString(36).slice(2, 10);
