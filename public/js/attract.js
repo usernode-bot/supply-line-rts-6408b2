@@ -15,9 +15,15 @@ const FETCH_TIMEOUT = 2500;  // ms before we give up on the server snapshot
 const WARMUP_BUDGET = 8;     // ms of sim per frame during invisible warm-up
 const LINGER_MS = 6000;      // hold the final scene before restarting
 const FADE_MS = 700;         // slightly past the CSS 600 ms transition
-const ATTRACT_SCALE = 13.5;  // fixed zoom (px/tile); clampView may raise it on huge screens
-const PAN_VX = 1.0;          // drift speed in tiles/s — unequal axes so the
-const PAN_VY = 0.7;          // billiard-bounce path doesn't visibly retrace
+const ATTRACT_SCALE = 38;    // fixed zoom (px/tile) — close enough that blobs and
+                             // settlements read as the subject, not map texture (#119)
+const PAN_SPEED = 1.3;       // the one and only camera speed (tiles/s) — never varies
+const TURN_SMOOTH_MS = 900;  // heading relaxation time — heading changes become curves
+const ARRIVE = 2;            // tiles from a POI at which it counts as visited
+const HOP_MIN = 5;           // preferred next-POI distance band (tiles) — far enough
+const HOP_MAX = 32;          // to feel like a pan, near enough to arrive within ~25 s
+const CONE_ANY = -0.17;      // min heading·dir dot for the next stop (~±100° forward cone)
+const CONE_FIGHT = -0.5;     // looser cone for fights (~±120°) — worth a wider turn, never a reversal
 
 const $ = (id) => document.getElementById(id);
 
@@ -36,10 +42,10 @@ let acc = 0, lastT = 0;
 let endedAt = 0;          // performance.now() when game.result was first seen
 let rafId = 0;
 
-// camera
+// camera: tours points of interest (settlements, armies, fights)
 const view = { cx: 0, cy: 0, scale: ATTRACT_SCALE };
-const vel = { x: 0, y: 0 }; // tiles/s, set at reveal()
-let poi = null;
+let heading = null;          // unit travel direction; the camera always moves along it at PAN_SPEED
+let poi = null;              // { kind: 'combat'|'army'|'sett'|'center', ref, x, y }
 
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -61,7 +67,7 @@ export function stopAttract() {
   if (fetchCtl) { fetchCtl.abort(); fetchCtl = null; }
   game = null; ai0 = null; ai1 = null;
   warmupTarget = 0; revealed = false; acc = 0; endedAt = 0;
-  poi = null; vel.x = 0; vel.y = 0;
+  poi = null; heading = null;
   $('menu-canvas').classList.remove('attract-visible');
 }
 
@@ -120,12 +126,10 @@ function beginWarmup() {
 function reveal() {
   game.fog.fill(2);
   game.events.length = 0;
-  evalPoi();
+  poi = openingPoi();
   view.cx = poi.x; view.cy = poi.y; view.scale = ATTRACT_SCALE;
   clampView();
-  // drift toward map center so the opening leg runs long before the first bounce
-  vel.x = PAN_VX * (Math.sign(game.map.w / 2 - view.cx) || 1);
-  vel.y = PAN_VY * (Math.sign(game.map.h / 2 - view.cy) || 1);
+  heading = null;
   revealed = true;
   acc = 0;
   renderer.draw(game, view, UI, 0);
@@ -199,42 +203,140 @@ function restart() {
   }, FADE_MS);
 }
 
-// -- camera: fixed zoom, steady drift, billiard bounce at map edges -------
+// -- camera: close zoom, one constant-speed glide through the POIs --------
+//
+// The camera tours the match like a spectator drone: it moves at exactly
+// PAN_SPEED at all times, sweeping from one settlement/army/fight to the
+// next, curving smoothly onto each new target as it passes the current
+// one. It never stops, slows down or speeds up — only the heading turns.
 
-// Pick a good opening frame for reveal(): this tick's fight if there is
-// one (combat holds engagement links: {kind:'bb', a, b} blob ids /
-// {kind:'bs', b, s}), else the largest army, else map center.
-function evalPoi() {
-  if (game.combat && game.combat.length) {
-    const l = game.combat[0];
-    const ba = game.blobs.find(b => b.id === l.a && !b.dead);
-    const bb = game.blobs.find(b => b.id === l.b && !b.dead);
-    if (l.kind === 'bb' && ba && bb) { poi = { x: (ba.x + bb.x) / 2, y: (ba.y + bb.y) / 2 }; return; }
-    if (l.kind === 'bs' && bb) { poi = { x: bb.x, y: bb.y }; return; }
+// Everything worth looking at right now. Combat entries come from the
+// engagement links ({kind:'bb', a, b} blob ids / {kind:'bs', b, s}).
+function gatherPois() {
+  const out = [];
+  if (game.combat) {
+    for (const l of game.combat) {
+      const ba = game.blobs.find(b => b.id === l.a && !b.dead);
+      const bb = game.blobs.find(b => b.id === l.b && !b.dead);
+      if (l.kind === 'bb' && ba && bb) out.push({ kind: 'combat', ref: bb, x: (ba.x + bb.x) / 2, y: (ba.y + bb.y) / 2 });
+      else if (l.kind === 'bs' && bb) out.push({ kind: 'combat', ref: bb, x: bb.x, y: bb.y });
+    }
   }
-  let best = null;
   for (const b of game.blobs) {
-    if (b.dead) continue;
-    if (!best || b.count.deploy > best.count.deploy) best = b;
+    if (!b.dead && b.count.deploy >= 2) out.push({ kind: 'army', ref: b, x: b.x, y: b.y });
   }
-  poi = best ? { x: best.x, y: best.y } : { x: game.map.w / 2, y: game.map.h / 2 };
+  for (const s of game.settlements) {
+    const c = S.settCenter(s);
+    out.push({ kind: 'sett', ref: s, x: c.x, y: c.y });
+  }
+  return out;
+}
+
+// Opening frame for reveal(): a fight if one is on, else the largest army.
+function openingPoi() {
+  const pois = gatherPois();
+  const fight = pois.find(p => p.kind === 'combat');
+  if (fight) return fight;
+  let best = null;
+  for (const p of pois) {
+    if (p.kind !== 'army') continue;
+    if (!best || p.ref.count.deploy > best.ref.count.deploy) best = p;
+  }
+  return best || pois[0] || { kind: 'center', ref: null, x: game.map.w / 2, y: game.map.h / 2 };
+}
+
+// Is p roughly ahead of the tour's current heading? Always true before
+// the first leg (no heading yet to contradict).
+function ahead(p, minDot) {
+  if (!heading) return true;
+  const dx = p.x - view.cx, dy = p.y - view.cy;
+  const d = Math.hypot(dx, dy);
+  if (d < 1e-6) return true;
+  return (dx / d) * heading.x + (dy / d) * heading.y >= minDot;
+}
+
+// Next tour stop. Fights beat everything, but only inside the forward
+// cone — the camera never doubles back, even for a battle. Otherwise
+// prefer a settlement/army that keeps the drift flowing forward, in the
+// HOP_MIN..HOP_MAX band when possible, and only reverse as a last resort.
+function nextPoi() {
+  const pois = gatherPois();
+  const cur = poi && poi.ref;
+  const fights = pois.filter(p => p.kind === 'combat' && p.ref !== cur && ahead(p, CONE_FIGHT));
+  if (fights.length) return fights[(Math.random() * fights.length) | 0];
+  const others = pois.filter(p => p.kind !== 'combat' && p.ref !== cur &&
+    Math.hypot(p.x - view.cx, p.y - view.cy) >= HOP_MIN);
+  const banded = others.filter(p => Math.hypot(p.x - view.cx, p.y - view.cy) <= HOP_MAX);
+  const pick = (arr) => arr.length ? arr[(Math.random() * arr.length) | 0] : null;
+  return pick(banded.filter(p => ahead(p, CONE_ANY)))
+      || pick(others.filter(p => ahead(p, CONE_ANY)))
+      || pick(banded) || pick(others)
+      || poi || { kind: 'center', ref: null, x: game.map.w / 2, y: game.map.h / 2 };
+}
+
+// Is the current poi's subject still in the game?
+function poiAlive() {
+  if (!poi || !poi.ref) return !!poi;
+  if (poi.kind === 'sett') return game.settlements.includes(poi.ref);
+  return !poi.ref.dead;
+}
+
+// Keep a moving subject's coordinates fresh (armies march, fights drift).
+function refreshPoi() {
+  if (!poi || !poi.ref) return;
+  if (poi.kind === 'sett') return; // settlements don't move
+  poi.x = poi.ref.x; poi.y = poi.ref.y;
 }
 
 function updateCamera(dt) {
-  // an axis where the whole map fits on screen is pinned to center by
-  // clampView — kill drift there instead of flip-flopping every frame
+  refreshPoi();
+  // head for where the camera can actually center — a poi hugging the
+  // map edge is unreachable past the clamp, so aim at the clamped spot
+  let t = clampPoint(poi.x, poi.y);
+  if (!poiAlive() || Math.hypot(t.x - view.cx, t.y - view.cy) < ARRIVE) {
+    // flew over the subject (or it died) — pick the next stop and keep going
+    poi = nextPoi();
+    t = clampPoint(poi.x, poi.y);
+  }
+  // Constant-speed steering: the camera always moves at exactly
+  // PAN_SPEED; only the heading changes, relaxing toward the target
+  // direction so every retarget is a smooth curve, never a snap, a
+  // slowdown or a stop.
+  const dx = t.x - view.cx, dy = t.y - view.cy;
+  const d = Math.hypot(dx, dy);
+  if (d > 1e-6) {
+    if (!heading) heading = { x: dx / d, y: dy / d };
+    const k = 1 - Math.exp(-dt / TURN_SMOOTH_MS);
+    heading.x += (dx / d - heading.x) * k;
+    heading.y += (dy / d - heading.y) * k;
+    const hl = Math.hypot(heading.x, heading.y);
+    if (hl > 1e-6) { heading.x /= hl; heading.y /= hl; } else heading = { x: dx / d, y: dy / d };
+  }
+  if (!heading) { clampView(); return; }
+  view.cx += heading.x * PAN_SPEED * (dt / 1000);
+  view.cy += heading.y * PAN_SPEED * (dt / 1000);
+  const px = view.cx, py = view.cy;
+  clampView();
+  // an edge ate part of the step — slide along the wall at full speed
+  // instead of grinding into it at a reduced apparent rate
+  if (view.cx !== px || view.cy !== py) {
+    if (view.cx !== px) heading.x = 0;
+    if (view.cy !== py) heading.y = 0;
+    const hl = Math.hypot(heading.x, heading.y);
+    if (hl > 1e-6) { heading.x /= hl; heading.y /= hl; } else heading = null;
+  }
+}
+
+// The nearest point to (x, y) the camera center can reach under clampView.
+function clampPoint(x, y) {
   const c = $('menu-canvas');
   const w = c.clientWidth || window.innerWidth;
   const h = c.clientHeight || window.innerHeight;
-  if (game.map.w <= w / view.scale) vel.x = 0;
-  if (game.map.h <= h / view.scale) vel.y = 0;
-  view.cx += vel.x * (dt / 1000);
-  view.cy += vel.y * (dt / 1000);
-  const px = view.cx, py = view.cy;
-  clampView();
-  // clamping moved us: we hit an edge — reflect that axis
-  if (view.cx !== px) vel.x = -vel.x;
-  if (view.cy !== py) vel.y = -vel.y;
+  const halfW = w / view.scale / 2, halfH = h / view.scale / 2;
+  return {
+    x: game.map.w > halfW * 2 ? Math.max(halfW, Math.min(game.map.w - halfW, x)) : game.map.w / 2,
+    y: game.map.h > halfH * 2 ? Math.max(halfH, Math.min(game.map.h - halfH, y)) : game.map.h / 2,
+  };
 }
 
 // Like input.js clampView, but stricter: scenery should never show
@@ -246,11 +348,6 @@ function clampView() {
   const h = c.clientHeight || window.innerHeight;
   const minScale = Math.max(3, Math.min(w / game.map.w, h / game.map.h) * 0.9);
   view.scale = Math.max(minScale, Math.min(96, view.scale));
-  const halfW = w / view.scale / 2, halfH = h / view.scale / 2;
-  view.cx = game.map.w > halfW * 2
-    ? Math.max(halfW, Math.min(game.map.w - halfW, view.cx))
-    : game.map.w / 2;
-  view.cy = game.map.h > halfH * 2
-    ? Math.max(halfH, Math.min(game.map.h - halfH, view.cy))
-    : game.map.h / 2;
+  const p = clampPoint(view.cx, view.cy);
+  view.cx = p.x; view.cy = p.y;
 }
