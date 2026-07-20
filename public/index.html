@@ -74,6 +74,10 @@
     #minimap { touch-action: none; }
     .btn { min-height: 44px; min-width: 44px; }
     .btn-sm { min-height: 40px; }
+    /* attract-mode backdrop: hidden while the AI match warms up / loads,
+       fades in once the first mid-game frame is drawn */
+    #menu-canvas { opacity: 0; transition: opacity 0.6s ease; }
+    #menu-canvas.attract-visible { opacity: 1; }
   </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 h-full overflow-hidden">
@@ -139,8 +143,14 @@
   </div>
 
   <!-- ============ Main menu ============ -->
-  <div id="main-menu" class="fixed inset-0 overflow-y-auto bg-zinc-950">
-    <div class="max-w-md mx-auto px-4 py-8 flex flex-col gap-5">
+  <div id="main-menu" class="fixed inset-0 overflow-y-auto">
+    <!-- attract-mode backdrop: a live AI-vs-AI match (attract.js) behind a
+         dark scrim. Both layers ignore the pointer; the body's own
+         bg-zinc-950 shows through while the canvas is still faded out. -->
+    <canvas id="menu-canvas" class="fixed inset-0 w-full h-full pointer-events-none"></canvas>
+    <div class="fixed inset-0 pointer-events-none bg-zinc-950/65"
+         style="background-image: radial-gradient(ellipse at center, rgba(9,9,11,0) 0%, rgba(9,9,11,0.5) 100%);"></div>
+    <div class="relative max-w-md mx-auto px-4 py-8 flex flex-col gap-5">
       <div class="text-center">
         <div class="text-5xl mb-2">🌾</div>
         <h1 class="text-3xl font-bold tracking-tight">Supply Line</h1>

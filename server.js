@@ -3,6 +3,8 @@ const path = require('path');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 
+const attractPool = require('./attract-pool');
+
 const app = express();
 const port = process.env.PORT || 3000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -12,7 +14,7 @@ const IS_STAGING = process.env.USERNODE_ENV === 'staging';
 // Paths that stay open without authentication. Add a path here (and add it
 // with `app.get`/`app.post` below) if you deliberately want it public.
 // Everything else requires a valid platform-issued JWT.
-const PUBLIC_API_PATHS = new Set(['/health']);
+const PUBLIC_API_PATHS = new Set(['/health', '/api/attract-snapshot']);
 
 // PvP snapshots are full serialized game states (~40-80 KB on a medium
 // map), well past express.json's 100 kb default.
@@ -46,6 +48,17 @@ app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 // the auth-gated catch-all and surface a 401 in the console on every
 // fresh load.
 app.get('/favicon.ico', (_req, res) => res.status(204).end());
+
+// Attract-mode background (title screen): hand out a pre-simulated
+// AI-vs-AI mid-game snapshot from the in-memory pool. Public — the
+// payload is synthetic scenery with no user data, and the menu should
+// get its backdrop even when the token is missing/expired. A cold pool
+// answers 503 and the client falls back to simulating locally.
+app.get('/api/attract-snapshot', (_req, res) => {
+  const json = attractPool.take();
+  if (!json) return res.status(503).json({ error: 'No snapshot ready yet' });
+  res.type('application/json').send(json);
+});
 
 const RESULTS = new Set(['win', 'loss', 'surrender']);
 const DIFFICULTIES = new Set(['easy', 'normal', 'hard', 'pvp']);
@@ -525,6 +538,7 @@ async function start() {
   }
 
   app.listen(port, () => console.log(`Listening on :${port}`));
+  attractPool.warmUp(); // fill the attract-snapshot pool in the background
 }
 
 start().catch(err => { console.error(err); process.exit(1); });

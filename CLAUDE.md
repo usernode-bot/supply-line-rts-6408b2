@@ -36,8 +36,11 @@ is fixed at 1×, so quick multiplayer games are best played on the
 smaller map sizes. Core loop:
 found settlements on fertile land, feed armies via pillage or supply
 routes, destroy all enemy settlements to win. The full game sim runs
-client-side (ES modules under `public/js/`); the server only gates auth
-and records match history in the `matches` table.
+client-side (ES modules under `public/js/`); the server gates auth,
+records match history in the `matches` table, and pre-simulates a small
+in-memory pool of AI-vs-AI mid-game snapshots (`attract-pool.js`, served
+at `GET /api/attract-snapshot`) for the title screen's attract-mode
+backdrop — it runs the same sim/AI modules via dynamic `import()`.
 
 ## App-specific conventions
 

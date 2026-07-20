@@ -6,6 +6,7 @@ import * as SUP from './supply.js';
 import { aiTick } from './ai.js';
 import { createRenderer } from './render.js';
 import { createInput } from './input.js';
+import { startAttract, stopAttract } from './attract.js';
 import { dist, fertTier, FERT_TIERS } from './mapgen.js';
 
 const $ = (id) => document.getElementById(id);
@@ -726,6 +727,7 @@ function doSupplyRoute(st, target) {
 // ---------------------------------------------------------------- match lifecycle
 
 function startMatch(g) {
+  stopAttract(); // the menu backdrop must cost nothing while playing
   game = g;
   resultPosted = false;
   ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null };
@@ -773,6 +775,7 @@ function backToMenu() {
   refreshMenu();
   loadHistory();
   startMenuPolling();
+  startAttract();
 }
 
 function saveGame() {
@@ -1880,3 +1883,4 @@ requestAnimationFrame(frame);
 refreshMenu();
 loadHistory();
 startMenuPolling();
+startAttract();
