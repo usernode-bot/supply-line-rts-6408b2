@@ -15,13 +15,13 @@ const FETCH_TIMEOUT = 2500;  // ms before we give up on the server snapshot
 const WARMUP_BUDGET = 8;     // ms of sim per frame during invisible warm-up
 const LINGER_MS = 6000;      // hold the final scene before restarting
 const FADE_MS = 700;         // slightly past the CSS 600 ms transition
-const ATTRACT_SCALE = 32;    // fixed zoom (px/tile) — close enough that blobs and
+const ATTRACT_SCALE = 38;    // fixed zoom (px/tile) — close enough that blobs and
                              // settlements read as the subject, not map texture (#119)
-const PAN_SPEED = 2.6;       // cruise speed in tiles/s while gliding between POIs
+const PAN_SPEED = 1.3;       // cruise speed in tiles/s while gliding between POIs
 const PAN_RAMP_MS = 1400;    // ease-in time from a standstill to cruise speed
 const DWELL_MS = 5000;       // hold on a POI (soft-following it if it marches) before moving on
-const HOP_MIN = 6;           // preferred next-POI distance band (tiles) — far enough
-const HOP_MAX = 60;          // to feel like a pan, near enough to arrive within ~20 s
+const HOP_MIN = 5;           // preferred next-POI distance band (tiles) — far enough
+const HOP_MAX = 32;          // to feel like a pan, near enough to arrive within ~25 s
 
 const $ = (id) => document.getElementById(id);
 
