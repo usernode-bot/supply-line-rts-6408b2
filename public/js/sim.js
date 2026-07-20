@@ -42,7 +42,11 @@ export const C = {
   PILLAGE_INTAKE_MULT: 3,  // pillage intake cap per tick, × the army's eating rate
   PILLAGE_DRAWS: 3,        // max tiles drawn from (degraded) per pillage tick (#72)
   FERT_LEVEL: 0.25,        // one visible fertility level (of four above zero)
-  FERT_REGEN: 0.01 / 600,  // fertility per tick (0.01/min)
+  FERT_REGEN: 0.02 / 600,  // passive fertility regen per tick (0.02/min — unworked land)
+  FERT_REGEN_WORKED: 0.25 / 225, // regen per tick while a farmer works the plot: one
+                           // level per 22.5 sim-s = 45 s at 1× speed (#110) — a farmed
+                           // ring bounces back from a raid in a few minutes, but
+                           // repeated raids keep knocking it down faster than it heals
   TERRITORY: 5,            // settlement territory radius: feeds friendly blobs, farmer reach, drawn ring
   UNIT_HP: 100,            // individual unit health (deploy / supply)
   UNIT_HP_FARM: 10,        // farmers are 1/10th as tough
@@ -1912,10 +1916,35 @@ function tickHeal(game, b) {
   }
 }
 
+// Tilled cells with an arrived, orderless farmer standing on them —
+// the same "worked plot" definition farmYield pays income for.
+export function workedPlots(game) {
+  const worked = new Set();
+  if (!game.blobs.length) return worked;
+  const w = game.map.w;
+  const tilledBySett = new Map();
+  for (const s of game.settlements) tilledBySett.set(s.id, new Set(s.tilled));
+  for (const b of game.blobs) {
+    if (b.dead || b.order) continue;
+    const tilled = tilledBySett.get(b.working);
+    if (!tilled) continue;
+    const i = Math.floor(b.y) * w + Math.floor(b.x);
+    if (tilled.has(i)) worked.add(i);
+  }
+  return worked;
+}
+
 function tickRegen(game) {
+  if (!game.pillaged.size) return;
+  // Working the land restores it far faster than leaving it fallow (#110):
+  // a tended plot regains a full fertility level every 45 s at 1×, so a
+  // farmed ring shrugs off a passing raid in minutes — unless the raids
+  // keep coming.
+  const worked = workedPlots(game);
   for (const i of game.pillaged) {
     const orig = game.map.orig[i];
-    game.map.fert[i] = Math.min(orig, game.map.fert[i] + C.FERT_REGEN * 10);
+    const rate = worked.has(i) ? C.FERT_REGEN_WORKED : C.FERT_REGEN;
+    game.map.fert[i] = Math.min(orig, game.map.fert[i] + rate * 10);
     game.dirty.add(i);
     if (game.map.fert[i] >= orig - 0.0001) game.pillaged.delete(i);
   }

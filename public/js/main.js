@@ -1620,7 +1620,7 @@ function renderPanelInner(force) {
         </div>
         <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-emerald-500" style="width:${tier * 25}%"></div></div>
         ${tb ? `<div class="text-xs ${tb.owner === me ? 'text-amber-300' : 'text-red-400'} mb-1">🌾 ${tb.owner === me ? 'Farmland of your settlement' : 'Enemy farmland'}</div>` : ''}
-        ${game.pillaged.has(i) ? '<div class="text-xs text-orange-400">🔥 Scorched — recovering very slowly</div>' : ''}`);
+        ${game.pillaged.has(i) ? `<div class="text-xs text-orange-400">🔥 Scorched — ${S.workedPlots(game).has(i) ? 'a farmer is restoring it fast' : 'recovers slowly; a farmer working it restores it much faster'}</div>` : ''}`);
     }
     return;
   }
@@ -1742,7 +1742,7 @@ function renderPanelInner(force) {
           <button data-act="recall" id="recall-btn" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Recall ${rc}</button>
         </div>` : wc === 1 ? '<div class="mt-1 text-right"><button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall 1</button></div>' : ''}
       </div>
-      <div class="text-xs text-zinc-500 mt-1">Each worked plot pays its own fertility — farmers claim the lushest free plot first, and two farmers on one plot don't double it. Unworked farmland only yields a small built-in base worth ${S.C.FARM_BASE_FARMERS} farmers. Plots poorer than Sparse aren't worth manning; farm growth stops once every worthwhile plot is worked. Sheltered, garrisoned or still-walking farmers earn nothing yet.</div>
+      <div class="text-xs text-zinc-500 mt-1">Each worked plot pays its own fertility — farmers claim the lushest free plot first, and two farmers on one plot don't double it. Unworked farmland only yields a small built-in base worth ${S.C.FARM_BASE_FARMERS} farmers. Plots poorer than Sparse aren't worth manning; farm growth stops once every worthwhile plot is worked. Sheltered, garrisoned or still-walking farmers earn nothing yet. Worked plots also heal scorched land fast — about one fertility level per 45 s.</div>
       <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}</div>
         ${gTot > 0 ? `
