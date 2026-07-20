@@ -224,14 +224,22 @@ function farmerGate(game, s) {
 // and walk to the chosen plot. The move order keeps `working` set, so
 // safety/selection behave as for any field hand; income starts only on
 // arrival (see farmYield).
-function spawnWorkingFarmer(game, s, unit, origin) {
+function spawnWorkingFarmer(game, s, unit, origin, spot) {
   const o = origin || farmerGate(game, s);
   const b = makeBlob(game, s.owner, o.x, o.y, null, [unit || newUnit('farm')]);
   b.working = s.id;
-  const spot = farmerSpot(game, s);
-  if (dist(b.x, b.y, spot.x, spot.y) > 0.05) {
-    b.order = { type: 'move', x: spot.x, y: spot.y };
-    if (!ensurePath(game, b, spot.x, spot.y)) b.order = null;
+  let dest = spot || farmerSpot(game, s);
+  if (dist(b.x, b.y, dest.x, dest.y) > 0.05) {
+    b.order = { type: 'move', x: dest.x, y: dest.y };
+    if (!ensurePath(game, b, dest.x, dest.y)) {
+      // an explicitly chosen plot that can't be reached falls back to
+      // the farm's own pick (#111); the default pick just stays put
+      if (spot) {
+        dest = farmerSpot(game, s);
+        b.order = { type: 'move', x: dest.x, y: dest.y };
+        if (!ensurePath(game, b, dest.x, dest.y)) b.order = null;
+      } else b.order = null;
+    }
   }
   return b;
 }
@@ -486,8 +494,63 @@ function destroySettlement(game, s, why) {
 // besieging settlements until destroyed). Moving never touches the
 // pillaging stance — pillage is a persistent toggle (#63) and armies
 // forage on the march (#66).
+// Field assignment (#111): a pure-farm blob ordered onto a friendly
+// settlement's tilled farmland goes to work that plot instead of walking
+// blind (and getting folded into the garrison on arrival — the absorb
+// radius in tickOrder covers most of the inner farmland ring). Returns
+// an op result when the order was taken as a field assignment, or null
+// to fall through to a plain move. Flee/shelter/recall moves all target
+// the settlement center — a footprint tile, never tilled — so they keep
+// garrisoning as before.
+function fieldAssign(game, b, x, y) {
+  const tx = Math.floor(x), ty = Math.floor(y);
+  if (tx < 0 || ty < 0 || tx >= game.map.w || ty >= game.map.h) return null;
+  const sid = game.tilledBy[ty * game.map.w + tx];
+  if (!sid) return null;
+  const s = game.settlements.find(st => st.id === sid);
+  if (!s || s.owner !== b.owner || s.building) return null;
+  const n = total(b);
+  if (n === 0 || b.count.farm !== n) return null;
+  b.convert = null; // field work cancels a pending arm-up, like opSetRole
+  leaveRoute(game, b);
+  b.chaseId = null;
+  b.pillaging = false; // a farmer can't till and burn at once
+  if (n === 1) {
+    // a lone hand (including one already working) just re-plots
+    b.working = s.id;
+    b.order = null; b.path = null; b.pathGoal = null;
+    if (dist(b.x, b.y, x, y) > 0.05) {
+      b.order = { type: 'move', x, y };
+      if (!ensurePath(game, b, x, y)) {
+        const spot = farmerSpot(game, s);
+        b.order = { type: 'move', x: spot.x, y: spot.y };
+        if (!ensurePath(game, b, spot.x, spot.y)) b.order = null;
+      }
+    }
+    return { ok: true, fielded: 1 };
+  }
+  // several hands disperse into individual field workers: the first
+  // claims the clicked plot, the rest spread out as usual
+  const foodShare = b.food / n;
+  let first = true;
+  while (b.units.length > 0) {
+    const u = b.units.shift();
+    const f = spawnWorkingFarmer(game, s, u, { x: b.x, y: b.y }, first ? { x, y } : null);
+    first = false;
+    f.food = Math.min(foodCap(f), foodShare);
+    b.food = Math.max(0, b.food - foodShare);
+  }
+  recount(b);
+  b.dead = true;
+  return { ok: true, fielded: n };
+}
+
 export function opMove(game, b, x, y, target) {
   if (b.dead) return { err: 'Gone' };
+  if (!(target && target.kind && target.id != null)) {
+    const fa = fieldAssign(game, b, x, y);
+    if (fa) return fa;
+  }
   leaveRoute(game, b);
   b.working = null;
   const o = { type: 'move', x, y };
