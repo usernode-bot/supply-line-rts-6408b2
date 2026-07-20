@@ -451,6 +451,7 @@ function beginPvp(role, lobbyId, opponent, g, lastCmdId) {
     lastCmdId: lastCmdId || 0, pollN: 0, outQueue: [], guestEvents: [],
     lastSnapTick: -1, oppSeen: null, ended: false, busy: false,
     finalSnapSent: false, noSnapPolls: 0,
+    pending: [], kick: null, pushT: null,
   };
   me = role === 'host' ? 0 : 1;
   if (g) {
@@ -473,11 +474,16 @@ function startPvpGuest(lobbyId, hostName) {
 
 function stopMpTimers() {
   if (mp && mp.timer) { clearInterval(mp.timer); mp.timer = null; }
+  if (mp && mp.kick) { clearTimeout(mp.kick); mp.kick = null; }
+  if (mp && mp.pushT) { clearTimeout(mp.pushT); mp.pushT = null; }
 }
 
 function buildSnapshot() {
   const snap = S.serialize(game);
   snap.netEvents = mp.guestEvents.splice(0);
+  // ack watermark: the guest drops pending commands the host had already
+  // applied when this snapshot was built, and replays the rest
+  snap.appliedCmdId = mp.lastCmdId;
   return snap;
 }
 
@@ -487,8 +493,7 @@ async function hostSync(force) {
   try {
     mp.pollN++;
     const body = { commandsAfter: mp.lastCmdId, tick: game ? game.tick : 0 };
-    const wantSnap = force || mp.pollN % 2 === 0 || (game && game.result && !mp.finalSnapSent);
-    if (wantSnap && game) {
+    if (game) {
       body.snapshot = buildSnapshot();
       if (game.result) mp.finalSnapSent = true;
     }
@@ -497,7 +502,12 @@ async function hostSync(force) {
     if (r.guest_username && mp.opponent === '…') { mp.opponent = r.guest_username; updateOppLabel(); }
     for (const row of r.commands || []) {
       mp.lastCmdId = Math.max(mp.lastCmdId, row.id);
-      try { applyGuestCommand(row.payload); } catch { }
+      try { applyCommand(game, row.payload); } catch { }
+    }
+    // push a snapshot reflecting the just-applied guest orders right away
+    // instead of on the next timer tick
+    if ((r.commands || []).length && !mp.ended && !mp.pushT) {
+      mp.pushT = setTimeout(() => { if (mp) { mp.pushT = null; hostSync(true); } }, 100);
     }
     mp.oppSeen = r.opponentSeenAgoMs;
     if (r.status === 'finished' && !mp.ended) finishFromServer(r);
@@ -510,8 +520,12 @@ async function guestSync() {
   mp.busy = true;
   const batch = mp.outQueue.splice(0, 50);
   try {
-    const r = await api(`/api/lobbies/${mp.lobbyId}/sync`, { haveTick: mp.lastSnapTick, commands: batch });
+    const r = await api(`/api/lobbies/${mp.lobbyId}/sync`, { haveTick: mp.lastSnapTick, commands: batch.map(e => e.cmd) });
     if (!mp) return;
+    // label the sent entries with their server ids so snapshot acks can
+    // retire them from the pending (replay) list
+    const ids = r.command_ids || [];
+    for (let i = 0; i < batch.length && i < ids.length; i++) batch[i].dbId = ids[i];
     if (r.snapshot) {
       mp.lastSnapTick = r.snapshot_tick || (r.snapshot.tick | 0);
       mp.noSnapPolls = 0;
@@ -543,35 +557,48 @@ function applySnapshot(snap) {
     const g = S.deserialize(snap, game);
     S.setViewer(g, 1);
     game = g;
-    // dead-reckon back toward where we were rendering (bounded catch-up)
-    let ahead = Math.min(25, Math.max(0, prevTick - g.tick));
-    while (ahead-- > 0 && !g.result) S.step(g);
+    // dead-reckon back toward where we were rendering (bounded catch-up):
+    // a few ticks now, the rest credited to the frame accumulator so the
+    // frame loop absorbs them instead of hitching here
+    const ahead = Math.min(25, Math.max(0, prevTick - g.tick));
+    let now = Math.min(5, ahead);
+    while (now-- > 0 && !g.result) S.step(g);
+    acc += Math.max(0, ahead - 5) * 100;
+  }
+  if (mp) {
+    // retire pending commands the host had applied before this snapshot,
+    // then replay the rest so optimistic orders don't visually revert
+    const ack = snap.appliedCmdId;
+    mp.pending = mp.pending.filter(e => e.dbId == null || (ack != null && e.dbId > ack));
+    for (const e of mp.pending) { try { applyCommand(game, e.cmd); } catch { } }
   }
   for (const ev of snap.netEvents || []) toast(ev.msg);
 }
 
-// Host-side application of the guest's relayed orders. Every entity id is
-// re-resolved against authoritative state and must belong to owner 1.
-function resolveBlobFor(owner, id) {
+// Application of the guest's relayed orders — used by the host against
+// authoritative state, and by the guest to replay unacked orders onto a
+// fresh snapshot. Every entity id is re-resolved against `g` and must
+// belong to owner 1.
+function resolveBlobIn(g, owner, id) {
   let cur = id, hops = 0;
   while (hops++ < 10) {
-    const b = game.blobs.find(x => x.id === cur && !x.dead);
+    const b = g.blobs.find(x => x.id === cur && !x.dead);
     if (b) return b.owner === owner ? b : null;
-    if (game.mergeLog[cur] != null) cur = game.mergeLog[cur];
+    if (g.mergeLog[cur] != null) cur = g.mergeLog[cur];
     else return null;
   }
   return null;
 }
 
-function applyGuestCommand(c) {
-  if (!game || game.result || !c || typeof c !== 'object') return;
-  const b = c.blobId != null ? resolveBlobFor(1, c.blobId) : null;
+function applyCommand(g, c) {
+  if (!g || g.result || !c || typeof c !== 'object') return;
+  const b = c.blobId != null ? resolveBlobIn(g, 1, c.blobId) : null;
   const st = c.settlementId != null
-    ? game.settlements.find(s => s.id === c.settlementId && s.owner === 1) : null;
+    ? g.settlements.find(s => s.id === c.settlementId && s.owner === 1) : null;
   switch (c.op) {
     case 'surrender':
-      game.result = 'p0-win';
-      game.resultReason = 'surrender';
+      g.result = 'p0-win';
+      g.resultReason = 'surrender';
       break;
     case 'move': {
       if (!b) break;
@@ -579,45 +606,45 @@ function applyGuestCommand(c) {
       // against authoritative state; anything invalid degrades to a tile move
       let target = null;
       if (c.target && c.target.kind === 'blob') {
-        const t = resolveBlobFor(0, c.target.id);
+        const t = resolveBlobIn(g, 0, c.target.id);
         if (t) target = { kind: 'blob', id: t.id };
       } else if (c.target && c.target.kind === 'settlement') {
-        const t = game.settlements.find(s => s.id === c.target.id && s.owner === 0);
+        const t = g.settlements.find(s => s.id === c.target.id && s.owner === 0);
         if (t) target = { kind: 'settlement', id: t.id };
       }
-      S.opMove(game, b, +c.x || 0, +c.y || 0, target);
+      S.opMove(g, b, +c.x || 0, +c.y || 0, target);
       break;
     }
-    case 'setRole': if (b) S.opSetRole(game, b, c.role); break;
-    case 'split': if (b) S.opSplit(game, b, c.take | 0); break;
-    case 'build': if (b) S.opBuild(game, b); break;
-    case 'buildAt': if (b) S.opBuildAt(game, b, +c.x || 0, +c.y || 0); break;
-    case 'pillage': if (b) S.opPillage(game, b, !!c.on); break;
+    case 'setRole': if (b) S.opSetRole(g, b, c.role); break;
+    case 'split': if (b) S.opSplit(g, b, c.take | 0); break;
+    case 'build': if (b) S.opBuild(g, b); break;
+    case 'buildAt': if (b) S.opBuildAt(g, b, +c.x || 0, +c.y || 0); break;
+    case 'pillage': if (b) S.opPillage(g, b, !!c.on); break;
     case 'route':
       if (b && c.target) {
         if (c.target.kind === 'blob') {
-          const t = resolveBlobFor(1, c.target.id);
-          if (t && t.id !== b.id) S.opRoute(game, b, { kind: 'blob', id: t.id });
+          const t = resolveBlobIn(g, 1, c.target.id);
+          if (t && t.id !== b.id) S.opRoute(g, b, { kind: 'blob', id: t.id });
         } else if (c.target.kind === 'settlement') {
-          const t = game.settlements.find(s => s.id === c.target.id && s.owner === 1);
-          if (t) S.opRoute(game, b, { kind: 'settlement', id: t.id });
+          const t = g.settlements.find(s => s.id === c.target.id && s.owner === 1);
+          if (t) S.opRoute(g, b, { kind: 'settlement', id: t.id });
         }
       }
       break;
-    case 'setMode': if (st) S.opSetMode(game, st, c.mode); break;
-    case 'fieldGarrison': if (st) S.opFieldGarrison(game, st); break;
-    case 'fieldRole': if (st) S.opFieldRole(game, st, c.role, Math.max(1, c.n | 0)); break;
-    case 'garrisonRole': if (st) S.opGarrisonRole(game, st, c.role); break;
+    case 'setMode': if (st) S.opSetMode(g, st, c.mode); break;
+    case 'fieldGarrison': if (st) S.opFieldGarrison(g, st); break;
+    case 'fieldRole': if (st) S.opFieldRole(g, st, c.role, Math.max(1, c.n | 0)); break;
+    case 'garrisonRole': if (st) S.opGarrisonRole(g, st, c.role); break;
     case 'supplyRoute':
       // settlement-to-settlement line (#108): validate the target is the
       // guest's own entity, then field + route host-side in one op
       if (st && c.target) {
         if (c.target.kind === 'settlement') {
-          const t = game.settlements.find(s => s.id === c.target.id && s.owner === 1);
-          if (t && t.id !== st.id) S.opSupplyRoute(game, st, { kind: 'settlement', id: t.id });
+          const t = g.settlements.find(s => s.id === c.target.id && s.owner === 1);
+          if (t && t.id !== st.id) S.opSupplyRoute(g, st, { kind: 'settlement', id: t.id });
         } else if (c.target.kind === 'blob') {
-          const t = resolveBlobFor(1, c.target.id);
-          if (t) S.opSupplyRoute(game, st, { kind: 'blob', id: t.id });
+          const t = resolveBlobIn(g, 1, c.target.id);
+          if (t) S.opSupplyRoute(g, st, { kind: 'blob', id: t.id });
         }
       }
       break;
@@ -683,57 +710,69 @@ function updateOppLabel() {
   }
 }
 
-// -- order dispatch: direct in solo / as host, relayed as guest --------
+// -- order dispatch: direct in solo / as host; as guest the order is
+// applied to the local dead-reckoning sim immediately (optimistic echo)
+// AND queued for the host, which stays authoritative. Snapshot
+// applications retire acked orders and replay the rest (applySnapshot).
 
-function sendCmd(c) { if (mp) mp.outQueue.push(c); }
-const QUEUED = { ok: true, queued: true };
+function sendCmd(c) {
+  if (!mp) return;
+  const entry = { cmd: c, dbId: null };
+  mp.outQueue.push(entry);
+  // surrender is never echoed/replayed locally — the result must come
+  // from the host's authoritative snapshot
+  if (c.op !== 'surrender') mp.pending.push(entry);
+  // event-driven send: kick a sync shortly instead of waiting for the
+  // 1 s heartbeat (debounced so rapid taps batch into one request)
+  if (!mp.kick) mp.kick = setTimeout(() => { if (mp) { mp.kick = null; guestSync(); } }, 200);
+}
 
 function doMove(b, x, y, target) {
-  if (isGuest()) { sendCmd({ op: 'move', blobId: b.id, x, y, target: target || null }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'move', blobId: b.id, x, y, target: target || null });
   return S.opMove(game, b, x, y, target);
 }
 function doSetRole(b, role) {
-  if (isGuest()) { sendCmd({ op: 'setRole', blobId: b.id, role }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'setRole', blobId: b.id, role });
   return S.opSetRole(game, b, role);
 }
 function doSplit(b, n) {
-  if (isGuest()) { sendCmd({ op: 'split', blobId: b.id, take: n }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'split', blobId: b.id, take: n });
   return S.opSplit(game, b, n);
 }
 function doBuild(b) {
-  if (isGuest()) { sendCmd({ op: 'build', blobId: b.id }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'build', blobId: b.id });
   return S.opBuild(game, b);
 }
 function doBuildAt(b, x, y) {
-  if (isGuest()) { sendCmd({ op: 'buildAt', blobId: b.id, x, y }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'buildAt', blobId: b.id, x, y });
   return S.opBuildAt(game, b, x, y);
 }
 function doPillage(b, on) {
-  if (isGuest()) { sendCmd({ op: 'pillage', blobId: b.id, on: !!on }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'pillage', blobId: b.id, on: !!on });
   return S.opPillage(game, b, on);
 }
 function doRoute(b, target) {
-  if (isGuest()) { sendCmd({ op: 'route', blobId: b.id, target }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'route', blobId: b.id, target });
   return S.opRoute(game, b, target);
 }
 function doSetMode(st, mode) {
-  if (isGuest()) { sendCmd({ op: 'setMode', settlementId: st.id, mode }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'setMode', settlementId: st.id, mode });
   return S.opSetMode(game, st, mode);
 }
 function doFieldGarrison(st) {
-  if (isGuest()) { sendCmd({ op: 'fieldGarrison', settlementId: st.id }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'fieldGarrison', settlementId: st.id });
   return S.opFieldGarrison(game, st);
 }
 function doFieldRole(st, role, n) {
-  if (isGuest()) { sendCmd({ op: 'fieldRole', settlementId: st.id, role, n }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'fieldRole', settlementId: st.id, role, n });
   return S.opFieldRole(game, st, role, n);
 }
 function doGarrisonRole(st, role) {
-  if (isGuest()) { sendCmd({ op: 'garrisonRole', settlementId: st.id, role }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'garrisonRole', settlementId: st.id, role });
   return S.opGarrisonRole(game, st, role);
 }
 function doSupplyRoute(st, target) {
-  if (isGuest()) { sendCmd({ op: 'supplyRoute', settlementId: st.id, target }); return QUEUED; }
+  if (isGuest()) sendCmd({ op: 'supplyRoute', settlementId: st.id, target });
   return S.opSupplyRoute(game, st, target);
 }
 
@@ -865,9 +904,8 @@ $('btn-surrender').addEventListener('click', () => {
       if (!game || game.result) return;
       if (game.pvp) {
         if (isGuest()) {
-          sendCmd({ op: 'surrender' });
+          sendCmd({ op: 'surrender' }); // sendCmd kicks a sync itself
           toast('🏳️ Surrendering…');
-          guestSync();
         } else {
           game.result = 'p1-win';
           game.resultReason = 'surrender';
@@ -1321,12 +1359,12 @@ function resolvePending(world, pointerType, screen) {
     if (tgt && (tgt.owner !== me || tgt.id === carrier.id)) tgt = null;
     if (tgt) {
       const r = doRoute(carrier, { kind: 'blob', id: tgt.id });
-      toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
+      toast(r.err ? r.err : '🚚 Supply route established');
     } else {
       const st = S.settlementAt(game, world.x, world.y, hitR);
       if (st && st.owner === me) {
         const r = doRoute(carrier, { kind: 'settlement', id: st.id });
-        toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
+        toast(r.err ? r.err : '🚚 Supply route established');
       } else {
         toast('Tap a friendly army or settlement to supply');
       }
@@ -1341,12 +1379,12 @@ function resolvePending(world, pointerType, screen) {
     const stT = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
     if (stT && stT.owner === me && stT.id !== src.id && !stT.building) {
       const r = doSupplyRoute(src, { kind: 'settlement', id: stT.id });
-      toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
+      toast(r.err ? r.err : '🚚 Supply route established');
     } else {
       const tgt = S.blobAt(game, world.x, world.y, hitR);
       if (tgt && tgt.owner === me) {
         const r = doSupplyRoute(src, { kind: 'blob', id: tgt.id });
-        toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
+        toast(r.err ? r.err : '🚚 Supply route established');
       } else {
         toast('Tap a friendly settlement or army to supply');
       }
@@ -1446,7 +1484,7 @@ panel.addEventListener('click', (e) => {
       if (st) {
         r = doFieldGarrison(st);
         if (r.err) toast(r.err);
-        else if (!r.queued) ui.selected = { kind: 'blob', id: r.blob.id };
+        else ui.selected = { kind: 'blob', id: r.blob.id };
       }
       break;
     }

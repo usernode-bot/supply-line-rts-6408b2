@@ -354,6 +354,7 @@ app.post('/api/lobbies/:id/sync', async (req, res) => {
     // guest
     await pool.query(`UPDATE lobbies SET guest_seen_at = NOW() WHERE id = $1`, [id]);
     const commands = Array.isArray(body.commands) ? body.commands.slice(0, 50) : [];
+    let commandIds = [];
     if (commands.length && row.status === 'active') {
       const values = [];
       const params = [id];
@@ -361,7 +362,11 @@ app.post('/api/lobbies/:id/sync', async (req, res) => {
         params.push(JSON.stringify(c));
         values.push(`($1, $${params.length})`);
       }
-      await pool.query(`INSERT INTO lobby_commands (lobby_id, payload) VALUES ${values.join(', ')}`, params);
+      // ids come back in insertion order, matching the batch order — the
+      // guest uses them to retire optimistically-applied pending commands
+      // once a host snapshot acks them
+      const ins = await pool.query(`INSERT INTO lobby_commands (lobby_id, payload) VALUES ${values.join(', ')} RETURNING id`, params);
+      commandIds = ins.rows.map((r) => r.id);
     }
     const haveTick = parseInt(body.haveTick, 10);
     const wantSnap = row.snapshot && (isNaN(haveTick) || haveTick < (row.snapshot_tick || 0));
@@ -369,6 +374,7 @@ app.post('/api/lobbies/:id/sync', async (req, res) => {
       status: row.status,
       snapshot_tick: row.snapshot_tick || 0,
       snapshot: wantSnap ? row.snapshot : undefined,
+      command_ids: commandIds,
       opponentSeenAgoMs: row.host_seen_at ? now - new Date(row.host_seen_at).getTime() : null,
       winner_owner: row.winner_owner,
       end_reason: row.end_reason,
