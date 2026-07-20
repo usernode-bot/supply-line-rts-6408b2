@@ -1048,7 +1048,7 @@ function assignGroup(n) {
     const st = selectedSettlement();
     if (!st) return false;
     groups[n] = { kind: 'settlement', id: st.id };
-    toast(`Group ${n} set — settlement`);
+    toast(`Group ${n} set — ${st.name || 'settlement'}`);
     return true;
   }
   const blobs = selectedBlobs();
@@ -1581,14 +1581,14 @@ function renderPanelInner(force) {
       const barCol = est.building ? 'bg-amber-500' : pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
       setPanelHTML(`
         <div class="flex items-center justify-between mb-1">
-          <span class="font-semibold text-red-300">${est.building ? '🔨 Enemy construction site' : '🏠 Enemy settlement'}</span>
+          <span class="font-semibold text-red-300">${est.building ? '🔨' : '🏠'} ${est.name || 'Enemy settlement'}${est.name ? ` <span class="text-zinc-500 font-normal">(enemy${est.building ? ' construction site' : ''})</span>` : ''}</span>
           <span class="text-xs ${!est.building && est.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-400'}">HP ${Math.ceil(est.hp)}/${S.C.SETT_HP}</span>
         </div>
         <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full ${barCol}" style="width:${pct}%"></div></div>
         <div class="text-xs text-zinc-400">${est.building ? 'Under construction — raze it before it finishes.' : est.hp >= S.C.SETT_HP ? 'Walls intact.' : est.hp > S.C.SETT_HP / 2 ? 'Damaged.' : 'Heavily damaged!'} Tap it with deploy units selected to lay siege.</div>`);
     } else {
       setPanelHTML(`
-        <div class="font-semibold text-red-300 mb-1">🏠 Enemy settlement <span class="text-zinc-500 font-normal">(last seen)</span></div>
+        <div class="font-semibold text-red-300 mb-1">🏠 ${est.name || 'Enemy settlement'} <span class="text-zinc-500 font-normal">(last seen)</span></div>
         <div class="text-xs text-zinc-400">Hidden in the fog — condition unknown. Send a scout to see its health.</div>`);
     }
     return;
@@ -1605,7 +1605,7 @@ function renderPanelInner(force) {
       const mine2 = so && so.owner === me;
       setPanelHTML(`
         <div class="font-semibold mb-1 ${mine2 ? 'text-violet-300' : 'text-red-300'}">🏠 Settlement grounds</div>
-        <div class="text-xs text-zinc-400">Built over — not farmland. ${mine2 ? 'Part of your settlement.' : 'Part of an enemy settlement.'}</div>`);
+        <div class="text-xs text-zinc-400">Built over — not farmland. Part of ${mine2 ? 'your settlement' : 'an enemy settlement'}${so && so.name ? `, <b>${so.name}</b>` : ''}.</div>`);
     } else {
       const f = game.map.fert[i], o = game.map.orig[i];
       const tier = fertTier(f), otier = fertTier(o);
@@ -1639,7 +1639,7 @@ function renderPanelInner(force) {
     const pct = Math.max(0, Math.min(100, Math.round(100 * st.hp / S.C.SETT_HP)));
     setPanelHTML(`
       <div class="flex items-center justify-between mb-1">
-        <span class="font-semibold">🔨 Settlement under construction</span>
+        <span class="font-semibold">🔨 ${st.name ? st.name + ' — under construction' : 'Settlement under construction'}</span>
         <span class="text-xs text-amber-300">${pct}%</span>
       </div>
       <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-amber-500" style="width:${pct}%"></div></div>
@@ -1718,7 +1718,7 @@ function renderPanelInner(force) {
     const hpBarCol = hpBarPct >= 75 ? 'bg-emerald-500' : hpBarPct >= 40 ? 'bg-amber-500' : 'bg-red-500';
     setPanelHTML(`
       <div class="flex items-center justify-between mb-1">
-        <span class="font-semibold">🏠 Settlement</span>
+        <span class="font-semibold">🏠 ${st.name || 'Settlement'}</span>
         <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
       </div>
       <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full ${hpBarCol}" style="width:${hpBarPct}%"></div></div>

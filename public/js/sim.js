@@ -422,6 +422,42 @@ function tillFields(game, s) {
   }
 }
 
+// -- settlement names: flavorful procedural names, deterministic from the
+// map seed + settlement id so host, guest and the AI-vs-AI attract pool
+// all agree without any coordination. Names are serialized with the
+// settlement; old saves grow one on load from the same formula.
+const NAME_HEADS = [
+  'Ash', 'Bram', 'Cold', 'Dun', 'Elm', 'Fen', 'Grey', 'Haw', 'Iron', 'Kes',
+  'Lark', 'Mill', 'Nor', 'Oak', 'Pike', 'Raven', 'Salt', 'Thorn', 'Wolf',
+  'Wyn', 'Crow', 'Dew', 'Ember', 'Frost', 'Gorse', 'Hazel', 'Marsh', 'Stone',
+  'Briar', 'Alder', 'Heath', 'Rook', 'Sedge', 'Tarn', 'Vale', 'Weir',
+];
+const NAME_TAILS = [
+  'ford', 'wick', 'mere', 'holt', 'stead', 'bury', 'field', 'haven', 'moor',
+  'combe', 'dale', 'worth', 'gate', 'hollow', 'march', 'fell', 'cross',
+  'brook', 'shaw', 'ton', 'bridge', 'crest', 'reach',
+];
+function nameHash(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+export function settlementName(seed, key) {
+  const h = nameHash(seed + ':' + key);
+  return NAME_HEADS[h % NAME_HEADS.length]
+    + NAME_TAILS[((h >>> 8) % NAME_TAILS.length)];
+}
+function freshSettlementName(game, id) {
+  let name = settlementName(game.seed, id);
+  for (let k = 1; k < 24 && game.settlements.some(o => o.name === name); k++) {
+    name = settlementName(game.seed, id + '/' + k);
+  }
+  return name;
+}
+
 function foundSettlement(game, owner, x, y, opts) {
   const construction = !!(opts && opts.construction);
   const s = {
@@ -436,12 +472,14 @@ function foundSettlement(game, owner, x, y, opts) {
     garrison: { deploy: 0, supply: 0, farm: 0 },
     trainAcc: 0, garrLoss: 0, lastHitT: -999,
     convert: null,             // pending garrison arm-up (#108, serialized)
+    starving: false,           // one-shot garrison-starvation toast latch (transient)
     tilled: [],
     flow: 0,       // EMA of net stockpile flow (food/tick) — gates training
     flowAcc: 0,    // this tick's flow components (transient)
     parts: newFlowParts(),     // this tick's per-component flow (transient, #76)
     partsWin: [],              // last 10 ticks of parts — the panel's live 1 s window (transient, #92)
   };
+  s.name = freshSettlementName(game, s.id);
   claimFootprint(game, s);
   // building over rubble clears it: any ruin whose 2×2 footprint overlaps
   // the new one is swept away (#106)
@@ -484,8 +522,8 @@ function destroySettlement(game, s, why) {
   delete game.known[s.id];
   delete game.ai.known[s.id];
   if (game.pvp) { delete game.knowns[0][s.id]; delete game.knowns[1][s.id]; }
-  game.events.push({ owner: s.owner, msg: '💥 Your settlement was destroyed!', x: s.x + 1, y: s.y + 1 });
-  game.events.push({ owner: 1 - s.owner, msg: '🔥 Enemy settlement destroyed!', x: s.x + 1, y: s.y + 1 });
+  game.events.push({ owner: s.owner, msg: `💥 ${s.name} was destroyed!`, x: s.x + 1, y: s.y + 1 });
+  game.events.push({ owner: 1 - s.owner, msg: `🔥 Enemy settlement ${s.name} destroyed!`, x: s.x + 1, y: s.y + 1 });
 }
 
 // ---------------------------------------------------------------- ops (player + AI share these)
@@ -1798,7 +1836,9 @@ function applyLosses(game, b, casualties) {
   if (b.units.length === 0) b.dead = true;
 }
 
-function applyGarrisonLosses(game, s, casualties) {
+// `starve` marks deaths from an empty stockpile: the fx swaps the plain
+// damage number for a skull so hunger reads differently from combat.
+function applyGarrisonLosses(game, s, casualties, starve) {
   s.garrLoss += casualties;
   let whole = Math.floor(s.garrLoss);
   if (whole <= 0) return;
@@ -1811,7 +1851,7 @@ function applyGarrisonLosses(game, s, casualties) {
     s.garrison[role]--;
     whole--; removed++;
   }
-  if (removed > 0) pushFx(game, { kind: 'loss', x: s.x + 1, y: s.y + 1, n: removed, t: game.tick });
+  if (removed > 0) pushFx(game, { kind: starve ? 'starve' : 'loss', x: s.x + 1, y: s.y + 1, n: removed, t: game.tick });
 }
 
 // -- food / pillage / starvation
@@ -1957,7 +1997,7 @@ function applyStarvation(game, b) {
   }
   if (removed > 0) {
     recount(b);
-    pushFx(game, { kind: 'loss', x: b.x, y: b.y, n: removed, t: game.tick });
+    pushFx(game, { kind: 'starve', x: b.x, y: b.y, n: removed, t: game.tick });
     b.food = Math.min(b.food, foodCap(b));
   }
   if (b.units.length === 0) b.dead = true;
@@ -2090,7 +2130,8 @@ function tickSettlement(game, s) {
     if (s.hp >= C.SETT_HP) {
       s.building = false;
       tillFields(game, s);
-      game.events.push({ owner: s.owner, msg: '🏠 Settlement completed', x: s.x + 1, y: s.y + 1 });
+      game.events.push({ owner: s.owner, msg: `🏠 ${s.name} founded — settlement complete`, x: s.x + 1, y: s.y + 1 });
+      game.events.push({ owner: 1 - s.owner, msg: `🏘️ We've heard rumors of the founding of a new settlement, ${s.name}`, x: s.x + 1, y: s.y + 1 });
     }
     // keep the panel's rolling flow window well-formed while inert
     if (!s.partsWin) s.partsWin = [];
@@ -2131,12 +2172,25 @@ function tickSettlement(game, s) {
     const src = wheatFxSource(game, s);
     if (src) pushFx(game, { kind: 'wheat', x: src.x, y: src.y, tx: s.x + 1, ty: s.y + 1, t: game.tick });
   }
-  // garrison eats from the stockpile; starves when it's empty
+  // garrison eats from the stockpile; starves when it's empty. The
+  // starving latch toasts once per famine and re-arms only after the
+  // stockpile has genuinely recovered (hysteresis, like blob.starving).
   const g = garrisonTotal(s);
   if (g > 0) {
     const eat = g * C.EAT_PER_SEC * C.DT;
-    if (s.stockpile >= eat) { s.stockpile -= eat; s.flowAcc -= eat; s.parts.upkeep -= eat; }
-    else { s.flowAcc -= s.stockpile; s.parts.upkeep -= s.stockpile; s.stockpile = 0; applyGarrisonLosses(game, s, g * C.STARVE_FRAC); }
+    if (s.stockpile >= eat) {
+      s.stockpile -= eat; s.flowAcc -= eat; s.parts.upkeep -= eat;
+      if (s.starving && s.stockpile >= 5) s.starving = false;
+    } else {
+      s.flowAcc -= s.stockpile; s.parts.upkeep -= s.stockpile; s.stockpile = 0;
+      if (!s.starving) {
+        s.starving = true;
+        game.events.push({ owner: s.owner, msg: `💀 The inhabitants of ${s.name} are starving!`, x: s.x + 1, y: s.y + 1 });
+      }
+      applyGarrisonLosses(game, s, g * C.STARVE_FRAC, true);
+    }
+  } else if (s.starving && s.stockpile >= 5) {
+    s.starving = false;
   }
   // feed friendly blobs inside the territory — armies eat first, then
   // supply units, then farmers, hungriest first within a category (#99).
@@ -2334,7 +2388,7 @@ function updateVisionFor(game, owner, fog, known) {
   // remember enemy settlements we can currently see; forget destroyed ones
   for (const s of game.settlements) {
     if (s.owner !== owner && settTiles(game.map, s).some(i => fog[i] === 2)) {
-      known[s.id] = { x: s.x, y: s.y };
+      known[s.id] = { x: s.x, y: s.y, name: s.name };
     }
   }
   for (const id of Object.keys(known)) {
@@ -2406,7 +2460,7 @@ export function serialize(game) {
     })),
     settlements: game.settlements.map(s => ({
       id: s.id, owner: s.owner, x: s.x, y: s.y, hp: s.hp,
-      building: !!s.building,
+      name: s.name, building: !!s.building,
       mode: s.mode, stockpile: s.stockpile, garrison: s.garrison,
       trainAcc: s.trainAcc, flow: s.flow, convert: s.convert || null,
     })),
@@ -2486,13 +2540,15 @@ export function deserialize(data, prev) {
   for (const sd of data.settlements) {
     const s = {
       id: sd.id, owner: sd.owner, x: sd.x, y: sd.y, hp: sd.hp,
+      // older saves carry no name — grow one from the same deterministic formula
+      name: sd.name || settlementName(data.seed, sd.id),
       building: !!sd.building, // older saves lack the flag → completed
       mode: sd.mode, stockpile: sd.stockpile,
       garrison: sd.garrison,
       // older saves stored tick-based progress; convert to invested food
       trainAcc: sd.trainAcc != null ? sd.trainAcc
         : (sd.trainTicks ? sd.trainTicks / C.TRAIN_TICKS * C.TRAIN_COST : 0),
-      garrLoss: 0, lastHitT: -999, tilled: [],
+      garrLoss: 0, lastHitT: -999, starving: false, tilled: [],
       flow: sd.flow || 0, flowAcc: 0,
       convert: sd.convert || null,
       parts: newFlowParts(), partsWin: [],

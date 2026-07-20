@@ -320,7 +320,7 @@ export function createRenderer(canvas, minimap) {
     for (const [id, k] of Object.entries(knownOf(game))) {
       if (S.settVisible(game, k)) continue;
       const gsel = ui.selected && ui.selected.kind === 'enemy-settlement' && ui.selected.id === +id;
-      drawSettlement(game, { x: k.x, y: k.y, owner: 1 - viewer(game), hp: S.C.SETT_HP }, wx, wy, s, true, gsel, 0);
+      drawSettlement(game, { x: k.x, y: k.y, owner: 1 - viewer(game), hp: S.C.SETT_HP, name: k.name }, wx, wy, s, true, gsel, 0);
     }
 
     // working farmers — drawn before settlements so they can never cover
@@ -647,9 +647,19 @@ export function createRenderer(canvas, minimap) {
         if (age < 0 || age > 12) continue;
         if (!S.isVisible(game, f.x, f.y)) continue;
         const fade = Math.max(0, 1 - age / 12);
-        ctx.fillStyle = `rgba(248,113,113,${fade.toFixed(2)})`;
         ctx.font = `bold ${Math.max(11, Math.min(16, s * 0.9))}px system-ui`;
-        ctx.fillText(`−${f.n}`, wx(f.x), wy(f.y) - s * 0.6 - age * s * 0.09);
+        const fyPx = wy(f.y) - s * 0.6 - age * s * 0.09;
+        if (f.kind === 'starve') {
+          // starvation deaths: a skull instead of the plain damage number,
+          // so hunger reads differently from combat losses
+          ctx.globalAlpha = fade;
+          ctx.fillStyle = '#d6d3d1';
+          ctx.fillText(`💀−${f.n}`, wx(f.x), fyPx);
+          ctx.globalAlpha = 1;
+        } else {
+          ctx.fillStyle = `rgba(248,113,113,${fade.toFixed(2)})`;
+          ctx.fillText(`−${f.n}`, wx(f.x), fyPx);
+        }
       }
     }
 
@@ -913,6 +923,20 @@ export function createRenderer(canvas, minimap) {
       ctx.fillStyle = '#fbbf24';
       ctx.fillRect(x0, barY, size * (st.trainAcc / S.C.TRAIN_COST), 3);
       barY += 4;
+    }
+    // name plate above the keep — every settlement wears its name; ghosts
+    // keep the last-seen name from the viewer's memory
+    if (st.name && s >= 5) {
+      const nfs = Math.max(9, Math.min(13, s * 0.55));
+      ctx.font = `600 ${nfs}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const ny = y0 - nfs * 0.9;
+      const ntw = ctx.measureText(st.name).width;
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(cx - ntw / 2 - 3, ny - nfs * 0.7, ntw + 6, nfs * 1.4);
+      ctx.fillStyle = ghost ? '#a1a1aa' : '#e4e4e7';
+      ctx.fillText(st.name, cx, ny);
     }
     // garrison arm-up progress (#108, own settlements only)
     if (!ghost && st.owner === viewer(game) && st.convert) {
