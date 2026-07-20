@@ -34,6 +34,8 @@
     { "name": "How to Play mentions the attack-direction line", "path": "/?demo=1", "expectText": "attack-direction line" },
     { "name": "How to Play mentions sending farmers to a plot by ordering onto farmland", "path": "/?demo=1", "expectText": "sends them to work that field" },
     { "name": "How to Play town-names paragraph present", "path": "/?demo=1", "expectSelector": "#help-town-names" },
-    { "name": "How to Play mentions founding rumors", "path": "/?demo=1", "expectText": "rumors of the founding of a new settlement" }
+    { "name": "How to Play mentions founding rumors", "path": "/?demo=1", "expectText": "rumors of the founding of a new settlement" },
+    { "name": "Difficulty hint line present under the dropdown", "path": "/?demo=1", "expectSelector": "#difficulty-hint" },
+    { "name": "Difficulty hint shows the Normal blurb by default", "path": "/?demo=1", "expectText": "The standard opponent." }
   ]
 }
