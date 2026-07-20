@@ -224,9 +224,27 @@ function attack(game, S, setts, mine, ai, diff) {
       const home = setts[0];
       S.opPillage(game, army, false);
       S.opMove(game, army, home.x + 2.5, home.y + 1);
-      ai.armyId = null; ai.attacking = false;
+      ai.armyId = null; ai.attacking = false; ai.siege = null;
       return;
     }
+    // siege stall guard (#108): walls now protect garrisons, so a siege
+    // that isn't shrinking the garrison after ~2 min of sim time is a
+    // grind the AI abandons rather than starving at the walls forever
+    if (army.order && army.order.type === 'move' && army.order.tkind === 'settlement') {
+      const st = game.settlements.find(x => x.id === army.order.tid);
+      const g = st ? st.garrison.deploy + st.garrison.supply + st.garrison.farm : 0;
+      if (!st || g === 0) ai.siege = null;
+      else if (!ai.siege || ai.siege.settId !== st.id || g < ai.siege.g) {
+        ai.siege = { settId: st.id, g, t: game.tick };
+      } else if (game.tick - ai.siege.t > 1200) {
+        ai.siege = null;
+        const home = setts[0];
+        S.opPillage(game, army, false);
+        S.opMove(game, army, home.x + 2.5, home.y + 1);
+        ai.armyId = null; ai.attacking = false;
+        return;
+      }
+    } else ai.siege = null;
     if (!army.order && !army.pillaging) {
       // arrived / target gone — pick the next known target or head home.
       // Plain moves no longer attack-move (#74), so offensives are

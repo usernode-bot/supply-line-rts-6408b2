@@ -368,6 +368,20 @@ export function createRenderer(canvas, minimap) {
       ctx.arc(px, py, r, 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([]);
+      // attack-direction line (#108): a group with soldiers shows its
+      // facing while fighting or holding an attack order — the pincer
+      // read for both players
+      if (b.count.deploy > 0
+        && (game.tick - b.engagedT < 5 || (b.order && b.order.type === 'move' && b.order.tkind))) {
+        const fr = r + Math.max(6, 0.6 * s);
+        const fx2 = Math.cos(b.facing || 0), fy2 = Math.sin(b.facing || 0);
+        ctx.beginPath();
+        ctx.moveTo(px + fx2 * r * 0.4, py + fy2 * r * 0.4);
+        ctx.lineTo(px + fx2 * fr, py + fy2 * fr);
+        ctx.strokeStyle = ownerColor(game, b.owner);
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
       // taking-damage flash
       if (game.tick - b.engagedT < 3) {
         const pulse = 0.55 + 0.45 * Math.sin((game.tick + alpha) * 2.2);
@@ -426,6 +440,17 @@ export function createRenderer(canvas, minimap) {
       if (b.pillaging) {
         ctx.font = `${Math.max(10, r * 0.6)}px system-ui`;
         ctx.fillText('🔥', px + r * 0.9, py - r * 0.9);
+      }
+      // arm-up progress (#108): amber bar while the group converts to
+      // fighters — until it fills, the units keep their old role
+      if (b.convert) {
+        const p = Math.max(0, Math.min(1, 1 - (b.convert.done - game.tick) / S.C.CONVERT_TICKS));
+        const bw = Math.max(18, r * 1.6);
+        const byy = py + r + 3;
+        ctx.fillStyle = '#111827';
+        ctx.fillRect(px - bw / 2, byy, bw, 3);
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillRect(px - bw / 2, byy, bw * p, 3);
       }
     }
 
@@ -491,7 +516,7 @@ export function createRenderer(canvas, minimap) {
         if (b.dead || !b.order || b.order.type !== 'move' || b.chaseId == null) continue;
         const t = blobById.get(b.chaseId);
         if (!t || !blobSeen(b) || !blobSeen(t)) continue;
-        if (Math.hypot(t.x - b.x, t.y - b.y) <= S.blobRadius(b) + S.blobRadius(t) + 0.2) continue;
+        if (Math.hypot(t.x - b.x, t.y - b.y) <= S.C.MELEE_RANGE + 0.2) continue;
         const x1 = wx(bx(b)), y1 = wy(by(b)), x2 = wx(bx(t)), y2 = wy(by(t));
         const ang = Math.atan2(y2 - y1, x2 - x1);
         const r1 = blobPxR(b), r2 = blobPxR(t);
@@ -517,21 +542,27 @@ export function createRenderer(canvas, minimap) {
       }
       ctx.stroke();
 
-      // engaged blob pairs: bright pulsing link + ⚔️ at the midpoint
+      // engaged blob pairs: bright pulsing link + ⚔️ at the midpoint.
+      // Links carrying a rear/flank bonus (#108) draw thicker in orange
+      // so a successful pincer is readable at a glance.
       const swords = [];
-      ctx.strokeStyle = `rgba(248,113,113,${pulse.toFixed(2)})`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (const l of game.combat || []) {
-        if (l.kind !== 'bb') continue;
-        const a = blobById.get(l.a), b = blobById.get(l.b);
-        if (!a || !b || !blobSeen(a) || !blobSeen(b)) continue;
-        const x1 = wx(bx(a)), y1 = wy(by(a)), x2 = wx(bx(b)), y2 = wy(by(b));
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
-        swords.push([(x1 + x2) / 2, (y1 + y2) / 2]);
+      for (const pass of [0, 1]) {
+        ctx.strokeStyle = pass === 1
+          ? `rgba(251,146,60,${Math.min(1, pulse + 0.25).toFixed(2)})`
+          : `rgba(248,113,113,${pulse.toFixed(2)})`;
+        ctx.lineWidth = pass === 1 ? 3 : 2;
+        ctx.beginPath();
+        for (const l of game.combat || []) {
+          if (l.kind !== 'bb' || (pass === 1) !== !!l.rear) continue;
+          const a = blobById.get(l.a), b = blobById.get(l.b);
+          if (!a || !b || !blobSeen(a) || !blobSeen(b)) continue;
+          const x1 = wx(bx(a)), y1 = wy(by(a)), x2 = wx(bx(b)), y2 = wy(by(b));
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          swords.push([(x1 + x2) / 2, (y1 + y2) / 2]);
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
       if (swords.length) {
         ctx.globalAlpha = pulse;
         ctx.font = `${Math.max(11, s * 0.7)}px system-ui`;
@@ -819,6 +850,21 @@ export function createRenderer(canvas, minimap) {
     if (building) ctx.setLineDash([5, 4]);
     ctx.strokeRect(x0, y0, size, size);
     ctx.setLineDash([]);
+    // siege state (#108): amber dashed halo + ⏳ — income cut, deliveries
+    // blocked, the stockpile is the clock. Visible to both players.
+    if (!ghost && !building && S.besieged(game, st)) {
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(x0 - 3, y0 - 3, size + 6, size + 6);
+      ctx.setLineDash([]);
+      if (s >= 6) {
+        ctx.font = `${Math.max(9, Math.min(16, s * 0.7))}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('⏳', x0 + size, y0 - 2);
+      }
+    }
     if (building && s >= 5) {
       const fs = Math.max(10, Math.min(22, s * 0.9));
       ctx.font = `${fs}px system-ui`;
@@ -866,6 +912,15 @@ export function createRenderer(canvas, minimap) {
       ctx.fillRect(x0, barY, size, 3);
       ctx.fillStyle = '#fbbf24';
       ctx.fillRect(x0, barY, size * (st.trainAcc / S.C.TRAIN_COST), 3);
+      barY += 4;
+    }
+    // garrison arm-up progress (#108, own settlements only)
+    if (!ghost && st.owner === viewer(game) && st.convert) {
+      const p = Math.max(0, Math.min(1, 1 - (st.convert.done - game.tick) / S.C.CONVERT_TICKS));
+      ctx.fillStyle = '#111827';
+      ctx.fillRect(x0, barY, size, 3);
+      ctx.fillStyle = '#f59e0b';
+      ctx.fillRect(x0, barY, size * p, 3);
       barY += 4;
     }
     ctx.globalAlpha = 1;
