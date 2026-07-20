@@ -18,10 +18,12 @@ const FADE_MS = 700;         // slightly past the CSS 600 ms transition
 const ATTRACT_SCALE = 38;    // fixed zoom (px/tile) — close enough that blobs and
                              // settlements read as the subject, not map texture (#119)
 const PAN_SPEED = 1.3;       // cruise speed in tiles/s while gliding between POIs
-const PAN_RAMP_MS = 1400;    // ease-in time from a standstill to cruise speed
+const VEL_SMOOTH_MS = 900;   // velocity relaxation time — heading changes become curves
 const DWELL_MS = 5000;       // hold on a POI (soft-following it if it marches) before moving on
 const HOP_MIN = 5;           // preferred next-POI distance band (tiles) — far enough
 const HOP_MAX = 32;          // to feel like a pan, near enough to arrive within ~25 s
+const CONE_ANY = -0.17;      // min heading·dir dot for the next stop (~±100° forward cone)
+const CONE_FIGHT = -0.5;     // looser cone for fights (~±120°) — worth a wider turn, never a reversal
 
 const $ = (id) => document.getElementById(id);
 
@@ -42,10 +44,11 @@ let rafId = 0;
 
 // camera: tours points of interest (settlements, armies, fights)
 const view = { cx: 0, cy: 0, scale: ATTRACT_SCALE };
-let poi = null;           // { kind: 'combat'|'army'|'sett'|'center', ref, x, y }
-let camMode = 'dwell';    // 'travel' (gliding to poi) | 'dwell' (holding on it)
-let dwellUntil = 0;       // ts when the current dwell ends
-let travelT = 0;          // ms spent on the current glide, for the ease-in ramp
+const vel = { x: 0, y: 0 };  // actual camera velocity (tiles/s), smoothly steered
+let heading = null;          // unit vector of the last travel leg — survives dwells
+let poi = null;              // { kind: 'combat'|'army'|'sett'|'center', ref, x, y }
+let camMode = 'dwell';       // 'travel' (gliding to poi) | 'dwell' (holding on it)
+let dwellUntil = 0;          // ts when the current dwell ends
 
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -67,7 +70,8 @@ export function stopAttract() {
   if (fetchCtl) { fetchCtl.abort(); fetchCtl = null; }
   game = null; ai0 = null; ai1 = null;
   warmupTarget = 0; revealed = false; acc = 0; endedAt = 0;
-  poi = null; camMode = 'dwell'; dwellUntil = 0; travelT = 0;
+  poi = null; camMode = 'dwell'; dwellUntil = 0;
+  vel.x = 0; vel.y = 0; heading = null;
   $('menu-canvas').classList.remove('attract-visible');
 }
 
@@ -131,7 +135,7 @@ function reveal() {
   clampView();
   camMode = 'dwell';
   dwellUntil = performance.now() + DWELL_MS;
-  travelT = 0;
+  vel.x = 0; vel.y = 0; heading = null;
   revealed = true;
   acc = 0;
   renderer.draw(game, view, UI, 0);
@@ -247,21 +251,33 @@ function openingPoi() {
   return best || pois[0] || { kind: 'center', ref: null, x: game.map.w / 2, y: game.map.h / 2 };
 }
 
-// Next tour stop: any fight beats everything; otherwise a random
-// settlement/army in the HOP_MIN..HOP_MAX band (a visible pan that still
-// arrives promptly), widening to anything else if the band is empty.
+// Is p roughly ahead of the tour's current heading? Always true before
+// the first leg (no heading yet to contradict).
+function ahead(p, minDot) {
+  if (!heading) return true;
+  const dx = p.x - view.cx, dy = p.y - view.cy;
+  const d = Math.hypot(dx, dy);
+  if (d < 1e-6) return true;
+  return (dx / d) * heading.x + (dy / d) * heading.y >= minDot;
+}
+
+// Next tour stop. Fights beat everything, but only inside the forward
+// cone — the camera never doubles back, even for a battle. Otherwise
+// prefer a settlement/army that keeps the drift flowing forward, in the
+// HOP_MIN..HOP_MAX band when possible, and only reverse as a last resort.
 function nextPoi() {
   const pois = gatherPois();
-  const fights = pois.filter(p => p.kind === 'combat' && p.ref !== (poi && poi.ref));
+  const cur = poi && poi.ref;
+  const fights = pois.filter(p => p.kind === 'combat' && p.ref !== cur && ahead(p, CONE_FIGHT));
   if (fights.length) return fights[(Math.random() * fights.length) | 0];
-  const others = pois.filter(p => p.kind !== 'combat' && p.ref !== (poi && poi.ref));
-  const banded = others.filter(p => {
-    const d = Math.hypot(p.x - view.cx, p.y - view.cy);
-    return d >= HOP_MIN && d <= HOP_MAX;
-  });
-  const pool = banded.length ? banded : others;
-  if (pool.length) return pool[(Math.random() * pool.length) | 0];
-  return poi || { kind: 'center', ref: null, x: game.map.w / 2, y: game.map.h / 2 };
+  const others = pois.filter(p => p.kind !== 'combat' && p.ref !== cur &&
+    Math.hypot(p.x - view.cx, p.y - view.cy) >= HOP_MIN);
+  const banded = others.filter(p => Math.hypot(p.x - view.cx, p.y - view.cy) <= HOP_MAX);
+  const pick = (arr) => arr.length ? arr[(Math.random() * arr.length) | 0] : null;
+  return pick(banded.filter(p => ahead(p, CONE_ANY)))
+      || pick(others.filter(p => ahead(p, CONE_ANY)))
+      || pick(banded) || pick(others)
+      || poi || { kind: 'center', ref: null, x: game.map.w / 2, y: game.map.h / 2 };
 }
 
 // Is the current poi's subject still in the game?
@@ -279,33 +295,37 @@ function refreshPoi() {
 }
 
 function updateCamera(dt, ts) {
-  if (!poiAlive()) { poi = nextPoi(); camMode = 'travel'; travelT = 0; }
+  if (!poiAlive()) { poi = nextPoi(); camMode = 'travel'; }
   refreshPoi();
   // head for where the camera can actually center — a poi hugging the
   // map edge is unreachable past the clamp, so aim at the clamped spot
   const t = clampPoint(poi.x, poi.y);
   const dx = t.x - view.cx, dy = t.y - view.cy;
   const d = Math.hypot(dx, dy);
-  if (camMode === 'travel') {
-    travelT += dt;
-    if (d < 0.3) {
-      camMode = 'dwell';
-      dwellUntil = ts + DWELL_MS;
-    } else {
-      // ease in from a standstill, cruise, ease out on approach
-      const ramp = Math.min(1, travelT / PAN_RAMP_MS);
-      const speed = Math.min(PAN_SPEED * ramp, Math.max(0.5, d * 1.2));
-      const step = Math.min(d, speed * (dt / 1000));
-      view.cx += (dx / d) * step;
-      view.cy += (dy / d) * step;
-    }
-  } else {
-    // dwell: soft-follow the subject so a marching army stays framed
-    const k = 1 - Math.exp(-dt / 500);
-    view.cx += dx * k;
-    view.cy += dy * k;
-    if (ts >= dwellUntil) { poi = nextPoi(); camMode = 'travel'; travelT = 0; }
+  if (camMode === 'travel' && d < 0.3) {
+    camMode = 'dwell';
+    dwellUntil = ts + DWELL_MS;
+  } else if (camMode === 'dwell' && ts >= dwellUntil) {
+    poi = nextPoi();
+    camMode = 'travel';
   }
+  // One steering law for both modes: aim at the target at a speed that
+  // eases to a crawl on approach, and relax the real velocity toward
+  // that aim — so every retarget bends the path into a curve instead of
+  // snapping the heading, and dwells double as soft-follow of a
+  // marching subject.
+  const speed = Math.min(PAN_SPEED, d * 1.2);
+  const aimX = d > 1e-6 ? (dx / d) * speed : 0;
+  const aimY = d > 1e-6 ? (dy / d) * speed : 0;
+  const k = 1 - Math.exp(-dt / VEL_SMOOTH_MS);
+  vel.x += (aimX - vel.x) * k;
+  vel.y += (aimY - vel.y) * k;
+  view.cx += vel.x * (dt / 1000);
+  view.cy += vel.y * (dt / 1000);
+  // remember the leg's direction (only while actually moving) so the
+  // next pick after a dwell continues the flow instead of reversing
+  const sp = Math.hypot(vel.x, vel.y);
+  if (sp > PAN_SPEED * 0.4) heading = { x: vel.x / sp, y: vel.y / sp };
   clampView();
 }
 
