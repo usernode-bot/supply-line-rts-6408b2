@@ -15,9 +15,13 @@ const FETCH_TIMEOUT = 2500;  // ms before we give up on the server snapshot
 const WARMUP_BUDGET = 8;     // ms of sim per frame during invisible warm-up
 const LINGER_MS = 6000;      // hold the final scene before restarting
 const FADE_MS = 700;         // slightly past the CSS 600 ms transition
-const ATTRACT_SCALE = 13.5;  // fixed zoom (px/tile); clampView may raise it on huge screens
-const PAN_VX = 1.0;          // drift speed in tiles/s — unequal axes so the
-const PAN_VY = 0.7;          // billiard-bounce path doesn't visibly retrace
+const ATTRACT_SCALE = 32;    // fixed zoom (px/tile) — close enough that blobs and
+                             // settlements read as the subject, not map texture (#119)
+const PAN_SPEED = 2.6;       // cruise speed in tiles/s while gliding between POIs
+const PAN_RAMP_MS = 1400;    // ease-in time from a standstill to cruise speed
+const DWELL_MS = 5000;       // hold on a POI (soft-following it if it marches) before moving on
+const HOP_MIN = 6;           // preferred next-POI distance band (tiles) — far enough
+const HOP_MAX = 60;          // to feel like a pan, near enough to arrive within ~20 s
 
 const $ = (id) => document.getElementById(id);
 
@@ -36,10 +40,12 @@ let acc = 0, lastT = 0;
 let endedAt = 0;          // performance.now() when game.result was first seen
 let rafId = 0;
 
-// camera
+// camera: tours points of interest (settlements, armies, fights)
 const view = { cx: 0, cy: 0, scale: ATTRACT_SCALE };
-const vel = { x: 0, y: 0 }; // tiles/s, set at reveal()
-let poi = null;
+let poi = null;           // { kind: 'combat'|'army'|'sett'|'center', ref, x, y }
+let camMode = 'dwell';    // 'travel' (gliding to poi) | 'dwell' (holding on it)
+let dwellUntil = 0;       // ts when the current dwell ends
+let travelT = 0;          // ms spent on the current glide, for the ease-in ramp
 
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -61,7 +67,7 @@ export function stopAttract() {
   if (fetchCtl) { fetchCtl.abort(); fetchCtl = null; }
   game = null; ai0 = null; ai1 = null;
   warmupTarget = 0; revealed = false; acc = 0; endedAt = 0;
-  poi = null; vel.x = 0; vel.y = 0;
+  poi = null; camMode = 'dwell'; dwellUntil = 0; travelT = 0;
   $('menu-canvas').classList.remove('attract-visible');
 }
 
@@ -120,12 +126,12 @@ function beginWarmup() {
 function reveal() {
   game.fog.fill(2);
   game.events.length = 0;
-  evalPoi();
+  poi = openingPoi();
   view.cx = poi.x; view.cy = poi.y; view.scale = ATTRACT_SCALE;
   clampView();
-  // drift toward map center so the opening leg runs long before the first bounce
-  vel.x = PAN_VX * (Math.sign(game.map.w / 2 - view.cx) || 1);
-  vel.y = PAN_VY * (Math.sign(game.map.h / 2 - view.cy) || 1);
+  camMode = 'dwell';
+  dwellUntil = performance.now() + DWELL_MS;
+  travelT = 0;
   revealed = true;
   acc = 0;
   renderer.draw(game, view, UI, 0);
@@ -181,7 +187,7 @@ function frame(ts) {
     game.events.length = 0;
   }
 
-  updateCamera(dt);
+  updateCamera(dt, ts);
   renderer.draw(game, view, UI, Math.max(0, Math.min(1, acc / 100)));
 }
 
@@ -199,42 +205,120 @@ function restart() {
   }, FADE_MS);
 }
 
-// -- camera: fixed zoom, steady drift, billiard bounce at map edges -------
+// -- camera: close zoom, slow glide between points of interest ------------
+//
+// The camera tours the match like a spectator: glide to a settlement,
+// army or fight, hold on it for DWELL_MS (soft-following it if it
+// marches), then pick the next stop and glide again. Fights always win
+// the pick; otherwise it's a random settlement/army a medium hop away.
 
-// Pick a good opening frame for reveal(): this tick's fight if there is
-// one (combat holds engagement links: {kind:'bb', a, b} blob ids /
-// {kind:'bs', b, s}), else the largest army, else map center.
-function evalPoi() {
-  if (game.combat && game.combat.length) {
-    const l = game.combat[0];
-    const ba = game.blobs.find(b => b.id === l.a && !b.dead);
-    const bb = game.blobs.find(b => b.id === l.b && !b.dead);
-    if (l.kind === 'bb' && ba && bb) { poi = { x: (ba.x + bb.x) / 2, y: (ba.y + bb.y) / 2 }; return; }
-    if (l.kind === 'bs' && bb) { poi = { x: bb.x, y: bb.y }; return; }
+// Everything worth looking at right now. Combat entries come from the
+// engagement links ({kind:'bb', a, b} blob ids / {kind:'bs', b, s}).
+function gatherPois() {
+  const out = [];
+  if (game.combat) {
+    for (const l of game.combat) {
+      const ba = game.blobs.find(b => b.id === l.a && !b.dead);
+      const bb = game.blobs.find(b => b.id === l.b && !b.dead);
+      if (l.kind === 'bb' && ba && bb) out.push({ kind: 'combat', ref: bb, x: (ba.x + bb.x) / 2, y: (ba.y + bb.y) / 2 });
+      else if (l.kind === 'bs' && bb) out.push({ kind: 'combat', ref: bb, x: bb.x, y: bb.y });
+    }
   }
-  let best = null;
   for (const b of game.blobs) {
-    if (b.dead) continue;
-    if (!best || b.count.deploy > best.count.deploy) best = b;
+    if (!b.dead && b.count.deploy >= 2) out.push({ kind: 'army', ref: b, x: b.x, y: b.y });
   }
-  poi = best ? { x: best.x, y: best.y } : { x: game.map.w / 2, y: game.map.h / 2 };
+  for (const s of game.settlements) {
+    const c = S.settCenter(s);
+    out.push({ kind: 'sett', ref: s, x: c.x, y: c.y });
+  }
+  return out;
 }
 
-function updateCamera(dt) {
-  // an axis where the whole map fits on screen is pinned to center by
-  // clampView — kill drift there instead of flip-flopping every frame
+// Opening frame for reveal(): a fight if one is on, else the largest army.
+function openingPoi() {
+  const pois = gatherPois();
+  const fight = pois.find(p => p.kind === 'combat');
+  if (fight) return fight;
+  let best = null;
+  for (const p of pois) {
+    if (p.kind !== 'army') continue;
+    if (!best || p.ref.count.deploy > best.ref.count.deploy) best = p;
+  }
+  return best || pois[0] || { kind: 'center', ref: null, x: game.map.w / 2, y: game.map.h / 2 };
+}
+
+// Next tour stop: any fight beats everything; otherwise a random
+// settlement/army in the HOP_MIN..HOP_MAX band (a visible pan that still
+// arrives promptly), widening to anything else if the band is empty.
+function nextPoi() {
+  const pois = gatherPois();
+  const fights = pois.filter(p => p.kind === 'combat' && p.ref !== (poi && poi.ref));
+  if (fights.length) return fights[(Math.random() * fights.length) | 0];
+  const others = pois.filter(p => p.kind !== 'combat' && p.ref !== (poi && poi.ref));
+  const banded = others.filter(p => {
+    const d = Math.hypot(p.x - view.cx, p.y - view.cy);
+    return d >= HOP_MIN && d <= HOP_MAX;
+  });
+  const pool = banded.length ? banded : others;
+  if (pool.length) return pool[(Math.random() * pool.length) | 0];
+  return poi || { kind: 'center', ref: null, x: game.map.w / 2, y: game.map.h / 2 };
+}
+
+// Is the current poi's subject still in the game?
+function poiAlive() {
+  if (!poi || !poi.ref) return !!poi;
+  if (poi.kind === 'sett') return game.settlements.includes(poi.ref);
+  return !poi.ref.dead;
+}
+
+// Keep a moving subject's coordinates fresh (armies march, fights drift).
+function refreshPoi() {
+  if (!poi || !poi.ref) return;
+  if (poi.kind === 'sett') return; // settlements don't move
+  poi.x = poi.ref.x; poi.y = poi.ref.y;
+}
+
+function updateCamera(dt, ts) {
+  if (!poiAlive()) { poi = nextPoi(); camMode = 'travel'; travelT = 0; }
+  refreshPoi();
+  // head for where the camera can actually center — a poi hugging the
+  // map edge is unreachable past the clamp, so aim at the clamped spot
+  const t = clampPoint(poi.x, poi.y);
+  const dx = t.x - view.cx, dy = t.y - view.cy;
+  const d = Math.hypot(dx, dy);
+  if (camMode === 'travel') {
+    travelT += dt;
+    if (d < 0.3) {
+      camMode = 'dwell';
+      dwellUntil = ts + DWELL_MS;
+    } else {
+      // ease in from a standstill, cruise, ease out on approach
+      const ramp = Math.min(1, travelT / PAN_RAMP_MS);
+      const speed = Math.min(PAN_SPEED * ramp, Math.max(0.5, d * 1.2));
+      const step = Math.min(d, speed * (dt / 1000));
+      view.cx += (dx / d) * step;
+      view.cy += (dy / d) * step;
+    }
+  } else {
+    // dwell: soft-follow the subject so a marching army stays framed
+    const k = 1 - Math.exp(-dt / 500);
+    view.cx += dx * k;
+    view.cy += dy * k;
+    if (ts >= dwellUntil) { poi = nextPoi(); camMode = 'travel'; travelT = 0; }
+  }
+  clampView();
+}
+
+// The nearest point to (x, y) the camera center can reach under clampView.
+function clampPoint(x, y) {
   const c = $('menu-canvas');
   const w = c.clientWidth || window.innerWidth;
   const h = c.clientHeight || window.innerHeight;
-  if (game.map.w <= w / view.scale) vel.x = 0;
-  if (game.map.h <= h / view.scale) vel.y = 0;
-  view.cx += vel.x * (dt / 1000);
-  view.cy += vel.y * (dt / 1000);
-  const px = view.cx, py = view.cy;
-  clampView();
-  // clamping moved us: we hit an edge — reflect that axis
-  if (view.cx !== px) vel.x = -vel.x;
-  if (view.cy !== py) vel.y = -vel.y;
+  const halfW = w / view.scale / 2, halfH = h / view.scale / 2;
+  return {
+    x: game.map.w > halfW * 2 ? Math.max(halfW, Math.min(game.map.w - halfW, x)) : game.map.w / 2,
+    y: game.map.h > halfH * 2 ? Math.max(halfH, Math.min(game.map.h - halfH, y)) : game.map.h / 2,
+  };
 }
 
 // Like input.js clampView, but stricter: scenery should never show
@@ -246,11 +330,6 @@ function clampView() {
   const h = c.clientHeight || window.innerHeight;
   const minScale = Math.max(3, Math.min(w / game.map.w, h / game.map.h) * 0.9);
   view.scale = Math.max(minScale, Math.min(96, view.scale));
-  const halfW = w / view.scale / 2, halfH = h / view.scale / 2;
-  view.cx = game.map.w > halfW * 2
-    ? Math.max(halfW, Math.min(game.map.w - halfW, view.cx))
-    : game.map.w / 2;
-  view.cy = game.map.h > halfH * 2
-    ? Math.max(halfH, Math.min(game.map.h - halfH, view.cy))
-    : game.map.h / 2;
+  const p = clampPoint(view.cx, view.cy);
+  view.cx = p.x; view.cy = p.y;
 }
