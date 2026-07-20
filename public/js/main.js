@@ -1620,7 +1620,7 @@ function renderPanelInner(force) {
         </div>
         <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-emerald-500" style="width:${tier * 25}%"></div></div>
         ${tb ? `<div class="text-xs ${tb.owner === me ? 'text-amber-300' : 'text-red-400'} mb-1">🌾 ${tb.owner === me ? 'Farmland of your settlement' : 'Enemy farmland'}</div>` : ''}
-        ${game.pillaged.has(i) ? '<div class="text-xs text-orange-400">🔥 Scorched — recovering very slowly</div>' : ''}`);
+        ${game.pillaged.has(i) ? '<div class="text-xs text-orange-400">🔥 Scorched — recovering slowly</div>' : ''}`);
     }
     return;
   }

@@ -42,7 +42,7 @@ export const C = {
   PILLAGE_INTAKE_MULT: 3,  // pillage intake cap per tick, × the army's eating rate
   PILLAGE_DRAWS: 3,        // max tiles drawn from (degraded) per pillage tick (#72)
   FERT_LEVEL: 0.25,        // one visible fertility level (of four above zero)
-  FERT_REGEN: 0.01 / 600,  // fertility per tick (0.01/min)
+  FERT_REGEN: 0.02 / 600,  // fertility per tick (0.02/min — doubled per #110)
   TERRITORY: 5,            // settlement territory radius: feeds friendly blobs, farmer reach, drawn ring
   UNIT_HP: 100,            // individual unit health (deploy / supply)
   UNIT_HP_FARM: 10,        // farmers are 1/10th as tough
