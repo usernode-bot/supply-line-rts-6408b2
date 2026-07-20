@@ -30,6 +30,7 @@
     { "name": "How to Play mentions the arming delay for Deploy conversions", "path": "/?demo=1", "expectText": "Arming takes about 10 seconds" },
     { "name": "How to Play mentions farmer flight to garrison", "path": "/?demo=1", "expectText": "every friendly farmer group within 4 tiles" },
     { "name": "How to Play mentions settlement-to-settlement supply routes", "path": "/?demo=1", "expectText": "Supply route to another settlement" },
-    { "name": "How to Play mentions the attack-direction line", "path": "/?demo=1", "expectText": "attack-direction line" }
+    { "name": "How to Play mentions the attack-direction line", "path": "/?demo=1", "expectText": "attack-direction line" },
+    { "name": "How to Play mentions sending farmers to a plot by ordering onto farmland", "path": "/?demo=1", "expectText": "sends them to work that field" }
   ]
 }

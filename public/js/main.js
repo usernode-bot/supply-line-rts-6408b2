@@ -992,14 +992,22 @@ function onRightClick(world) {
   hideOrderPopup();
   const blobs = selectedBlobs();
   if (!blobs.length) return;
-  const target = findEnemyTargetAt(world);
-  let err = null, ok = 0;
+  orderMove(blobs, world, findEnemyTargetAt(world));
+}
+
+// Shared move dispatch: issue the order to every selected blob, ping the
+// destination, and confirm field assignments (#111) so a farmland click
+// visibly reads as "go work that plot", not a plain move.
+function orderMove(blobs, world, target) {
+  let err = null, ok = 0, fielded = 0;
   for (const b of blobs) {
     const r = doMove(b, world.x, world.y, target);
-    if (r.err) err = r.err; else ok++;
+    if (r.err) err = r.err;
+    else { ok++; fielded += r.fielded || 0; }
   }
   if (ok) pingOrder(world, target);
-  if (err) toast(err);
+  if (fielded) toast(`🌱 ${fielded} farmer${fielded === 1 ? '' : 's'} heading to the fields`);
+  else if (err) toast(err);
 }
 
 // Brief destination animation so a move/attack order visibly lands (#71).
@@ -1250,13 +1258,7 @@ orderPopup.addEventListener('click', (e) => {
   if (act === 'pclose') { ui.selected = null; renderPanel(true); return; }
   if (!world) return;
   const target = act === 'pattack' ? targetEnt : null;
-  let err = null, ok = 0;
-  for (const b of selectedBlobs()) {
-    const r = doMove(b, world.x, world.y, target);
-    if (r.err) err = r.err; else ok++;
-  }
-  if (ok) pingOrder(world, target);
-  if (err) toast(err);
+  orderMove(selectedBlobs(), world, target);
   renderPanel(true);
 });
 
@@ -1294,14 +1296,7 @@ function resolvePending(world, pointerType, screen) {
   const blobs = selectedBlobs();
   if (pending === 'move') {
     if (!blobs.length) return;
-    const target = findEnemyTargetAt(world); // tapping an enemy targets it
-    let err = null, ok = 0;
-    for (const b of blobs) {
-      const r = doMove(b, world.x, world.y, target);
-      if (r.err) err = r.err; else ok++;
-    }
-    if (ok) pingOrder(world, target);
-    if (err) toast(err);
+    orderMove(blobs, world, findEnemyTargetAt(world)); // tapping an enemy targets it
   } else if (pending === 'route') {
     const carrier = blobs[0];
     if (!carrier) return;
