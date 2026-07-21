@@ -1493,15 +1493,19 @@ function setPanelHTML(html) {
   panel.innerHTML = html;
 }
 
-// Per-unit health strip along the bottom of the screen for a single
-// selected friendly blob: one chip per unit (role icon + hp bar) in
-// damage order — the leftmost unit is the next to take damage.
+// Strip along the bottom of the screen for the current blob selection.
+// Single blob: one chip per unit (role icon + hp bar) in damage order —
+// the leftmost unit is the next to take damage. Multiple blobs: the
+// selection grouped by role — one chip per role present with its total
+// count and an aggregate health bar (chips are display-only).
 const STRIP_MAX = 100;
 function updateUnitStrip() {
   const strip = $('unit-strip');
-  let b = null;
-  if (game && !game.result && ui.selected && ui.selected.kind === 'blob') b = findBlob(ui.selected.id);
-  if (!b || b.dead || !b.units || !b.units.length) {
+  let blobs = [];
+  if (game && !game.result && ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'multi')) {
+    blobs = selectedBlobs();
+  }
+  if (!blobs.length || !blobs.some(b => b.units && b.units.length)) {
     strip.classList.add('hidden');
     lastStripHTML = '';
     return;
@@ -1511,19 +1515,45 @@ function updateUnitStrip() {
   strip.style.bottom = window.matchMedia('(min-width: 640px)').matches
     ? '' : (panel.classList.contains('hidden') ? 0 : panel.offsetHeight) + 'px';
   const chips = [];
-  const n = Math.min(b.units.length, STRIP_MAX);
-  for (let i = 0; i < n; i++) {
-    const u = b.units[i];
-    const pct = Math.max(0, Math.min(1, u.hp / S.unitMaxHP(u.role)));
-    const col = pct >= 0.75 ? 'bg-emerald-500' : pct >= 0.4 ? 'bg-amber-500' : 'bg-red-500';
-    const icon = u.role === 'deploy' ? '⚔️' : u.role === 'supply' ? '🚚' : '🌱';
-    chips.push(`<div class="shrink-0 w-7 flex flex-col items-center gap-0.5 py-0.5">
-      <span class="text-sm leading-none">${icon}</span>
-      <div class="w-6 h-1 rounded bg-zinc-800 overflow-hidden"><div class="h-full ${col}" style="width:${Math.round(pct * 100)}%"></div></div>
-    </div>`);
-  }
-  if (b.units.length > STRIP_MAX) {
-    chips.push(`<div class="shrink-0 flex items-center text-xs text-zinc-400 px-1">+${b.units.length - STRIP_MAX} more</div>`);
+  if (blobs.length === 1) {
+    const b = blobs[0];
+    const n = Math.min(b.units.length, STRIP_MAX);
+    for (let i = 0; i < n; i++) {
+      const u = b.units[i];
+      const pct = Math.max(0, Math.min(1, u.hp / S.unitMaxHP(u.role)));
+      const col = pct >= 0.75 ? 'bg-emerald-500' : pct >= 0.4 ? 'bg-amber-500' : 'bg-red-500';
+      const icon = u.role === 'deploy' ? '⚔️' : u.role === 'supply' ? '🚚' : '🌱';
+      chips.push(`<div class="shrink-0 w-7 flex flex-col items-center gap-0.5 py-0.5">
+        <span class="text-sm leading-none">${icon}</span>
+        <div class="w-6 h-1 rounded bg-zinc-800 overflow-hidden"><div class="h-full ${col}" style="width:${Math.round(pct * 100)}%"></div></div>
+      </div>`);
+    }
+    if (b.units.length > STRIP_MAX) {
+      chips.push(`<div class="shrink-0 flex items-center text-xs text-zinc-400 px-1">+${b.units.length - STRIP_MAX} more</div>`);
+    }
+  } else {
+    // multi-select: aggregate hp / maxHP per role across every unit
+    const agg = { deploy: { n: 0, hp: 0, max: 0 }, supply: { n: 0, hp: 0, max: 0 }, farm: { n: 0, hp: 0, max: 0 } };
+    let tot = 0;
+    for (const b of blobs) {
+      for (const u of b.units) {
+        const a = agg[u.role] || (agg[u.role] = { n: 0, hp: 0, max: 0 });
+        a.n++; a.hp += u.hp; a.max += S.unitMaxHP(u.role);
+        tot++;
+      }
+    }
+    chips.push(`<div class="shrink-0 flex items-center text-xs text-zinc-400 px-1 whitespace-nowrap">${blobs.length} blobs · ${tot} unit${tot === 1 ? '' : 's'}</div>`);
+    for (const role of ['deploy', 'supply', 'farm']) {
+      const a = agg[role];
+      if (!a.n) continue;
+      const pct = Math.max(0, Math.min(1, a.hp / Math.max(1, a.max)));
+      const col = pct >= 0.75 ? 'bg-emerald-500' : pct >= 0.4 ? 'bg-amber-500' : 'bg-red-500';
+      const icon = role === 'deploy' ? '⚔️' : role === 'supply' ? '🚚' : '🌱';
+      chips.push(`<div class="shrink-0 flex flex-col items-center gap-0.5 px-2 py-0.5">
+        <span class="text-sm leading-none whitespace-nowrap">${icon} <b class="text-xs align-middle">${a.n}</b></span>
+        <div class="w-12 h-1 rounded bg-zinc-800 overflow-hidden"><div class="h-full ${col}" style="width:${Math.round(pct * 100)}%"></div></div>
+      </div>`);
+    }
   }
   const html = chips.join('');
   if (html !== lastStripHTML) {
