@@ -1373,6 +1373,15 @@ function targetPos(tgt, kind) {
   return kind === 'blob' ? { x: tgt.x, y: tgt.y } : settCenter(tgt);
 }
 
+// Delivery dock distance: to an army it's the touching-radii distance
+// (carrier edge meets target edge, #147); to a settlement it's the fixed
+// unload range around the 2×2 footprint center.
+function dockRange(b, tgt, kind) {
+  return kind === 'blob'
+    ? blobRadius(b) + blobRadius(tgt) + SUP.TOUCH_SLACK
+    : SUP.UNLOAD_RANGE;
+}
+
 // No way through to this leg's destination (revealed mountains walled it
 // off) — release the carrier instead of pacing at the wall forever. It
 // keeps as much of its cargo as it can carry as its own food.
@@ -1425,10 +1434,10 @@ function tickCarrier(game, b) {
       return;
     }
     o.holding = false;
-    // radius-aware docking (#132): a delivery to an army counts as arrived
-    // at the army's edge — big blobs no longer require reaching the exact
-    // center, which a same-speed caravan chasing a mover can never do
-    const dock = SUP.UNLOAD_RANGE + (route.targetKind === 'blob' ? blobRadius(tgt) : 0);
+    // touching-radii docking (#132, #147): a delivery to an army arrives
+    // the moment the carrier's circle touches the target's — no fixed
+    // padding, so the caravan visually docks against the army's edge
+    const dock = dockRange(b, tgt, route.targetKind);
     if (dist(b.x, b.y, tp.x, tp.y) <= dock) { o.phase = 'unload'; b.path = null; return; }
     const stale = b.pathGoal && dist(b.pathGoal.x, b.pathGoal.y, tp.x, tp.y) > 2.5;
     if (!b.path || !b.path.length || (stale && game.tick % 10 === 0)) {
@@ -1438,7 +1447,7 @@ function tickCarrier(game, b) {
   } else if (o.phase === 'unload') {
     const tp = targetPos(tgt, route.targetKind);
     if (route.targetKind === 'settlement' && besieged(game, tgt)) { o.phase = 'go'; return; }
-    const dock = SUP.UNLOAD_RANGE + (route.targetKind === 'blob' ? blobRadius(tgt) : 0);
+    const dock = dockRange(b, tgt, route.targetKind);
     if (dist(b.x, b.y, tp.x, tp.y) > dock + SUP.UNLOAD_SLACK) { o.phase = 'go'; return; }
     const give = Math.min(o.cargo, cap / 20);
     let taken = 0;
