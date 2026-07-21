@@ -14,7 +14,10 @@ export function createInput({ canvas, minimap, view, handlers }) {
   let panStart = null;
   let pinch = null;
   let boxRect = null;
-  let boxAdditive = false; // shift held when the box drag started (#136)
+  // shift held when the box drag started (#136) — read live from the
+  // pointer event, never from tracked key state, so a missed Shift keyup
+  // (focus stolen without a blur) can't leave additive select stuck on
+  let boxAdditive = false;
   const keys = new Set();
   let mousePos = null;
   let mapSize = { w: 96, h: 96 };
@@ -98,7 +101,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
     if (mode === 'maybe' && start) {
       if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > SLOP) {
         mode = (start.type === 'mouse' && start.button === 0) ? 'box' : 'pan';
-        if (mode === 'box') boxAdditive = isAttackHeld(); // shift = add to selection (#136)
+        if (mode === 'box') boxAdditive = e.shiftKey; // shift = add to selection (#136)
         if (handlers.gesture) handlers.gesture();
       }
     }
@@ -151,7 +154,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
 
   canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    handlers.rightClick(worldFromScreen(e.clientX, e.clientY), isAttackHeld());
+    handlers.rightClick(worldFromScreen(e.clientX, e.clientY), e.shiftKey);
   });
 
   // Trackpad two-finger scroll pans, pinch zooms (#124). Pinch arrives as
@@ -268,6 +271,12 @@ export function createInput({ canvas, minimap, view, handlers }) {
   }
   window.addEventListener('keydown', (e) => {
     if (isTextEntry(e.target)) return;
+    // Browser/OS chords (Cmd/Ctrl/Alt + key) are never game input: don't
+    // track them (macOS suppresses keyup for keys pressed under Cmd, so
+    // they'd stick in the Set and pan forever) and don't preventDefault,
+    // so Cmd/Ctrl+digit tab switching etc. pass through untouched. Shift
+    // stays out of this guard — shift+digit assigns control groups.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     keys.add(e.code);
     if (e.code === 'Escape') handlers.cancel();
     // control groups (#69): shift+digit assigns, digit selects (double-tap
@@ -281,11 +290,6 @@ export function createInput({ canvas, minimap, view, handlers }) {
   window.addEventListener('keyup', (e) => keys.delete(e.code));
   window.addEventListener('blur', () => keys.clear());
   document.addEventListener('visibilitychange', () => { if (document.hidden) keys.clear(); });
-
-  // Shift no longer modifies orders (attacking needs an explicit enemy
-  // target, #74) — it's the control-group assign modifier now. Kept only
-  // for the legacy rightClick/attackHeld plumbing, which ignores it.
-  function isAttackHeld() { return keys.has('ShiftLeft') || keys.has('ShiftRight'); }
 
   // called each frame for keyboard / edge panning
   function update(dtMs) {
@@ -314,7 +318,6 @@ export function createInput({ canvas, minimap, view, handlers }) {
 
   return {
     update, worldFromScreen, setMapSize, clampView,
-    get attackHeld() { return isAttackHeld(); },
     // last known mouse position in world coords (null before any mouse
     // move — i.e. on touch-only devices); drives the build-placement
     // hover preview (#94)
