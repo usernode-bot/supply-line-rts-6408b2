@@ -35,7 +35,9 @@ native tick rate. The default 1× game speed runs at *half* that rate
 is fixed at 1×, so quick multiplayer games are best played on the
 smaller map sizes. Core loop:
 found settlements on fertile land, feed armies via pillage or supply
-routes, destroy all enemy settlements to win. The full game sim runs
+routes, wipe out the enemy to win (a side is only defeated at zero
+settlements AND fewer than 5 units — enough units left means it can
+still rebuild). The full game sim runs
 client-side (ES modules under `public/js/`); the server gates auth,
 records match history in the `matches` table, and pre-simulates a small
 in-memory pool of AI-vs-AI mid-game snapshots (`attract-pool.js`, served

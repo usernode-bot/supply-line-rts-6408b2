@@ -732,7 +732,7 @@ function showEndModal(win, reason) {
       ? `${opp} abandoned the match — victory is yours.`
       : reason === 'surrender'
         ? `${opp} surrendered after ${dur}.`
-        : `You destroyed every settlement ${opp} had in ${dur}.`)
+        : `You wiped out ${opp}'s settlements and last forces in ${dur}.`)
     : (reason === 'abandoned'
       ? `The match was claimed while you were away.`
       : reason === 'surrender'
@@ -752,7 +752,7 @@ function endMatch(result) {
   $('end-emoji').textContent = win ? '🏆' : '🏳️';
   $('end-title').textContent = win ? 'Victory!' : result === 'surrender' ? 'Surrendered' : 'Defeat';
   $('end-detail').textContent = win
-    ? `All enemy settlements destroyed in ${fmtDur(game.tick / 10)}.`
+    ? `Enemy settlements razed and their last forces scattered in ${fmtDur(game.tick / 10)}.`
     : `Your war effort collapsed after ${fmtDur(game.tick / 10)}.`;
   $('end-modal').classList.remove('hidden');
   // fire-and-forget record
