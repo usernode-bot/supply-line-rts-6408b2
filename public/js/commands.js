@@ -55,12 +55,20 @@ export function applyCommand(g, owner, c) {
     case 'pillage': if (b) S.opPillage(g, b, !!c.on); break;
     case 'route':
       if (b && c.target) {
+        // explicit source (#131): only the acting player's own completed
+        // settlement is honoured; anything else degrades to the nearest-
+        // settlement fallback inside createRoute
+        let srcId = null;
+        if (c.sourceId != null) {
+          const s = g.settlements.find(x => x.id === c.sourceId && x.owner === owner && !x.building);
+          if (s) srcId = s.id;
+        }
         if (c.target.kind === 'blob') {
           const t = resolveBlobIn(g, owner, c.target.id);
-          if (t && t.id !== b.id) S.opRoute(g, b, { kind: 'blob', id: t.id });
+          if (t && t.id !== b.id) S.opRoute(g, b, { kind: 'blob', id: t.id }, srcId);
         } else if (c.target.kind === 'settlement') {
           const t = g.settlements.find(s => s.id === c.target.id && s.owner === owner);
-          if (t) S.opRoute(g, b, { kind: 'settlement', id: t.id });
+          if (t) S.opRoute(g, b, { kind: 'settlement', id: t.id }, srcId);
         }
       }
       break;

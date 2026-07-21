@@ -4,6 +4,9 @@
 
 export const CARRY_PER_UNIT = 10;      // food capacity per supply unit
 export const HEALTH_WINDOW_TICKS = 300; // 30 s rolling window
+export const LOAD_RANGE = 2.7;    // carrier-to-source-center distance to load / resume loading
+export const UNLOAD_RANGE = 2.5;  // carrier-to-target distance that starts unloading
+export const UNLOAD_SLACK = 0.6;  // hysteresis past UNLOAD_RANGE before re-approaching
 
 export function createRoute(game, blob, target, initialCargo, sourceId) {
   // target: { kind: 'blob'|'settlement', id }
@@ -25,16 +28,26 @@ export function createRoute(game, blob, target, initialCargo, sourceId) {
     const tgt = game.settlements.find(s => s.id === target.id);
     if (tgt && tgt.building) return { err: 'Still under construction' };
   }
-  const route = {
-    id: game.nextId++,
-    owner: blob.owner,
-    settlementId: src.id,
-    targetKind: target.kind,
-    targetId: target.id,
-    carrierIds: [blob.id],
-    window: [], // [{t, amt}]
-  };
-  game.routes.push(route);
+  // multi-blob lines (#133): an identical live route (same owner, source
+  // and destination) gains a carrier instead of spawning a duplicate —
+  // one line on the map, one shared health window.
+  let route = game.routes.find(r =>
+    r.owner === blob.owner && r.settlementId === src.id
+    && r.targetKind === target.kind && r.targetId === target.id);
+  if (route) {
+    if (!route.carrierIds.includes(blob.id)) route.carrierIds.push(blob.id);
+  } else {
+    route = {
+      id: game.nextId++,
+      owner: blob.owner,
+      settlementId: src.id,
+      targetKind: target.kind,
+      targetId: target.id,
+      carrierIds: [blob.id],
+      window: [], // [{t, amt}]
+    };
+    game.routes.push(route);
+  }
   // carried-over cargo stays aboard (#103): a full carrier heads straight
   // out; a partial one loads first (the load phase tops up, never resets)
   const cap = (blob.count.deploy + blob.count.supply + blob.count.farm) * CARRY_PER_UNIT;
