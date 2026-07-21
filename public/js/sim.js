@@ -67,8 +67,8 @@ export const C = {
   WALL_PROT: 3,            // garrisoned units take 1/3 open-field damage
   WALL_DEF: 1.5,           // garrison return fire vs besiegers, × the open-field rate
   MILITIA_SUPPLY: 0.5,     // garrisoned supply unit's return fire vs a fighter's (#127)
-  MILITIA_FARM: 0.1,       // garrisoned farmer's return fire vs a fighter's — matches
-                           // their 1/10 field toughness (UNIT_HP_FARM)
+  MILITIA_FARM: 0.5,       // garrisoned farmer's return fire vs a fighter's — same as
+                           // supply: behind walls everyone able-bodied fights
   FARM_FLEE_RADIUS: 4,     // a hit farmer group pulls friendly farmers within this radius home
   CONVERT_TICKS: 100,      // 10 native seconds to arm units into the deploy role
 };
