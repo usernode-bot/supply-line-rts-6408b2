@@ -22,7 +22,7 @@ export function aiTick(game, S, owner = 1, state = game.ai) {
   const diff = S.DIFF[state.diffKey || game.difficulty];
   const mine = game.blobs.filter(b => !b.dead && b.owner === owner);
   const setts = game.settlements.filter(s => s.owner === owner);
-  if (setts.length === 0) return;
+  if (setts.length === 0) { rebuild(game, S, mine, state, diff); return; }
 
   updateMemory(game, S, mine, setts, owner, state, diff);
   develop(game, S, setts, mine);
@@ -165,7 +165,7 @@ function expand(game, S, setts, mine, state, diff) {
 }
 
 function pickSite(game, S, setts, state, diff) {
-  const { w, h, orig } = game.map;
+  const { w, h } = game.map;
   let best = null, bestScore = -Infinity;
   for (let y = 4; y < h - 4; y += 3) {
     for (let x = 4; x < w - 4; x += 3) {
@@ -178,21 +178,85 @@ function pickSite(game, S, setts, state, diff) {
         if (setts.includes(s) && d < nearest) nearest = d;
       }
       if (!ok || nearest > 26) continue;
-      // score the farmland ring around the footprint center
-      let fert = 0;
-      for (let dy = -2; dy <= 3; dy++) for (let dx = -2; dx <= 3; dx++) {
-        const tx = x + dx, ty = y + dy;
-        if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
-        if (dist(tx + 0.5, ty + 0.5, x + 1, y + 1) > 2.7) continue;
-        if (dx >= 0 && dx <= 1 && dy >= 0 && dy <= 1) continue; // footprint
-        fert += orig[ty * w + tx];
-      }
+      const fert = siteFertility(game, x, y);
       let danger = 0;
       for (const k of Object.values(state.known)) danger += Math.max(0, 30 - dist(k.x, k.y, x, y));
       let score = fert - nearest * 0.15 - danger * 0.2;
       // a sloppy surveyor mis-judges land quality, so the best site
       // doesn't reliably win (easy)
       if (diff.siteNoise) score *= 1 - Math.random() * diff.siteNoise;
+      if (score > bestScore) { bestScore = score; best = { x, y }; }
+    }
+  }
+  return best;
+}
+
+// score the farmland ring around a prospective footprint center
+function siteFertility(game, x, y) {
+  const { w, h, orig } = game.map;
+  let fert = 0;
+  for (let dy = -2; dy <= 3; dy++) for (let dx = -2; dx <= 3; dx++) {
+    const tx = x + dx, ty = y + dy;
+    if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+    if (dist(tx + 0.5, ty + 0.5, x + 1, y + 1) > 2.7) continue;
+    if (dx >= 0 && dx <= 1 && dy >= 0 && dy <= 1) continue; // footprint
+    fert += orig[ty * w + tx];
+  }
+  return fert;
+}
+
+// -- last stand: refound after losing every settlement (#148) ----------
+// Losing all settlements no longer ends the match while SETT_COST+ units
+// survive (see checkResult in sim.js), so instead of idling the AI pools
+// its survivors and walks them to a fresh site. opBuildAt handles the
+// rest: the founder builds on arrival, or waits for escorts to merge in
+// when it carries fewer than SETT_COST units itself (#130).
+function rebuild(game, S, mine, state, diff) {
+  const alive = mine.reduce((n, b) => n + S.total(b), 0);
+  if (alive < S.C.SETT_COST) return; // truly beaten — checkResult ends it
+  if (state.expand) {
+    const b = mine.find(x => x.id === state.expand.blobId);
+    if (b && b.order) {
+      // keep stragglers converging on the site so the founding completes
+      for (const o of mine) {
+        if (o.id !== b.id && !o.order) S.opMove(game, o, state.expand.x, state.expand.y);
+      }
+      return;
+    }
+    state.expand = null; // founder died or built — re-evaluate next pass
+  }
+  // strongest surviving blob leads the founding
+  let founder = mine[0];
+  for (const b of mine) if (S.total(b) > S.total(founder)) founder = b;
+  if (!founder) return;
+  const site = pickRebuildSite(game, S, founder, state);
+  if (!site) return;
+  if (S.opBuildAt(game, founder, site.x + 1, site.y + 1).ok) {
+    state.expand = { blobId: founder.id, x: site.x + 1, y: site.y + 1 };
+    state.lastExpand = game.tick;
+    for (const o of mine) {
+      if (o.id !== founder.id) S.opMove(game, o, site.x + 1, site.y + 1);
+    }
+  }
+}
+
+// like pickSite, but with no own settlements to anchor on: weigh the
+// founder's trek instead, and steer clear of remembered enemy positions
+function pickRebuildSite(game, S, founder, state) {
+  const { w, h } = game.map;
+  let best = null, bestScore = -Infinity;
+  for (let y = 4; y < h - 4; y += 3) {
+    for (let x = 4; x < w - 4; x += 3) {
+      if (!S.footprintFits(game, x, y)) continue;
+      let ok = true;
+      for (const s of game.settlements) {
+        if (dist(s.x, s.y, x, y) < 9) { ok = false; break; }
+      }
+      if (!ok) continue;
+      const trek = dist(founder.x, founder.y, x, y);
+      let danger = 0;
+      for (const k of Object.values(state.known)) danger += Math.max(0, 30 - dist(k.x, k.y, x, y));
+      const score = siteFertility(game, x, y) - trek * 0.3 - danger * 0.3;
       if (score > bestScore) { bestScore = score; best = { x, y }; }
     }
   }

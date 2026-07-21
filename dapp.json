@@ -38,6 +38,7 @@
     { "name": "Difficulty hint line present under the dropdown", "path": "/?demo=1", "expectSelector": "#difficulty-hint" },
     { "name": "Difficulty hint shows the Normal blurb by default", "path": "/?demo=1", "expectText": "The standard opponent." },
     { "name": "How to Play group-build paragraph present", "path": "/?demo=1", "expectSelector": "#help-group-build" },
-    { "name": "How to Play describes source-then-destination supply routes", "path": "/?demo=1", "expectText": "source settlement" }
+    { "name": "How to Play describes source-then-destination supply routes", "path": "/?demo=1", "expectText": "source settlement" },
+    { "name": "How to Play states the combined defeat condition (no settlements + under 5 units)", "path": "/?demo=1", "expectText": "fewer than 5 units left" }
   ]
 }

@@ -2542,7 +2542,9 @@ function checkResult(game) {
     else if (eOut) game.result = 'p0-win';
     return;
   }
-  if (e.setts === 0) { game.result = 'win'; return; }
+  // Same rule for both sides (#148): 0 settlements alone isn't the end —
+  // a side with SETT_COST+ units left can still refound and fight on.
+  if (e.setts === 0 && e.units < C.SETT_COST) { game.result = 'win'; return; }
   if (p.setts === 0 && p.units < C.SETT_COST) game.result = 'loss';
 }
 
