@@ -943,6 +943,12 @@ function pingOrder(world, target) {
   ui.ping = { x: world.x, y: world.y, kind: target ? 'attack' : 'move', t: performance.now() };
 }
 
+// Sky-blue ping snapped to a picked supply-route endpoint — route taps
+// pick entities, not ground, so the snap makes a near-miss visible.
+function pingRoute(x, y) {
+  ui.ping = { x, y, kind: 'route', t: performance.now() };
+}
+
 // ---------------------------------------------------------------- control groups (#69, #77)
 // Shift+1–9 assigns the current selection to that number; 1–9 selects the
 // group; pressing the same number twice quickly also centers the camera
@@ -1188,6 +1194,10 @@ function dispatchRoutes(carriers, target, sourceId) {
     if (target.kind === 'settlement') {
       const st = game.settlements.find(s => s.id === target.id);
       dest = (st && st.name) || 'settlement';
+      if (st) pingRoute(st.x + 1, st.y + 1);
+    } else {
+      const tb = findBlob(target.id);
+      if (tb) pingRoute(tb.x, tb.y);
     }
     toast(ok > 1 ? `🚚 ${ok} caravans on the supply line → ${dest}` : `🚚 Supply route established → ${dest}`);
   } else if (err) toast(err);
@@ -1272,6 +1282,7 @@ function resolvePending(world, pointerType, screen) {
       ui.pending = 'route'; // stay armed for the next tap either way
       if (src && src.owner === me && !src.building) {
         ui.routeSrc = src.id;
+        pingRoute(src.x + 1, src.y + 1);
       } else {
         toast('Tap one of your settlements to load from');
       }
@@ -1315,11 +1326,13 @@ function resolvePending(world, pointerType, screen) {
     const stT = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
     if (stT && stT.owner === me && stT.id !== src.id && !stT.building) {
       const r = doSupplyRoute(src, { kind: 'settlement', id: stT.id });
+      if (!r.err) pingRoute(stT.x + 1, stT.y + 1);
       toast(r.err ? r.err : '🚚 Supply route established');
     } else {
       const tgt = S.blobAt(game, world.x, world.y, hitR);
       if (tgt && tgt.owner === me && tgt.working == null) {
         const r = doSupplyRoute(src, { kind: 'blob', id: tgt.id });
+        if (!r.err) pingRoute(tgt.x, tgt.y);
         toast(r.err ? r.err : '🚚 Supply route established');
       } else {
         toast('Tap a friendly settlement or army to supply');

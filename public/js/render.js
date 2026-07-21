@@ -373,6 +373,24 @@ export function createRenderer(canvas, minimap) {
       drawSettlement(game, st, wx, wy, s, false, sel, workingBy.get(st.id) || 0);
     }
 
+    // armed supply-route source: while a route pick is pending, a pulsing
+    // sky dashed halo marks the settlement the line will load from —
+    // dashed + coloured so it can't read as the white selected outline,
+    // pulsing (unlike the static amber siege halo) from wall-clock time
+    // so it keeps breathing while the game is paused
+    if (ui.routeSrc != null && (ui.pending === 'route' || ui.pending === 'route-sett')) {
+      const src = game.settlements.find(st => st.id === ui.routeSrc && st.owner === viewer(game));
+      if (src) {
+        const x0 = wx(src.x), y0 = wy(src.y), size = 2 * s;
+        const a = 0.55 + 0.45 * Math.sin(now / 180);
+        ctx.strokeStyle = `rgba(56,189,248,${a.toFixed(2)})`;
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(x0 - 3, y0 - 3, size + 6, size + 6);
+        ctx.setLineDash([]);
+      }
+    }
+
     // farmers mid-crossing over a footprint (#135): drawn above the keep
     // so they stay visible walking across instead of blinking out
     for (const b of crossingFarmers) drawWorkingFarmer(game, b, wx, wy, s, alpha, selSet);
@@ -778,15 +796,16 @@ export function createRenderer(canvas, minimap) {
 
     // order-confirmation ping: a single collapsing ring at the ordered
     // destination so a tap visibly lands (#71, #78) — red for an attack
-    // order, white for a plain move. Above fog: the destination may
-    // still be unexplored.
+    // order, sky for a supply-route endpoint, white for a plain move.
+    // Above fog: the destination may still be unexplored.
     if (ui.ping) {
       const age = now - ui.ping.t;
       const DUR = 600;
       if (age >= DUR) ui.ping = null;
       else {
         const px = wx(ui.ping.x), py = wy(ui.ping.y);
-        const col = ui.ping.kind === 'attack' ? '248,113,113' : '255,255,255';
+        const col = ui.ping.kind === 'attack' ? '248,113,113'
+          : ui.ping.kind === 'route' ? '56,189,248' : '255,255,255';
         const p = age / DUR;
         ctx.lineWidth = 2;
         ctx.beginPath();
