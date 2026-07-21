@@ -14,6 +14,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
   let panStart = null;
   let pinch = null;
   let boxRect = null;
+  let boxAdditive = false; // shift held when the box drag started (#136)
   const keys = new Set();
   let mousePos = null;
   let mapSize = { w: 96, h: 96 };
@@ -97,6 +98,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
     if (mode === 'maybe' && start) {
       if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > SLOP) {
         mode = (start.type === 'mouse' && start.button === 0) ? 'box' : 'pan';
+        if (mode === 'box') boxAdditive = isAttackHeld(); // shift = add to selection (#136)
         if (handlers.gesture) handlers.gesture();
       }
     }
@@ -137,7 +139,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
     } else if (mode === 'box' && boxRect) {
       const a = worldFromScreen(boxRect.x0, boxRect.y0);
       const b = worldFromScreen(boxRect.x1, boxRect.y1);
-      handlers.box({ x0: a.x, y0: a.y, x1: b.x, y1: b.y });
+      handlers.box({ x0: a.x, y0: a.y, x1: b.x, y1: b.y }, boxAdditive);
     }
     selbox.style.display = 'none';
     boxRect = null;

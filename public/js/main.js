@@ -882,12 +882,18 @@ function onTap(world, pointerType, screen) {
   renderPanel(true);
 }
 
-function onBox(rect) {
+function onBox(rect, additive) {
   if (!game || game.result) return;
   hideOrderPopup();
-  const ids = game.blobs
+  let ids = game.blobs
     .filter(b => !b.dead && b.owner === me && b.x >= rect.x0 && b.x <= rect.x1 && b.y >= rect.y0 && b.y <= rect.y1)
     .map(b => b.id);
+  if (additive) {
+    // shift-drag (#136): union the boxed blobs with the current selection;
+    // an empty additive box keeps the selection instead of clearing it
+    if (!ids.length) return;
+    ids = [...new Set([...selectedBlobs().map(b => b.id), ...ids])];
+  }
   if (ids.length === 0) { ui.selected = null; }
   else if (ids.length === 1) ui.selected = { kind: 'blob', id: ids[0] };
   else ui.selected = { kind: 'multi', ids };
@@ -1176,8 +1182,15 @@ function dispatchRoutes(carriers, target, sourceId) {
     const r = doRoute(c, target, sourceId);
     if (r.err) err = r.err; else ok++;
   }
-  if (ok) toast(ok > 1 ? `🚚 ${ok} caravans on the supply line` : '🚚 Supply route established');
-  else if (err) toast(err);
+  if (ok) {
+    // name the destination (#142) so a mis-tap is visible, not a mystery
+    let dest = 'your army';
+    if (target.kind === 'settlement') {
+      const st = game.settlements.find(s => s.id === target.id);
+      dest = (st && st.name) || 'settlement';
+    }
+    toast(ok > 1 ? `🚚 ${ok} caravans on the supply line → ${dest}` : `🚚 Supply route established → ${dest}`);
+  } else if (err) toast(err);
 }
 
 function confirmBuild() {
@@ -1268,19 +1281,29 @@ function resolvePending(world, pointerType, screen) {
     }
     const srcId = ui.routeSrc;
     ui.routeSrc = null;
-    let tgt = S.blobAt(game, world.x, world.y, hitR);
-    if (tgt && (tgt.owner !== me || carriers.some(c => c.id === tgt.id))) tgt = null;
+    // settlement-first resolution (#142): a tap on/at a footprint always
+    // targets the settlement — field hands carpeting the farms around it
+    // can no longer steal the tap. Working farmers are never sensible
+    // route targets, so they're excluded from the blob hit test too.
+    let st = S.settlementAt(game, world.x, world.y, 1.9);
+    if (st && st.owner !== me) st = null;
+    let tgt = null;
+    if (!st) {
+      tgt = S.blobAt(game, world.x, world.y, hitR);
+      if (tgt && (tgt.owner !== me || tgt.working != null || carriers.some(c => c.id === tgt.id))) tgt = null;
+      if (!tgt) {
+        st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+        if (st && st.owner !== me) st = null;
+      }
+    }
     if (tgt) {
       dispatchRoutes(carriers, { kind: 'blob', id: tgt.id }, srcId);
+    } else if (st && st.id === srcId) {
+      toast('Route must lead away from its source');
+    } else if (st) {
+      dispatchRoutes(carriers, { kind: 'settlement', id: st.id }, srcId);
     } else {
-      const st = S.settlementAt(game, world.x, world.y, hitR);
-      if (st && st.owner === me && st.id === srcId) {
-        toast('Route must lead away from its source');
-      } else if (st && st.owner === me) {
-        dispatchRoutes(carriers, { kind: 'settlement', id: st.id }, srcId);
-      } else {
-        toast('Tap a friendly army or settlement to supply');
-      }
+      toast('Tap a friendly army or settlement to supply');
     }
   } else if (pending === 'route-sett') {
     // settlement-to-settlement supply line (#108): source is the
@@ -1295,7 +1318,7 @@ function resolvePending(world, pointerType, screen) {
       toast(r.err ? r.err : '🚚 Supply route established');
     } else {
       const tgt = S.blobAt(game, world.x, world.y, hitR);
-      if (tgt && tgt.owner === me) {
+      if (tgt && tgt.owner === me && tgt.working == null) {
         const r = doSupplyRoute(src, { kind: 'blob', id: tgt.id });
         toast(r.err ? r.err : '🚚 Supply route established');
       } else {
