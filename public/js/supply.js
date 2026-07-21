@@ -2,6 +2,8 @@
 // Carrier movement itself is ticked by sim.js (it owns movement/pathing);
 // this module owns the route objects and their math.
 
+import { C } from './sim.js';
+
 export const CARRY_PER_UNIT = 10;      // food capacity per supply unit
 export const HEALTH_WINDOW_TICKS = 300; // 30 s rolling window
 export const LOAD_RANGE = 2.7;    // carrier-to-source-center distance to load / resume loading
@@ -27,6 +29,12 @@ export function createRoute(game, blob, target, initialCargo, sourceId) {
   if (target.kind === 'settlement') {
     const tgt = game.settlements.find(s => s.id === target.id);
     if (tgt && tgt.building) return { err: 'Still under construction' };
+  }
+  if (target.kind === 'blob') {
+    // resolve through the merge log (#141) so the duplicate-line match
+    // below compares against the live blob, not a merged-away id
+    const t = resolveLiveBlob(game, target.id);
+    if (t) target = { kind: 'blob', id: t.id };
   }
   // multi-blob lines (#133): an identical live route (same owner, source
   // and destination) gains a carrier instead of spawning a duplicate —
@@ -73,9 +81,25 @@ export function findRoute(game, id) {
   return game.routes.find(r => r.id === id) || null;
 }
 
+// Follow the merge log so a route to an army keeps tracking whatever
+// blob it merged into (#141) — same ≤10-hop walk as resolveBlobIn in
+// commands.js and the UI's selection.
+function resolveLiveBlob(game, id) {
+  let cur = id, hops = 0;
+  while (hops++ < 10) {
+    const b = game.blobs.find(x => x.id === cur && !x.dead);
+    if (b) return b;
+    if (game.mergeLog[cur] != null) cur = game.mergeLog[cur];
+    else return null;
+  }
+  return null;
+}
+
 export function routeTarget(game, route) {
   if (route.targetKind === 'blob') {
-    return game.blobs.find(b => b.id === route.targetId && !b.dead) || null;
+    const b = resolveLiveBlob(game, route.targetId);
+    if (b) route.targetId = b.id; // follow merges (#141)
+    return b;
   }
   return game.settlements.find(s => s.id === route.targetId) || null;
 }
@@ -96,10 +120,16 @@ export function routeHealth(game, route) {
   for (const e of route.window) delivered += e.amt;
   const target = routeTarget(game, route);
   if (!target) return 0;
+  // a topped-off destination means the line is keeping up (#143):
+  // parked carriers deliver nothing while it stays full, which must
+  // not read as a failing line
+  const full = route.targetKind === 'blob'
+    ? target.food >= 0.95 * foodCap(target)
+    : target.stockpile >= 0.95 * C.STOCK_CAP;
   const units = route.targetKind === 'blob'
     ? target.count.deploy + target.count.supply + target.count.farm
     : target.garrison.deploy + target.garrison.supply + target.garrison.farm;
-  if (units <= 0) return 1;
+  if (full || units <= 0) return 1;
   // consumption: units × (1/12) food/s over the window span
   const span = Math.min(game.tick, HEALTH_WINDOW_TICKS) / 10; // seconds
   const consumed = units * (1 / 12) * Math.max(1, span);

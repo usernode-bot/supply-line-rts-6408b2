@@ -187,6 +187,27 @@ export function createRenderer(canvas, minimap) {
                       py + 1 + ((kh >>> 9) % (T - 2 - size)), size, size);
       }
     }
+    // pillage scorch (#144): raided ground reads as damaged, not naturally
+    // barren — a charcoal wash plus ash flecks whose strength tracks the
+    // missing fertility, fading out as the land regenerates (the regen
+    // tick re-dirties the tile every tick, so this repaints on its own).
+    // Hashed per tile — repainting reproduces identical pixels.
+    if (game.pillaged && game.pillaged.has(i)) {
+      const missing = game.map.orig[i] - game.map.fert[i];
+      const k = Math.max(0, Math.min(1, missing / S.C.FERT_LEVEL));
+      if (k > 0.02) {
+        tctx.fillStyle = `rgba(30,20,12,${(0.22 * k).toFixed(3)})`;
+        tctx.fillRect(px, py, T, T);
+        const flecks = 2 + Math.round(k * 3);
+        tctx.fillStyle = `rgba(15,10,8,${(0.35 + 0.4 * k).toFixed(2)})`;
+        for (let f = 0; f < flecks; f++) {
+          const fh = ((i + 1) * 2654435761 + f * 40503) >>> 0;
+          const size = 1 + (fh & 1);
+          tctx.fillRect(px + 1 + ((fh >>> 3) % (T - 2 - size)),
+                        py + 1 + ((fh >>> 11) % (T - 2 - size)), size, size);
+        }
+      }
+    }
   }
 
   // Ease each tile's fog alpha toward its target so vision-circle edges
@@ -328,10 +349,16 @@ export function createRenderer(canvas, minimap) {
     }
 
     // working farmers — drawn before settlements so they can never cover
-    // the garrison readouts
+    // the garrison readouts. A farmer currently crossing a settlement
+    // footprint (#135 — friendly footprints are walkable, so shortest
+    // paths cut across the plot) is deferred to a second pass above the
+    // keep, so it doesn't vanish under the opaque square.
+    const crossingFarmers = [];
     for (const b of game.blobs) {
       if (b.dead || b.working == null) continue;
       if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
+      const ti = Math.floor(by(b)) * game.map.w + Math.floor(bx(b));
+      if (game.settAt && game.settAt[ti]) { crossingFarmers.push(b); continue; }
       drawWorkingFarmer(game, b, wx, wy, s, alpha, selSet);
     }
 
@@ -345,6 +372,10 @@ export function createRenderer(canvas, minimap) {
       const sel = ui.selected && (ui.selected.kind === 'settlement' || ui.selected.kind === 'enemy-settlement') && ui.selected.id === st.id;
       drawSettlement(game, st, wx, wy, s, false, sel, workingBy.get(st.id) || 0);
     }
+
+    // farmers mid-crossing over a footprint (#135): drawn above the keep
+    // so they stay visible walking across instead of blinking out
+    for (const b of crossingFarmers) drawWorkingFarmer(game, b, wx, wy, s, alpha, selSet);
 
     // blobs
     for (const b of game.blobs) {
@@ -364,12 +395,23 @@ export function createRenderer(canvas, minimap) {
       // individual unit figures inside the ring (number-only at far zoom)
       if (r >= 12) drawBlobUnits(game, b, px, py, r);
       // solid team band under the fed ring: band color = allegiance,
-      // dash color on top = fed state (#122)
+      // dash color on top = fed state (#122). The band doubles as the
+      // group's total-health meter (#139): a dim full circle with a
+      // full-strength arc covering the surviving HP fraction, clockwise
+      // from 12 o'clock.
+      const hp = S.blobHealth(b);
       ctx.lineWidth = 4.5;
       ctx.strokeStyle = ownerColor(game, b.owner);
+      ctx.globalAlpha = 0.35;
       ctx.beginPath();
       ctx.arc(px, py, r, 0, Math.PI * 2);
       ctx.stroke();
+      ctx.globalAlpha = 1;
+      if (hp > 0.001) {
+        ctx.beginPath();
+        ctx.arc(px, py, r, -Math.PI / 2, -Math.PI / 2 + hp * Math.PI * 2);
+        ctx.stroke();
+      }
       // dashed fed-state ring
       const m = S.fedMeter(b);
       ctx.lineWidth = 2.5;
@@ -716,6 +758,18 @@ export function createRenderer(canvas, minimap) {
       if (plot) {
         const a = S.buildAnchorAt(game, plot.x, plot.y);
         const ax = a.err ? plot.x : a.x, ay = a.err ? plot.y : a.y;
+        if (!a.err) {
+          // farm preview (#137): the exact plots tillFields will claim on
+          // completion — same previewFields the sim commits from
+          ctx.fillStyle = 'rgba(74,222,128,0.15)';
+          ctx.strokeStyle = 'rgba(74,222,128,0.35)';
+          ctx.lineWidth = 1;
+          for (const i of S.previewFields(game, ax, ay)) {
+            const tx = i % game.map.w, ty = (i / game.map.w) | 0;
+            ctx.fillRect(wx(tx), wy(ty), s, s);
+            ctx.strokeRect(wx(tx) + 0.5, wy(ty) + 0.5, s - 1, s - 1);
+          }
+        }
         dashedPlot(ax, ay,
           a.err ? 'rgba(248,113,113,0.95)' : 'rgba(74,222,128,0.95)',
           a.err ? 'rgba(248,113,113,0.14)' : 'rgba(74,222,128,0.14)');

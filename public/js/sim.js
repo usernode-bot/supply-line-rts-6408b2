@@ -18,6 +18,9 @@ export const C = {
                            // seconds (effectively ~5 HP of the old scale); while a
                            // garrison holds, structure HP is untouchable
   SETT_HP: 100,
+  SETT_REGEN: 0.01,        // wall self-repair per tick out of combat (#138):
+                           // a razed-to-nothing settlement fully heals in
+                           // 10 000 ticks ≈ 17 sim-min (33 min at the 1× default)
   SETT_COST: 5,
   SETT_BUILD_TICKS: 150,   // construction time in sim ticks: the main loop runs the
                            // sim at speed × 0.5 of the native 10 ticks/s, so 150
@@ -390,32 +393,37 @@ function claimFootprint(game, s) {
 // open ground, closely matching the old 21-tile disc so income holds.
 // The footprint itself is never tilled (it's not farmland anymore).
 const FARM_RING = 2.7;
-function tillFields(game, s) {
+
+// The exact cells a settlement anchored at (ax, ay) would till, in
+// row-major order. Pure (no side effects) — shared by tillFields and
+// the placement preview (#137) so the preview can never drift from
+// what actually gets tilled. Only plots walkable from the settlement
+// qualify (#83): flood (4-connected) through the candidate ring from
+// tiles touching the footprint — plots sealed off behind mountains
+// never become fields.
+export function previewFields(game, ax, ay) {
   const { w, h } = game.map;
-  const c = settCenter(s);
+  const c = { x: ax + 1, y: ay + 1 };
   const span = Math.ceil(FARM_RING);
+  const onFoot = (tx, ty) => tx >= ax && tx <= ax + 1 && ty >= ay && ty <= ay + 1;
   const ring = new Set();
-  for (let ty = s.y - span; ty <= s.y + 1 + span; ty++) {
-    for (let tx = s.x - span; tx <= s.x + 1 + span; tx++) {
+  for (let ty = ay - span; ty <= ay + 1 + span; ty++) {
+    for (let tx = ax - span; tx <= ax + 1 + span; tx++) {
       if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+      if (onFoot(tx, ty)) continue; // the footprint itself is never tilled
       if (dist(tx + 0.5, ty + 0.5, c.x, c.y) > FARM_RING) continue;
       const i = ty * w + tx;
       if (game.map.mountain[i] || game.tilledBy[i] || game.settAt[i]) continue;
       ring.add(i);
     }
   }
-  // only plots walkable from the settlement are tilled (#83): flood
-  // (4-connected) through the candidate ring from tiles touching the
-  // footprint — plots sealed off behind mountains never become fields
   const DIRS4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
   const reached = new Set();
   const stack = [];
   for (const i of ring) {
     const tx = i % w, ty = (i / w) | 0;
     for (const [dx, dy] of DIRS4) {
-      const nx = tx + dx, ny = ty + dy;
-      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-      if (game.settAt[ny * w + nx] === s.id) { reached.add(i); stack.push(i); break; }
+      if (onFoot(tx + dx, ty + dy)) { reached.add(i); stack.push(i); break; }
     }
   }
   while (stack.length) {
@@ -429,8 +437,11 @@ function tillFields(game, s) {
     }
   }
   // row-major order, matching the old scan, so rebuilds are deterministic
-  const cells = [...reached].sort((a, b) => a - b);
-  for (const i of cells) {
+  return [...reached].sort((a, b) => a - b);
+}
+
+function tillFields(game, s) {
+  for (const i of previewFields(game, s.x, s.y)) {
     game.tilledBy[i] = s.id;
     s.tilled.push(i);
     game.dirty.add(i);
@@ -1290,11 +1301,14 @@ function tickOrder(game, b) {
     if (b.working == null) {
       const s = game.settlements.find(s2 => s2.owner === b.owner && !s2.building && dist(s2.x + 1, s2.y + 1, b.x, b.y) < 1.9);
       if (s) { // garrison
+        const n = total(b);
         s.garrison.deploy += b.count.deploy;
         s.garrison.supply += b.count.supply;
         s.garrison.farm += b.count.farm;
         s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + b.food);
         b.dead = true;
+        // announce the absorb (#135) — a silent disappearance reads as a bug
+        game.events.push({ owner: b.owner, msg: `🏠 +${n} garrisoned into ${s.name}`, x: s.x + 1, y: s.y + 1 });
       }
     }
   }
@@ -1441,7 +1455,14 @@ function tickCarrier(game, b) {
     }
     o.cargo -= taken;
     if (taken > 0) SUP.recordDelivery(game, route, taken);
-    if (o.cargo <= 0.01 || taken <= 0.001) { o.phase = 'return'; b.path = null; }
+    if (o.cargo <= 0.01) { o.phase = 'return'; b.path = null; }
+    else if (taken <= 0.001 && b.food < 0.25 * foodCap(b)) {
+      // destination is topped off (#143): park at the dock and keep it
+      // fed as it eats instead of hauling the leftover cargo home. The
+      // parked carrier nibbles its own cargo so it never starves here.
+      const bite = Math.min(o.cargo, foodCap(b) - b.food);
+      o.cargo -= bite; b.food += bite;
+    }
   } else { // return
     if (dist(b.x, b.y, src.x + 1, src.y + 1) <= SUP.LOAD_RANGE) { o.phase = 'load'; o.wait = 0; b.path = null; return; }
     if (!b.path || !b.path.length) {
@@ -2195,6 +2216,12 @@ function tickSettlement(game, s) {
     if (s.partsWin.length > 10) s.partsWin.shift();
     s.parts = newFlowParts();
     return;
+  }
+  // slow wall self-repair (#138): out of combat — not besieged and not
+  // hit in the last 10 native seconds — walls knit back together
+  if (s.hp < C.SETT_HP && !besieged(game, s)
+    && game.tick - (s.lastHitT != null ? s.lastHitT : -999) > 100) {
+    s.hp = Math.min(C.SETT_HP, s.hp + C.SETT_REGEN);
   }
   // pending garrison arm-up (#108): converts the whole garrison to the
   // ordered role once the countdown completes
