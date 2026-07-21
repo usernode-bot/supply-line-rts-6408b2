@@ -36,6 +36,8 @@
     { "name": "How to Play town-names paragraph present", "path": "/?demo=1", "expectSelector": "#help-town-names" },
     { "name": "How to Play mentions founding rumors", "path": "/?demo=1", "expectText": "rumors of the founding of a new settlement" },
     { "name": "Difficulty hint line present under the dropdown", "path": "/?demo=1", "expectSelector": "#difficulty-hint" },
-    { "name": "Difficulty hint shows the Normal blurb by default", "path": "/?demo=1", "expectText": "The standard opponent." }
+    { "name": "Difficulty hint shows the Normal blurb by default", "path": "/?demo=1", "expectText": "The standard opponent." },
+    { "name": "How to Play group-build paragraph present", "path": "/?demo=1", "expectSelector": "#help-group-build" },
+    { "name": "How to Play describes source-then-destination supply routes", "path": "/?demo=1", "expectText": "source settlement" }
   ]
 }

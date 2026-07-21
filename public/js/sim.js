@@ -620,11 +620,21 @@ export function opMove(game, b, x, y, target) {
   return { ok: true };
 }
 
+// Whether world position (x, y) lies inside settlement s's territory.
+// Tests the TILE CENTER under the point against TERRITORY — the identical
+// formula the renderer's drawn territory outline uses (#132) — so a unit
+// standing anywhere inside the drawn ring always qualifies. Raw
+// point-distance checks disagreed with the outline by up to ~0.7 tiles at
+// the edge, leaving units visually "home" but unfed/unhealed.
+export function inTerritory(s, x, y) {
+  return dist(Math.floor(x) + 0.5, Math.floor(y) + 0.5, s.x + 1, s.y + 1) <= C.TERRITORY;
+}
+
 // Field blobs may only become farmers at a friendly settlement.
 // Construction sites don't count as home (#95): no healing, no farming.
 export function isAtHome(game, b) {
   return game.settlements.some(s =>
-    s.owner === b.owner && !s.building && dist(s.x + 1, s.y + 1, b.x, b.y) <= C.TERRITORY);
+    s.owner === b.owner && !s.building && inTerritory(s, b.x, b.y));
 }
 
 export function opSetRole(game, b, role) {
@@ -651,7 +661,7 @@ export function opSetRole(game, b, role) {
     for (const st of game.settlements) {
       if (st.owner !== b.owner || st.building) continue;
       const d = dist(st.x + 1, st.y + 1, b.x, b.y);
-      if (d <= C.TERRITORY && d < bd) { bd = d; s = st; }
+      if (inTerritory(st, b.x, b.y) && d < bd) { bd = d; s = st; }
     }
     if (!s) return { err: 'Farmers can only be assigned at a friendly settlement' };
     leaveRoute(game, b);
@@ -786,9 +796,13 @@ export function opBuild(game, b) {
 // Travel-to-site build (#94): pick the spot anywhere on the map; the
 // blob walks there like a plain move and, on arrival, founds the
 // settlement (re-validating the site — see tickMove's arrived branch).
+// The founder may set out with fewer than SETT_COST units (#130): the
+// UI only offers Build when the whole SELECTION totals 5+, escorts are
+// ordered to the same site, and the arrived founder waits for them to
+// merge in before construction starts.
 export function opBuildAt(game, b, x, y) {
   if (b.dead) return { err: 'Gone' };
-  if (total(b) < C.SETT_COST) return { err: `Needs ${C.SETT_COST} units` };
+  if (total(b) <= 0) return { err: 'Gone' };
   const spot = buildAnchorAt(game, Math.floor(x), Math.floor(y));
   if (spot.err) return spot;
   leaveRoute(game, b);
@@ -951,9 +965,10 @@ function backToWorkPlan(game, owner) {
     let walkSett = null, wd = Infinity;
     for (const s of setts) {
       const d = dist(s.x + 1, s.y + 1, b.x, b.y);
-      if (d <= C.TERRITORY) atHomeOfAny = true;
+      const home = inTerritory(s, b.x, b.y);
+      if (home) atHomeOfAny = true;
       if (!safe.has(s.id)) continue;
-      if (d <= C.TERRITORY && d < hd) { hd = d; homeSett = s; }
+      if (home && d < hd) { hd = d; homeSett = s; }
       if (d < wd) { wd = d; walkSett = s; }
     }
     const pure = b.count.farm === total(b);
@@ -1232,7 +1247,7 @@ function tickOrder(game, b) {
     b.chaseId = null;
     if (game.tick - b.meleeT < 5) return;
   }
-  if (!b.path && b.pathGoal == null) ensurePath(game, b, o.x, o.y); // resumed save
+  if (!b.path && b.pathGoal == null && !o.waiting) ensurePath(game, b, o.x, o.y); // resumed save
   if (pathBlocked(game, b) && !ensurePath(game, b, o.x, o.y)) {
     // walled in by explored mountains — the optimistic plan was wrong
     b.order = null; b.pathGoal = null;
@@ -1242,26 +1257,35 @@ function tickOrder(game, b) {
   const arrived = moveBlob(game, b);
   if (arrived) {
     const build = o.build;
-    b.order = null;
-    b.pathGoal = null;
-    b.noMerge = false; // completed a deliberate move — mergeable again
     // founding party arrived (#94): re-validate the site (terrain can
     // change during the march), then consume 5 units into a construction
     // site. Any remainder stays put — never garrisoned into the new site.
     if (build) {
+      b.pathGoal = null;
+      b.noMerge = false;
       if (total(b) < C.SETT_COST) {
-        game.events.push({ owner: b.owner, msg: '⚠️ Not enough units left to found a settlement', x: b.x, y: b.y });
-      } else {
-        const spot = buildAnchorAt(game, build.x, build.y);
-        if (spot.err) {
-          game.events.push({ owner: b.owner, msg: '🔨 Can\'t build there anymore — order cancelled', x: b.x, y: b.y });
-        } else {
-          startConstruction(game, b, spot.x, spot.y);
-          game.events.push({ owner: b.owner, msg: '🔨 Construction started', x: spot.x + 1, y: spot.y + 1 });
+        // group build (#130): an under-strength founding party holds the
+        // site and waits for the rest of the selection to march in and
+        // merge, instead of abandoning the plan. Any new order cancels.
+        if (!o.waiting) {
+          o.waiting = true;
+          game.events.push({ owner: b.owner, msg: `⏳ Waiting for settlers (${total(b)}/${C.SETT_COST})`, x: b.x, y: b.y });
         }
+        return;
+      }
+      b.order = null;
+      const spot = buildAnchorAt(game, build.x, build.y);
+      if (spot.err) {
+        game.events.push({ owner: b.owner, msg: '🔨 Can\'t build there anymore — order cancelled', x: b.x, y: b.y });
+      } else {
+        startConstruction(game, b, spot.x, spot.y);
+        game.events.push({ owner: b.owner, msg: '🔨 Construction started', x: spot.x + 1, y: spot.y + 1 });
       }
       return;
     }
+    b.order = null;
+    b.pathGoal = null;
+    b.noMerge = false; // completed a deliberate move — mergeable again
     // working farmers walking to a new field cell stay in the fields
     if (b.working == null) {
       const s = game.settlements.find(s2 => s2.owner === b.owner && !s2.building && dist(s2.x + 1, s2.y + 1, b.x, b.y) < 1.9);
@@ -1356,8 +1380,8 @@ function tickCarrier(game, b) {
   const cap = total(b) * SUP.CARRY_PER_UNIT;
 
   if (o.phase === 'load') {
-    if (dist(b.x, b.y, src.x + 1, src.y + 1) > 2.7) {
-      if (!b.path || !b.path.length) { if (!ensurePath(game, b, src.x + 1, src.y + 1)) { SUP.removeCarrier(game, route, b.id); b.order = null; return; } }
+    if (dist(b.x, b.y, src.x + 1, src.y + 1) > SUP.LOAD_RANGE) {
+      if (!b.path || !b.path.length) { if (!ensurePath(game, b, src.x + 1, src.y + 1)) { releaseBlockedCarrier(game, b, route); return; } }
       moveBlob(game, b);
       return;
     }
@@ -1387,16 +1411,21 @@ function tickCarrier(game, b) {
       return;
     }
     o.holding = false;
-    if (dist(b.x, b.y, tp.x, tp.y) <= 2.5) { o.phase = 'unload'; b.path = null; return; }
+    // radius-aware docking (#132): a delivery to an army counts as arrived
+    // at the army's edge — big blobs no longer require reaching the exact
+    // center, which a same-speed caravan chasing a mover can never do
+    const dock = SUP.UNLOAD_RANGE + (route.targetKind === 'blob' ? blobRadius(tgt) : 0);
+    if (dist(b.x, b.y, tp.x, tp.y) <= dock) { o.phase = 'unload'; b.path = null; return; }
     const stale = b.pathGoal && dist(b.pathGoal.x, b.pathGoal.y, tp.x, tp.y) > 2.5;
-    if (!b.path || !b.path.length || (stale && game.tick % 20 === 0)) {
+    if (!b.path || !b.path.length || (stale && game.tick % 10 === 0)) {
       if (!ensurePath(game, b, tp.x, tp.y)) { releaseBlockedCarrier(game, b, route); return; }
     }
     moveBlob(game, b);
   } else if (o.phase === 'unload') {
     const tp = targetPos(tgt, route.targetKind);
     if (route.targetKind === 'settlement' && besieged(game, tgt)) { o.phase = 'go'; return; }
-    if (dist(b.x, b.y, tp.x, tp.y) > 3.1) { o.phase = 'go'; return; }
+    const dock = SUP.UNLOAD_RANGE + (route.targetKind === 'blob' ? blobRadius(tgt) : 0);
+    if (dist(b.x, b.y, tp.x, tp.y) > dock + SUP.UNLOAD_SLACK) { o.phase = 'go'; return; }
     const give = Math.min(o.cargo, cap / 20);
     let taken = 0;
     if (route.targetKind === 'blob') {
@@ -1414,7 +1443,7 @@ function tickCarrier(game, b) {
     if (taken > 0) SUP.recordDelivery(game, route, taken);
     if (o.cargo <= 0.01 || taken <= 0.001) { o.phase = 'return'; b.path = null; }
   } else { // return
-    if (dist(b.x, b.y, src.x + 1, src.y + 1) <= 2.7) { o.phase = 'load'; o.wait = 0; b.path = null; return; }
+    if (dist(b.x, b.y, src.x + 1, src.y + 1) <= SUP.LOAD_RANGE) { o.phase = 'load'; o.wait = 0; b.path = null; return; }
     if (!b.path || !b.path.length) {
       if (!ensurePath(game, b, src.x + 1, src.y + 1)) { releaseBlockedCarrier(game, b, route); return; }
     }
@@ -1901,7 +1930,7 @@ export function pillageCells(game, b) {
       if (friendlyIds.has(game.tilledBy[i])) continue;
       let own = false;
       for (const st of friendly) {
-        if (dist(tx + 0.5, ty + 0.5, st.x + 1, st.y + 1) <= C.TERRITORY) { own = true; break; }
+        if (inTerritory(st, tx + 0.5, ty + 0.5)) { own = true; break; }
       }
       if (own) continue;
       cells.push(i);
@@ -2228,7 +2257,7 @@ function tickSettlement(game, s) {
     const hungry = [];
     for (const b of game.blobs) {
       if (b.dead || b.owner !== s.owner) continue;
-      if (dist(b.x, b.y, s.x + 1, s.y + 1) > C.TERRITORY) continue;
+      if (!inTerritory(s, b.x, b.y)) continue;
       if (foodCap(b) - b.food <= 0) continue;
       hungry.push(b);
     }
@@ -2314,6 +2343,22 @@ function sameAttackTarget(a, b) {
     && oa.tkind && oa.tkind === ob.tkind && oa.tid === ob.tid);
 }
 
+// Group build (#130): an under-strength founding party waiting at its
+// site counts as idle for merging, so escorts sent to the site fold in.
+function buildWaiting(b) {
+  return !!(b.order && b.order.type === 'move' && b.order.build && b.order.waiting);
+}
+
+// Carriers of the same supply route in the same phase merge on contact
+// (#133) — a multi-blob line converges into one caravan instead of a
+// permanent convoy of fragments. Same-phase only: a loaded outbound
+// caravan must not absorb an empty returning one and skip its load leg.
+function sameRouteCarriers(a, b) {
+  const oa = a.order, ob = b.order;
+  return !!(oa && ob && oa.type === 'route' && ob.type === 'route'
+    && oa.routeId === ob.routeId && oa.phase === ob.phase);
+}
+
 function tickMerge(game) {
   const alive = game.blobs.filter(b => !b.dead);
   for (let i = 0; i < alive.length; i++) {
@@ -2329,14 +2374,25 @@ function tickMerge(game) {
       // contact/siege range and rarely overlap deeply). Mixed pairs
       // never merge: a marching army must not slurp up idle blobs.
       let trigger;
-      if (!a.order && !b.order) {
+      if ((!a.order || buildWaiting(a)) && (!b.order || buildWaiting(b))) {
         trigger = Math.max(C.MERGE_MIN, C.MERGE_FRAC * (blobRadius(a) + blobRadius(b)));
-      } else if (sameAttackTarget(a, b)) {
+      } else if (sameAttackTarget(a, b) || sameRouteCarriers(a, b)) {
         trigger = blobRadius(a) + blobRadius(b);
       } else continue;
       if (dist(a.x, a.y, b.x, b.y) > trigger) continue;
       const keep = total(a) >= total(b) ? a : b;
       const gone = keep === a ? b : a;
+      // group build (#130): the survivor adopts a waiting founding order
+      // from either half, so a bigger escort absorbing the under-strength
+      // founder keeps the plan instead of dropping it
+      if (buildWaiting(gone) && !buildWaiting(keep)) {
+        keep.order = gone.order;
+        keep.path = null; keep.pathGoal = null;
+      }
+      // same-route carriers (#133): remember the absorbed caravan's cargo
+      // so it folds into the survivor's hold after the union (below)
+      const goneCargo = sameRouteCarriers(keep, gone) ? (gone.order.cargo || 0) : 0;
+      if (goneCargo > 0) gone.order.cargo = 0;
       // mass-weighted centroid, taken before the union changes the counts;
       // the survivor keeps its own pillaging stance (bigger blob wins)
       const mk = total(keep), mg = total(gone);
@@ -2345,6 +2401,14 @@ function tickMerge(game) {
       keep.units = keep.units.concat(gone.units).sort((u, v) => u.seed - v.seed);
       recount(keep);
       keep.food = Math.min(foodCap(keep), keep.food + gone.food);
+      if (goneCargo > 0) {
+        // cap combined cargo at the survivor's new capacity; overflow
+        // becomes the caravan's own food (nothing silently vanishes)
+        const hold = total(keep) * SUP.CARRY_PER_UNIT;
+        const add = Math.min(goneCargo, Math.max(0, hold - (keep.order.cargo || 0)));
+        keep.order.cargo = (keep.order.cargo || 0) + add;
+        keep.food = Math.min(foodCap(keep), keep.food + (goneCargo - add));
+      }
       // pending arm-ups (#108): survive only when both halves were
       // converting to the same role (earlier finish wins); mixed intent drops
       keep.convert = keep.convert && gone.convert && keep.convert.role === gone.convert.role

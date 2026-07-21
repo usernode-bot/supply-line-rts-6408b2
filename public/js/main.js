@@ -638,9 +638,9 @@ function doPillage(b, on) {
   if (inPvp()) sendCmd({ op: 'pillage', blobId: b.id, on: !!on });
   return S.opPillage(game, b, on);
 }
-function doRoute(b, target) {
-  if (inPvp()) sendCmd({ op: 'route', blobId: b.id, target });
-  return S.opRoute(game, b, target);
+function doRoute(b, target, sourceId) {
+  if (inPvp()) sendCmd({ op: 'route', blobId: b.id, target, sourceId: sourceId == null ? null : sourceId });
+  return S.opRoute(game, b, target, sourceId);
 }
 function doSetMode(st, mode) {
   if (inPvp()) sendCmd({ op: 'setMode', settlementId: st.id, mode });
@@ -1097,6 +1097,7 @@ function onCancel() {
   if (ui.pending) {
     ui.pending = null;
     ui.buildSite = null;
+    ui.routeSrc = null;
     hideOrderPopup(); // the build-confirm popup rides on the pending state
     updateHint();
     return;
@@ -1152,14 +1153,41 @@ function showBuildConfirm(screen) {
   orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
 }
 
+// Group build (#130): the selected blob nearest the site is the founder
+// (carries the build order); every other selected blob marches to the
+// site as an escort and merges into the waiting founder on arrival.
+// Deterministic pick (distance, then size, then id) so PvP prediction
+// and the server agree on which blob founds.
+function dispatchBuild(blobs, x, y) {
+  const sorted = [...blobs].sort((a, b) =>
+    dist(a.x, a.y, x, y) - dist(b.x, b.y, x, y) || S.total(b) - S.total(a) || a.id - b.id);
+  const founder = sorted[0];
+  const r = doBuildAt(founder, x, y);
+  if (r.err) return r;
+  const cx = r.site.x + 1, cy = r.site.y + 1;
+  for (const b of sorted.slice(1)) doMove(b, cx, cy);
+  return r;
+}
+
+// Put every selected carrier on the same source→destination line (#133).
+function dispatchRoutes(carriers, target, sourceId) {
+  let ok = 0, err = null;
+  for (const c of carriers) {
+    const r = doRoute(c, target, sourceId);
+    if (r.err) err = r.err; else ok++;
+  }
+  if (ok) toast(ok > 1 ? `🚚 ${ok} caravans on the supply line` : '🚚 Supply route established');
+  else if (err) toast(err);
+}
+
 function confirmBuild() {
   const site = ui.buildSite;
-  const b = selectedBlobs()[0];
+  const blobs = selectedBlobs();
   ui.pending = null;
   ui.buildSite = null;
   updateHint();
-  if (!site || !b) { renderPanel(true); return; }
-  const r = doBuildAt(b, site.x + 0.5, site.y + 0.5);
+  if (!site || !blobs.length) { renderPanel(true); return; }
+  const r = dispatchBuild(blobs, site.x + 0.5, site.y + 0.5);
   if (r.err) toast(r.err);
   else {
     pingOrder({ x: site.x + 1, y: site.y + 1 }, null);
@@ -1189,13 +1217,13 @@ function resolvePending(world, pointerType, screen) {
   // two-step — the tap places (or moves) the snapped outline and the ✓
   // confirm popup commits it, so placement stays armed between taps.
   if (ui.pending === 'build') {
-    const b = selectedBlobs()[0];
-    if (!b) { ui.pending = null; ui.buildSite = null; updateHint(); return; }
+    const bblobs = selectedBlobs();
+    if (!bblobs.length) { ui.pending = null; ui.buildSite = null; updateHint(); return; }
     if (pointerType === 'mouse') {
       ui.pending = null;
       ui.buildSite = null;
       updateHint();
-      const r = doBuildAt(b, world.x, world.y);
+      const r = dispatchBuild(bblobs, world.x, world.y);
       if (r.err) toast(r.err);
       else {
         pingOrder({ x: r.site ? r.site.x + 1 : world.x, y: r.site ? r.site.y + 1 : world.y }, null);
@@ -1220,19 +1248,36 @@ function resolvePending(world, pointerType, screen) {
     if (!blobs.length) return;
     orderMove(blobs, world, findEnemyTargetAt(world)); // tapping an enemy targets it
   } else if (pending === 'route') {
-    const carrier = blobs[0];
-    if (!carrier) return;
+    // supply routes take two taps (#131): first the source settlement the
+    // caravans load from, then the destination. All selected pure-supply
+    // blobs join the same line (#133).
+    const carriers = blobs.filter(b => S.total(b) > 0 && b.count.supply === S.total(b));
+    if (!carriers.length) { ui.routeSrc = null; return; }
     const hitR = Math.max(1.5, 24 / view.scale);
+    if (ui.routeSrc == null) {
+      const src = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+      ui.pending = 'route'; // stay armed for the next tap either way
+      if (src && src.owner === me && !src.building) {
+        ui.routeSrc = src.id;
+      } else {
+        toast('Tap one of your settlements to load from');
+      }
+      updateHint();
+      renderPanel(true);
+      return;
+    }
+    const srcId = ui.routeSrc;
+    ui.routeSrc = null;
     let tgt = S.blobAt(game, world.x, world.y, hitR);
-    if (tgt && (tgt.owner !== me || tgt.id === carrier.id)) tgt = null;
+    if (tgt && (tgt.owner !== me || carriers.some(c => c.id === tgt.id))) tgt = null;
     if (tgt) {
-      const r = doRoute(carrier, { kind: 'blob', id: tgt.id });
-      toast(r.err ? r.err : '🚚 Supply route established');
+      dispatchRoutes(carriers, { kind: 'blob', id: tgt.id }, srcId);
     } else {
       const st = S.settlementAt(game, world.x, world.y, hitR);
-      if (st && st.owner === me) {
-        const r = doRoute(carrier, { kind: 'settlement', id: st.id });
-        toast(r.err ? r.err : '🚚 Supply route established');
+      if (st && st.owner === me && st.id === srcId) {
+        toast('Route must lead away from its source');
+      } else if (st && st.owner === me) {
+        dispatchRoutes(carriers, { kind: 'settlement', id: st.id }, srcId);
       } else {
         toast('Tap a friendly army or settlement to supply');
       }
@@ -1270,7 +1315,9 @@ function updateHint() {
         : 'Tap where to found the settlement…')
       : ui.pending === 'route-sett'
         ? 'Tap the destination settlement (or army) to supply…'
-        : 'Tap the army or settlement to supply…';
+        : ui.routeSrc != null
+          ? 'Tap the destination — a friendly settlement or army…'
+          : 'Tap the source settlement to load from…';
   $('hint-text').textContent = text;
   el.classList.remove('hidden');
 }
@@ -1318,7 +1365,7 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'move': ui.pending = 'move'; updateHint(); break;
-    case 'route': ui.pending = 'route'; updateHint(); break;
+    case 'route': ui.pending = 'route'; ui.routeSrc = null; updateHint(); break;
     case 'split': {
       const b = blobs[0];
       if (b) {
@@ -1688,6 +1735,8 @@ function renderPanelInner(force) {
   const atHome = blobs.some(b => S.isAtHome(game, b));
   const fedColor = meter >= 0.75 ? 'text-emerald-400' : meter >= 0.5 ? 'text-lime-400' : meter >= 0.25 ? 'text-amber-400' : 'text-red-400';
   const onRoute = !multi && b0.order && b0.order.type === 'route';
+  // group build (#130): an under-strength founding party holding its site
+  const waitingBuild = blobs.some(b => b.order && b.order.type === 'move' && b.order.build && b.order.waiting);
   const hpSum = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + u.hp, 0), 0);
   const hpMax = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + S.unitMaxHP(u.role), 0), 0);
   const hpPct = Math.round(100 * hpSum / Math.max(1, hpMax));
@@ -1710,7 +1759,7 @@ function renderPanelInner(force) {
       <span class="font-semibold">${multi ? `${blobs.length} blobs` : 'Blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
-    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
+    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
     <div class="text-xs text-zinc-500 mb-1">Role ${!atHome ? '<span class="text-zinc-600">(farmers need a settlement)</span>' : ''}</div>
     <div class="flex gap-1 mb-2">
       ${roleBtn('deploy', '⚔️ Deploy', cnt.deploy === tot, false)}
@@ -1721,8 +1770,8 @@ function renderPanelInner(force) {
     <div class="grid grid-cols-2 gap-1 mb-2">
       <button data-act="move" class="btn rounded bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
       <button data-act="pillage" class="btn rounded ${blobs.some(b => b.pillaging) ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 Pillage</button>
-      <button data-act="build" class="btn rounded bg-zinc-800 hover:bg-zinc-700 ${multi || tot < S.C.SETT_COST ? 'opacity-40' : ''}" ${multi || tot < S.C.SETT_COST ? 'disabled' : ''}>🏠 Build (${S.C.SETT_COST})</button>
-      <button data-act="route" class="btn rounded ${pureSupply && !multi ? 'bg-sky-800 hover:bg-sky-700' : 'bg-zinc-800 opacity-40'}" ${pureSupply && !multi ? '' : 'disabled'}>🚚 Supply route…</button>
+      <button data-act="build" class="btn rounded bg-zinc-800 hover:bg-zinc-700 ${tot < S.C.SETT_COST ? 'opacity-40' : ''}" ${tot < S.C.SETT_COST ? 'disabled' : ''}>🏠 Build (${S.C.SETT_COST})</button>
+      <button data-act="route" class="btn rounded ${pureSupply ? 'bg-sky-800 hover:bg-sky-700' : 'bg-zinc-800 opacity-40'}" ${pureSupply ? '' : 'disabled'}>🚚 Supply route…</button>
     </div>
     ${!multi && tot >= 2 ? `
     <div class="flex items-center gap-2">
