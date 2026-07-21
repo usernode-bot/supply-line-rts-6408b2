@@ -1,8 +1,10 @@
 // Boot, menu wiring, match lifecycle, HUD + selection panel, autosave,
-// multiplayer lobbies (host-authoritative snapshot sync over polling).
+// multiplayer lobbies (server-authoritative sim; both clients are
+// predicted input consoles syncing snapshots over polling).
 
 import * as S from './sim.js';
 import * as SUP from './supply.js';
+import { applyCommand } from './commands.js';
 import { aiTick } from './ai.js';
 import { createRenderer } from './render.js';
 import { createInput } from './input.js';
@@ -42,7 +44,9 @@ let actedChallengeIds = new Set();    // accepted/declined — no withdrawn toas
 let dismissedDemoChallenge = false;   // hide the injected staging demo challenge
 let suggestTimer = null;
 
-function isGuest() { return mp && mp.role === 'guest'; }
+// In a PvP match every order is relayed to the server-authoritative sim
+// (and echoed into the local predicted one) — for both roles alike.
+function inPvp() { return !!(mp && game && game.pvp); }
 
 async function api(path, body) {
   const opts = body !== undefined
@@ -371,13 +375,13 @@ async function waitTick() {
   if (!waiting) return;
   let r;
   try {
-    r = await api(`/api/lobbies/${waiting.id}/sync`, { commandsAfter: 0, tick: 0 });
+    r = await api(`/api/lobbies/${waiting.id}/sync`, {});
   } catch { return; }
   if (!waiting) return;
   if (r.status === 'active') {
     const lobby = waiting.lobby;
     stopWaiting();
-    startPvpHost(lobby, r.guest_username);
+    startPvpHost(lobby, r.opponent || r.guest_username);
   } else if (r.status === 'declined') {
     const name = waiting.challenge || 'They';
     const id = waiting.id;
@@ -421,49 +425,34 @@ $('btn-mp-rejoin').addEventListener('click', async () => {
   try {
     const st = await api(`/api/lobbies/${mineLobby.id}/state`);
     if (st.status !== 'active') { toast('That match is already over.'); refreshLobbies(); loadHistory(); return; }
-    if (st.role === 'host') {
-      let g;
-      if (st.snapshot) {
-        g = S.deserialize(st.snapshot);
-      } else {
-        g = S.newGame(st.seed, st.size_key, 'normal', true);
-      }
-      // skip commands already applied before the reload — the snapshot
-      // reflects them; replaying would double splits/builds
-      beginPvp('host', st.id, st.opponent, g, st.last_command_id || 0);
-    } else {
-      startPvpGuest(st.id, st.opponent);
-    }
+    // the server owns the sim: rejoiners (either role) resume from its
+    // latest snapshot and keep syncing like any other client
+    beginPvp(st.role, st.id, st.opponent, st.snapshot || null);
   } catch (err) { toast(err.message); }
 });
 
 // ---------------------------------------------------------------- pvp session
 
 function startPvpHost(lobby, guestName) {
-  const g = S.newGame(lobby.seed, lobby.size_key, 'normal', true);
-  beginPvp('host', lobby.id, guestName, g);
+  // the server created the authoritative game when the guest joined;
+  // the host starts from its first snapshot like any other client
+  beginPvp('host', lobby.id, guestName, null);
+  toast('⚔️ Opponent joined — starting…');
 }
 
-function beginPvp(role, lobbyId, opponent, g, lastCmdId) {
+function beginPvp(role, lobbyId, opponent, snap) {
   stopMpTimers();
   mp = {
     lobbyId, role, opponent: opponent || '…',
-    lastCmdId: lastCmdId || 0, pollN: 0, outQueue: [], guestEvents: [],
-    lastSnapTick: -1, oppSeen: null, ended: false, busy: false,
-    finalSnapSent: false, noSnapPolls: 0,
+    outQueue: [], pending: [],
+    lastSnapTick: -1, lastEventId: 0, oppSeen: null,
+    ended: false, busy: false, noSnapPolls: 0, failN: 0,
+    kick: null,
   };
   me = role === 'host' ? 0 : 1;
-  if (g) {
-    S.setViewer(g, me);
-    startMatch(g);
-  }
-  if (role === 'host') {
-    hostSync(true);
-    mp.timer = setInterval(() => hostSync(false), 1000);
-  } else {
-    guestSync();
-    mp.timer = setInterval(guestSync, 1000);
-  }
+  if (snap) applySnapshot(snap);
+  mpSync();
+  mp.timer = setInterval(mpSync, 1000);
 }
 
 function startPvpGuest(lobbyId, hostName) {
@@ -473,45 +462,24 @@ function startPvpGuest(lobbyId, hostName) {
 
 function stopMpTimers() {
   if (mp && mp.timer) { clearInterval(mp.timer); mp.timer = null; }
+  if (mp && mp.kick) { clearTimeout(mp.kick); mp.kick = null; }
 }
 
-function buildSnapshot() {
-  const snap = S.serialize(game);
-  snap.netEvents = mp.guestEvents.splice(0);
-  return snap;
-}
-
-async function hostSync(force) {
-  if (!mp || mp.busy) return;
-  mp.busy = true;
-  try {
-    mp.pollN++;
-    const body = { commandsAfter: mp.lastCmdId, tick: game ? game.tick : 0 };
-    const wantSnap = force || mp.pollN % 2 === 0 || (game && game.result && !mp.finalSnapSent);
-    if (wantSnap && game) {
-      body.snapshot = buildSnapshot();
-      if (game.result) mp.finalSnapSent = true;
-    }
-    const r = await api(`/api/lobbies/${mp.lobbyId}/sync`, body);
-    if (!mp) return;
-    if (r.guest_username && mp.opponent === '…') { mp.opponent = r.guest_username; updateOppLabel(); }
-    for (const row of r.commands || []) {
-      mp.lastCmdId = Math.max(mp.lastCmdId, row.id);
-      try { applyGuestCommand(row.payload); } catch { }
-    }
-    mp.oppSeen = r.opponentSeenAgoMs;
-    if (r.status === 'finished' && !mp.ended) finishFromServer(r);
-    updateMpBanner();
-  } catch { } finally { if (mp) mp.busy = false; }
-}
-
-async function guestSync() {
+// The polling loop, identical for both roles: send queued orders,
+// download the authoritative snapshot when behind, learn the status.
+async function mpSync() {
   if (!mp || mp.busy || mp.ended) return;
   mp.busy = true;
   const batch = mp.outQueue.splice(0, 50);
   try {
-    const r = await api(`/api/lobbies/${mp.lobbyId}/sync`, { haveTick: mp.lastSnapTick, commands: batch });
+    const r = await api(`/api/lobbies/${mp.lobbyId}/sync`, { haveTick: mp.lastSnapTick, commands: batch.map(e => e.cmd) });
     if (!mp) return;
+    mp.failN = 0;
+    // label the sent entries with their server ids so snapshot acks can
+    // retire them from the pending (replay) list
+    const ids = r.command_ids || [];
+    for (let i = 0; i < batch.length && i < ids.length; i++) batch[i].dbId = ids[i];
+    if (r.opponent && mp.opponent === '…') { mp.opponent = r.opponent; updateOppLabel(); }
     if (r.snapshot) {
       mp.lastSnapTick = r.snapshot_tick || (r.snapshot.tick | 0);
       mp.noSnapPolls = 0;
@@ -519,140 +487,86 @@ async function guestSync() {
     } else if (!game) {
       mp.noSnapPolls++;
       if (mp.noSnapPolls > 30) {
-        // host never produced a starting snapshot — bail out
-        toast('The host never showed up — match abandoned.');
+        // the server never produced a starting snapshot — bail out
+        toast('The match never started — back to the menu.');
         leavePvpToMenu();
         return;
       }
     }
     mp.oppSeen = r.opponentSeenAgoMs;
     if (r.status === 'finished' && !mp.ended) finishFromServer(r);
+    else if ((r.status === 'cancelled') && !mp.ended) { toast('The match was cancelled.'); leavePvpToMenu(); return; }
     updateMpBanner();
-  } catch {
+  } catch (err) {
     mp.outQueue = batch.concat(mp.outQueue); // retry unsent orders
+    if (err && err.status === 404) { toast('That match no longer exists.'); leavePvpToMenu(); return; }
+    if (++mp.failN > 30) { toast('Connection to the match lost.'); leavePvpToMenu(); return; }
   } finally { if (mp) mp.busy = false; }
 }
 
 function applySnapshot(snap) {
+  const firstSnap = !game;
   if (!game) {
     const g = S.deserialize(snap);
-    S.setViewer(g, 1);
+    S.setViewer(g, me);
     startMatch(g);
   } else {
     const prevTick = game.tick;
     const g = S.deserialize(snap, game);
-    S.setViewer(g, 1);
+    S.setViewer(g, me);
     game = g;
-    // dead-reckon back toward where we were rendering (bounded catch-up)
-    let ahead = Math.min(25, Math.max(0, prevTick - g.tick));
-    while (ahead-- > 0 && !g.result) S.step(g);
+    // dead-reckon back toward where we were rendering (bounded catch-up):
+    // a few ticks now, the rest credited to the frame accumulator so the
+    // frame loop absorbs them instead of hitching here
+    const ahead = Math.min(25, Math.max(0, prevTick - g.tick));
+    let now = Math.min(5, ahead);
+    while (now-- > 0 && !g.result) S.step(g);
+    acc += Math.max(0, ahead - 5) * 100;
   }
-  for (const ev of snap.netEvents || []) toast(ev.msg);
-}
-
-// Host-side application of the guest's relayed orders. Every entity id is
-// re-resolved against authoritative state and must belong to owner 1.
-function resolveBlobFor(owner, id) {
-  let cur = id, hops = 0;
-  while (hops++ < 10) {
-    const b = game.blobs.find(x => x.id === cur && !x.dead);
-    if (b) return b.owner === owner ? b : null;
-    if (game.mergeLog[cur] != null) cur = game.mergeLog[cur];
-    else return null;
-  }
-  return null;
-}
-
-function applyGuestCommand(c) {
-  if (!game || game.result || !c || typeof c !== 'object') return;
-  const b = c.blobId != null ? resolveBlobFor(1, c.blobId) : null;
-  const st = c.settlementId != null
-    ? game.settlements.find(s => s.id === c.settlementId && s.owner === 1) : null;
-  switch (c.op) {
-    case 'surrender':
-      game.result = 'p0-win';
-      game.resultReason = 'surrender';
-      break;
-    case 'move': {
-      if (!b) break;
-      // targeted orders point at the guest's ENEMY (owner 0) — validate
-      // against authoritative state; anything invalid degrades to a tile move
-      let target = null;
-      if (c.target && c.target.kind === 'blob') {
-        const t = resolveBlobFor(0, c.target.id);
-        if (t) target = { kind: 'blob', id: t.id };
-      } else if (c.target && c.target.kind === 'settlement') {
-        const t = game.settlements.find(s => s.id === c.target.id && s.owner === 0);
-        if (t) target = { kind: 'settlement', id: t.id };
-      }
-      S.opMove(game, b, +c.x || 0, +c.y || 0, target);
-      break;
+  if (mp) {
+    // retire pending commands the server had applied before this snapshot,
+    // then replay the rest so optimistic orders don't visually revert
+    const ack = snap.appliedCmdId;
+    mp.pending = mp.pending.filter(e => e.dbId == null || (ack != null && e.dbId > ack));
+    for (const e of mp.pending) { try { applyCommand(game, me, e.cmd); } catch { } }
+    // toast events by id, mine or global only; a (re)join's first snapshot
+    // just advances the watermark so old history isn't replayed
+    for (const ev of snap.netEvents || []) {
+      if (typeof ev.id !== 'number' || ev.id <= mp.lastEventId) continue;
+      mp.lastEventId = ev.id;
+      if (!firstSnap && (ev.owner == null || ev.owner === me)) toast(ev.msg);
     }
-    case 'setRole': if (b) S.opSetRole(game, b, c.role); break;
-    case 'split': if (b) S.opSplit(game, b, c.take | 0); break;
-    case 'build': if (b) S.opBuild(game, b); break;
-    case 'buildAt': if (b) S.opBuildAt(game, b, +c.x || 0, +c.y || 0); break;
-    case 'pillage': if (b) S.opPillage(game, b, !!c.on); break;
-    case 'route':
-      if (b && c.target) {
-        if (c.target.kind === 'blob') {
-          const t = resolveBlobFor(1, c.target.id);
-          if (t && t.id !== b.id) S.opRoute(game, b, { kind: 'blob', id: t.id });
-        } else if (c.target.kind === 'settlement') {
-          const t = game.settlements.find(s => s.id === c.target.id && s.owner === 1);
-          if (t) S.opRoute(game, b, { kind: 'settlement', id: t.id });
-        }
+    // an authoritative result in the snapshot ends the match (locally
+    // predicted results never do — the server confirms within a second)
+    if (snap.result && !mp.ended) {
+      const winner = snap.result === 'p0-win' ? 0 : snap.result === 'p1-win' ? 1 : null;
+      if (winner != null) {
+        mp.ended = true;
+        resultPosted = true;
+        stopMpTimers();
+        $('mp-banner').classList.add('hidden');
+        showEndModal(winner === me, snap.resultReason || 'elimination');
+        loadHistory();
       }
-      break;
-    case 'setMode': if (st) S.opSetMode(game, st, c.mode); break;
-    case 'fieldGarrison': if (st) S.opFieldGarrison(game, st); break;
-    case 'fieldRole': if (st) S.opFieldRole(game, st, c.role, Math.max(1, c.n | 0)); break;
-    case 'garrisonRole': if (st) S.opGarrisonRole(game, st, c.role); break;
-    case 'supplyRoute':
-      // settlement-to-settlement line (#108): validate the target is the
-      // guest's own entity, then field + route host-side in one op
-      if (st && c.target) {
-        if (c.target.kind === 'settlement') {
-          const t = game.settlements.find(s => s.id === c.target.id && s.owner === 1);
-          if (t && t.id !== st.id) S.opSupplyRoute(game, st, { kind: 'settlement', id: t.id });
-        } else if (c.target.kind === 'blob') {
-          const t = resolveBlobFor(1, c.target.id);
-          if (t) S.opSupplyRoute(game, st, { kind: 'blob', id: t.id });
-        }
-      }
-      break;
+    }
   }
 }
 
 function updateMpBanner() {
   const el = $('mp-banner');
-  if (!mp || mp.ended || !game || game.result) { el.classList.add('hidden'); return; }
+  if (!mp || mp.ended || !game) { el.classList.add('hidden'); return; }
   const gone = mp.oppSeen != null ? mp.oppSeen : 0;
   if (gone > 6000) {
     el.classList.remove('hidden');
-    const canClaim = gone > 60000;
-    $('mp-banner-text').textContent = canClaim
-      ? `${mp.opponent} seems to be gone (${Math.round(gone / 1000)}s).`
-      : `Opponent connection lost — waiting… (${Math.round(gone / 1000)}s)`;
-    $('btn-claim').classList.toggle('hidden', !canClaim);
+    // the server auto-awards the win at 60 s — no claim button to press
+    const left = Math.max(0, Math.ceil((60000 - gone) / 1000));
+    $('mp-banner-text').textContent = left > 0
+      ? `${mp.opponent} lost connection — victory in ${left}s if they don't return…`
+      : `${mp.opponent} is gone — awarding victory…`;
   } else {
     el.classList.add('hidden');
   }
 }
-
-$('btn-claim').addEventListener('click', async () => {
-  if (!mp || mp.ended) return;
-  try {
-    await api(`/api/lobbies/${mp.lobbyId}/result`, { winnerOwner: me, reason: 'abandoned' });
-    mp.ended = true;
-    resultPosted = true;
-    if (game) game.result = 'ended';
-    stopMpTimers();
-    $('mp-banner').classList.add('hidden');
-    showEndModal(true, 'abandoned');
-    loadHistory();
-  } catch (err) { toast(err.message); }
-});
 
 function finishFromServer(r) {
   // the lobby finished without a local result (opponent claimed abandonment,
@@ -683,57 +597,69 @@ function updateOppLabel() {
   }
 }
 
-// -- order dispatch: direct in solo / as host, relayed as guest --------
+// -- order dispatch: direct in solo; in PvP (either role) the order is
+// applied to the local predicted sim immediately (optimistic echo) AND
+// queued for the server-authoritative sim. Snapshot applications retire
+// acked orders and replay the rest (applySnapshot).
 
-function sendCmd(c) { if (mp) mp.outQueue.push(c); }
-const QUEUED = { ok: true, queued: true };
+function sendCmd(c) {
+  if (!mp) return;
+  const entry = { cmd: c, dbId: null };
+  mp.outQueue.push(entry);
+  // surrender is never echoed/replayed locally — the result must come
+  // from the server's authoritative snapshot
+  if (c.op !== 'surrender') mp.pending.push(entry);
+  // event-driven send: kick a sync shortly instead of waiting for the
+  // 1 s heartbeat (debounced so rapid taps batch into one request)
+  if (!mp.kick) mp.kick = setTimeout(() => { if (mp) { mp.kick = null; mpSync(); } }, 200);
+}
 
 function doMove(b, x, y, target) {
-  if (isGuest()) { sendCmd({ op: 'move', blobId: b.id, x, y, target: target || null }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'move', blobId: b.id, x, y, target: target || null });
   return S.opMove(game, b, x, y, target);
 }
 function doSetRole(b, role) {
-  if (isGuest()) { sendCmd({ op: 'setRole', blobId: b.id, role }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'setRole', blobId: b.id, role });
   return S.opSetRole(game, b, role);
 }
 function doSplit(b, n) {
-  if (isGuest()) { sendCmd({ op: 'split', blobId: b.id, take: n }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'split', blobId: b.id, take: n });
   return S.opSplit(game, b, n);
 }
 function doBuild(b) {
-  if (isGuest()) { sendCmd({ op: 'build', blobId: b.id }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'build', blobId: b.id });
   return S.opBuild(game, b);
 }
 function doBuildAt(b, x, y) {
-  if (isGuest()) { sendCmd({ op: 'buildAt', blobId: b.id, x, y }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'buildAt', blobId: b.id, x, y });
   return S.opBuildAt(game, b, x, y);
 }
 function doPillage(b, on) {
-  if (isGuest()) { sendCmd({ op: 'pillage', blobId: b.id, on: !!on }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'pillage', blobId: b.id, on: !!on });
   return S.opPillage(game, b, on);
 }
 function doRoute(b, target) {
-  if (isGuest()) { sendCmd({ op: 'route', blobId: b.id, target }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'route', blobId: b.id, target });
   return S.opRoute(game, b, target);
 }
 function doSetMode(st, mode) {
-  if (isGuest()) { sendCmd({ op: 'setMode', settlementId: st.id, mode }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'setMode', settlementId: st.id, mode });
   return S.opSetMode(game, st, mode);
 }
 function doFieldGarrison(st) {
-  if (isGuest()) { sendCmd({ op: 'fieldGarrison', settlementId: st.id }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'fieldGarrison', settlementId: st.id });
   return S.opFieldGarrison(game, st);
 }
 function doFieldRole(st, role, n) {
-  if (isGuest()) { sendCmd({ op: 'fieldRole', settlementId: st.id, role, n }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'fieldRole', settlementId: st.id, role, n });
   return S.opFieldRole(game, st, role, n);
 }
 function doGarrisonRole(st, role) {
-  if (isGuest()) { sendCmd({ op: 'garrisonRole', settlementId: st.id, role }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'garrisonRole', settlementId: st.id, role });
   return S.opGarrisonRole(game, st, role);
 }
 function doSupplyRoute(st, target) {
-  if (isGuest()) { sendCmd({ op: 'supplyRoute', settlementId: st.id, target }); return QUEUED; }
+  if (inPvp()) sendCmd({ op: 'supplyRoute', settlementId: st.id, target });
   return S.opSupplyRoute(game, st, target);
 }
 
@@ -815,27 +741,12 @@ function showEndModal(win, reason) {
   $('end-modal').classList.remove('hidden');
 }
 
+// Solo-only: PvP results are decided by the server and surface through
+// applySnapshot (authoritative snapshot result) or finishFromServer
+// (sync status) — a locally predicted elimination just freezes the
+// local sim until the server confirms or corrects it within a second.
 function endMatch(result) {
   resultPosted = true;
-  if (game.pvp) {
-    const winner = result === 'p0-win' ? 0 : 1;
-    const reason = game.resultReason || 'elimination';
-    showEndModal(winner === me, reason);
-    if (mp && !mp.ended) {
-      mp.ended = true;
-      if (mp.role === 'host') {
-        // push the final snapshot (so the guest sees the outcome), then record it
-        api(`/api/lobbies/${mp.lobbyId}/sync`, { commandsAfter: mp.lastCmdId, tick: game.tick, snapshot: buildSnapshot() })
-          .catch(() => { })
-          .then(() => api(`/api/lobbies/${mp.lobbyId}/result`, { winnerOwner: winner, reason }))
-          .catch(() => { });
-      }
-      stopMpTimers();
-    }
-    $('mp-banner').classList.add('hidden');
-    loadHistory();
-    return;
-  }
   localStorage.removeItem(SAVE_KEY);
   const win = result === 'win';
   $('end-emoji').textContent = win ? '🏆' : '🏳️';
@@ -864,14 +775,9 @@ $('btn-surrender').addEventListener('click', () => {
     { label: '🏳️ Surrender', cls: 'bg-red-700 hover:bg-red-600 text-white', fn: () => {
       if (!game || game.result) return;
       if (game.pvp) {
-        if (isGuest()) {
-          sendCmd({ op: 'surrender' });
-          toast('🏳️ Surrendering…');
-          guestSync();
-        } else {
-          game.result = 'p1-win';
-          game.resultReason = 'surrender';
-        }
+        // either role: the server-authoritative sim decides the result
+        sendCmd({ op: 'surrender' }); // sendCmd kicks a sync itself
+        toast('🏳️ Surrendering…');
         return;
       }
       game.result = 'surrender';
@@ -1321,12 +1227,12 @@ function resolvePending(world, pointerType, screen) {
     if (tgt && (tgt.owner !== me || tgt.id === carrier.id)) tgt = null;
     if (tgt) {
       const r = doRoute(carrier, { kind: 'blob', id: tgt.id });
-      toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
+      toast(r.err ? r.err : '🚚 Supply route established');
     } else {
       const st = S.settlementAt(game, world.x, world.y, hitR);
       if (st && st.owner === me) {
         const r = doRoute(carrier, { kind: 'settlement', id: st.id });
-        toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
+        toast(r.err ? r.err : '🚚 Supply route established');
       } else {
         toast('Tap a friendly army or settlement to supply');
       }
@@ -1341,12 +1247,12 @@ function resolvePending(world, pointerType, screen) {
     const stT = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
     if (stT && stT.owner === me && stT.id !== src.id && !stT.building) {
       const r = doSupplyRoute(src, { kind: 'settlement', id: stT.id });
-      toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
+      toast(r.err ? r.err : '🚚 Supply route established');
     } else {
       const tgt = S.blobAt(game, world.x, world.y, hitR);
       if (tgt && tgt.owner === me) {
         const r = doSupplyRoute(src, { kind: 'blob', id: tgt.id });
-        toast(r.err ? r.err : r.queued ? '🚚 Supply order sent' : '🚚 Supply route established');
+        toast(r.err ? r.err : '🚚 Supply route established');
       } else {
         toast('Tap a friendly settlement or army to supply');
       }
@@ -1446,7 +1352,7 @@ panel.addEventListener('click', (e) => {
       if (st) {
         r = doFieldGarrison(st);
         if (r.err) toast(r.err);
-        else if (!r.queued) ui.selected = { kind: 'blob', id: r.blob.id };
+        else ui.selected = { kind: 'blob', id: r.blob.id };
       }
       break;
     }
@@ -1839,15 +1745,14 @@ function updateHUD() {
   btw.classList.toggle('hidden', idleN === 0 || !!game.result);
   if (idleN > 0) btw.textContent = `🌱 Back to work (${idleN})`;
   updateGroupsBar();
-  if (isGuest()) {
-    // guest toasts come from host snapshots (netEvents); the local
-    // dead-reckoning sim's events would duplicate them
+  if (game.pvp) {
+    // PvP toasts come from the server's snapshots (netEvents); the local
+    // predicted sim's events would duplicate them
     game.events.length = 0;
     return;
   }
   for (const ev of game.events) {
     if (ev.owner == null || ev.owner === me) toast(ev.msg);
-    else if (mp && mp.role === 'host') mp.guestEvents.push(ev);
   }
   game.events.length = 0;
 }
@@ -1886,7 +1791,7 @@ function frame(ts) {
     lastSaveTick = game.tick;
     saveGame();
   }
-  if (game.result && !resultPosted) endMatch(game.result);
+  if (game.result && !resultPosted && !game.pvp) endMatch(game.result);
 }
 
 requestAnimationFrame(frame);
