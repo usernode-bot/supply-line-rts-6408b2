@@ -7,8 +7,9 @@ import { C } from './sim.js';
 export const CARRY_PER_UNIT = 10;      // food capacity per supply unit
 export const HEALTH_WINDOW_TICKS = 300; // 30 s rolling window
 export const LOAD_RANGE = 2.7;    // carrier-to-source-center distance to load / resume loading
-export const UNLOAD_RANGE = 2.5;  // carrier-to-target distance that starts unloading
-export const UNLOAD_SLACK = 0.6;  // hysteresis past UNLOAD_RANGE before re-approaching
+export const UNLOAD_RANGE = 2.5;  // carrier-to-settlement distance that starts unloading
+export const UNLOAD_SLACK = 0.6;  // hysteresis past the dock range before re-approaching
+export const TOUCH_SLACK = 0.15;  // tolerance past touching radii for blob deliveries (#147)
 
 export function createRoute(game, blob, target, initialCargo, sourceId) {
   // target: { kind: 'blob'|'settlement', id }
