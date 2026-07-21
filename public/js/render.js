@@ -12,12 +12,16 @@ const FOG_T = 4;  // fog layer px per tile (tighter edge gradient)
 
 const OWNER_COLOR = ['#8b5cf6', '#ef4444'];
 const OWNER_DARK = ['#4c1d95', '#7f1d1d'];
+// unit-figure bodies: brighter than OWNER_DARK so the tiny figures
+// themselves read team at 1.5–4 px (#122)
+const OWNER_BODY = ['#7c3aed', '#dc2626'];
 
 // Viewer-relative palette: on your own screen YOU are always violet and
 // the opponent red, whichever raw owner index you play in PvP.
 function viewer(game) { return game.me || 0; }
 function ownerColor(game, o) { return OWNER_COLOR[o === viewer(game) ? 0 : 1]; }
 function ownerDark(game, o) { return OWNER_DARK[o === viewer(game) ? 0 : 1]; }
+function ownerBody(game, o) { return OWNER_BODY[o === viewer(game) ? 0 : 1]; }
 function knownOf(game) { return game.pvp ? game.knowns[viewer(game)] : game.known; }
 
 function lerp(a, b, t) { return a + (b - a) * t; }
@@ -349,16 +353,23 @@ export function createRenderer(canvas, minimap) {
       const r = Math.max(10, S.blobRadius(b) * s);
       const px = wx(bx(b)), py = wy(by(b));
       const isSupply = b.count.supply > 0 && b.count.deploy === 0 && b.count.farm === 0;
-      // faint team-colored fill keeps a readable tap target; the units
-      // inside carry the identity now
+      // translucent team-colored fill: strong enough to read allegiance
+      // at far zoom, translucent enough to keep the terrain legible (#122)
       ctx.beginPath();
       ctx.arc(px, py, r, 0, Math.PI * 2);
       ctx.fillStyle = ownerColor(game, b.owner);
-      ctx.globalAlpha = isSupply ? 0.12 : 0.16;
+      ctx.globalAlpha = isSupply ? 0.24 : 0.32;
       ctx.fill();
       ctx.globalAlpha = 1;
       // individual unit figures inside the ring (number-only at far zoom)
       if (r >= 12) drawBlobUnits(game, b, px, py, r);
+      // solid team band under the fed ring: band color = allegiance,
+      // dash color on top = fed state (#122)
+      ctx.lineWidth = 4.5;
+      ctx.strokeStyle = ownerColor(game, b.owner);
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.stroke();
       // dashed fed-state ring
       const m = S.fedMeter(b);
       ctx.lineWidth = 2.5;
@@ -757,7 +768,7 @@ export function createRenderer(canvas, minimap) {
     const n = Math.min(b.units.length, 40);
     if (!n) return;
     const ur = Math.max(1.5, Math.min(4, rPx / (2.2 * Math.sqrt(n))));
-    const body = ownerDark(game, b.owner);
+    const body = ownerBody(game, b.owner);
     for (let i = 0; i < n; i++) {
       const u = b.units[i];
       const h = Math.floor(u.seed * 4096);
@@ -801,10 +812,10 @@ export function createRenderer(canvas, minimap) {
       ctx.lineWidth = 1.5;
       ctx.stroke();
     }
-    // body
+    // body — team-colored so enemy farmhands read red at a glance (#122)
     ctx.beginPath();
     ctx.arc(px, py, r, 0, Math.PI * 2);
-    ctx.fillStyle = b.owner === viewer(game) ? '#166534' : '#7f1d1d';
+    ctx.fillStyle = ownerBody(game, b.owner);
     ctx.fill();
     // head
     ctx.beginPath();
@@ -976,7 +987,7 @@ export function createRenderer(canvas, minimap) {
       if (b.dead) continue;
       if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
       mctx.fillStyle = ownerColor(game, b.owner);
-      mctx.fillRect(b.x * sx - 1, b.y * sy - 1, 3, 3);
+      mctx.fillRect(b.x * sx - 2, b.y * sy - 2, 4, 4);
     }
     // map boundary (matches the main view's always-visible edge, #70)
     mctx.strokeStyle = 'rgba(148,163,184,0.8)';
