@@ -128,9 +128,9 @@ function refreshMenu() {
 // Every difficulty plays by the player's economic rules — the levels
 // differ only in how well the AI commander plays (see DIFF in sim.js).
 const DIFF_HINTS = {
-  easy: 'A fair economy, but a careless commander.',
+  easy: 'A careless commander.',
   normal: 'The standard opponent.',
-  hard: 'Alert, well-supplied, and opportunistic — but never cheats.',
+  hard: 'Alert, well-supplied, and opportunistic.',
 };
 function refreshDifficultyHint() {
   $('difficulty-hint').textContent = DIFF_HINTS[$('sel-difficulty').value] || '';
