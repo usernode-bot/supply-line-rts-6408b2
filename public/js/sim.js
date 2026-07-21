@@ -66,6 +66,9 @@ export const C = {
   REAR_MULT: 1.5,          // full rear-attack damage multiplier (locked victims)
   WALL_PROT: 3,            // garrisoned units take 1/3 open-field damage
   WALL_DEF: 1.5,           // garrison return fire vs besiegers, × the open-field rate
+  MILITIA_SUPPLY: 0.5,     // garrisoned supply unit's return fire vs a fighter's (#127)
+  MILITIA_FARM: 0.1,       // garrisoned farmer's return fire vs a fighter's — matches
+                           // their 1/10 field toughness (UNIT_HP_FARM)
   FARM_FLEE_RADIUS: 4,     // a hit farmer group pulls friendly farmers within this radius home
   CONVERT_TICKS: 100,      // 10 native seconds to arm units into the deploy role
 };
@@ -1604,6 +1607,9 @@ function tickCombat(game) {
   // settlements: garrisons fight from behind walls (#108) — they take
   // 1/3 open-field damage and return fire at WALL_DEF×; structure HP is
   // only attackable once the garrison is gone, and then falls fast.
+  // Every garrisoned unit joins the return fire (#127), weighted by
+  // role: fighters at full strength, supply at MILITIA_SUPPLY, farmers
+  // at MILITIA_FARM — arming still upgrades everyone to full weight.
   for (const s of [...game.settlements]) {
     for (const b of alive) {
       if (b.dead || b.owner === s.owner || b.count.deploy === 0) continue;
@@ -1615,11 +1621,13 @@ function tickCombat(game) {
       if (!engagements.has(b)) b.facing = Math.atan2(s.y + 1 - b.y, s.x + 1 - b.x);
       game.combat.push({ kind: 'bs', b: b.id, s: s.id });
       const attack = b.count.deploy * fedMult(fedMeter(b));
-      const gd = s.garrison.deploy;
+      const gEff = s.garrison.deploy
+        + C.MILITIA_SUPPLY * s.garrison.supply
+        + C.MILITIA_FARM * s.garrison.farm;
       if (garrisonTotal(s) > 0) {
         // garrison defends first; fed from stockpile
         const gMult = s.stockpile > 0 ? 1.25 : 0.5;
-        dmg.set(b, (dmg.get(b) || 0) + gd * gMult * C.WALL_DEF * C.K_COMBAT);
+        dmg.set(b, (dmg.get(b) || 0) + gEff * gMult * C.WALL_DEF * C.K_COMBAT);
         applyGarrisonLosses(game, s, attack * C.K_COMBAT / C.WALL_PROT);
       } else {
         const hpDmg = attack * C.K_SIEGE;
