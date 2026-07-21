@@ -39,6 +39,12 @@
     { "name": "Difficulty hint shows the Normal blurb by default", "path": "/?demo=1", "expectText": "The standard opponent." },
     { "name": "How to Play group-build paragraph present", "path": "/?demo=1", "expectSelector": "#help-group-build" },
     { "name": "How to Play describes source-then-destination supply routes", "path": "/?demo=1", "expectText": "source settlement" },
-    { "name": "How to Play states the combined defeat condition (no settlements + under 5 units)", "path": "/?demo=1", "expectText": "fewer than 5 units left" }
+    { "name": "How to Play states the combined defeat condition (no settlements + under 5 units)", "path": "/?demo=1", "expectText": "fewer than 5 units left" },
+    { "name": "Select/Drag mode toggle present", "path": "/?demo=1", "expectSelector": "#mode-toggle" },
+    { "name": "Select mode button present", "path": "/?demo=1", "expectSelector": "#btn-mode-select" },
+    { "name": "Drag mode button present", "path": "/?demo=1", "expectSelector": "#btn-mode-drag" },
+    { "name": "Surrender button is the flag emoji", "path": "/?demo=1", "expectSelector": "#btn-surrender[aria-label=Surrender]" },
+    { "name": "Touch help describes additive drag box-select", "path": "/?demo=1", "expectText": "each new box adds to the selection" },
+    { "name": "Touch help describes the hold-to-adjust split", "path": "/?demo=1", "expectText": "release to split off exactly that many" }
   ]
 }

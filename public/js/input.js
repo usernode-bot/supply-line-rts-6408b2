@@ -100,8 +100,12 @@ export function createInput({ canvas, minimap, view, handlers }) {
     }
     if (mode === 'maybe' && start) {
       if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > SLOP) {
-        mode = (start.type === 'mouse' && start.button === 0) ? 'box' : 'pan';
-        if (mode === 'box') boxAdditive = e.shiftKey; // shift = add to selection (#136)
+        // touch box-select: in the phone UI's Drag mode a one-finger drag
+        // draws a selection box (always additive — each box unions into
+        // the drag group); two-finger pan/pinch is untouched
+        const touchBox = start.type !== 'mouse' && handlers.touchBox && handlers.touchBox();
+        mode = ((start.type === 'mouse' && start.button === 0) || touchBox) ? 'box' : 'pan';
+        if (mode === 'box') boxAdditive = touchBox || e.shiftKey; // shift = add to selection (#136)
         if (handlers.gesture) handlers.gesture();
       }
     }

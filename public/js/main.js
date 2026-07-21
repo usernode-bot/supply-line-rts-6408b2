@@ -22,7 +22,17 @@ let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1; // displayed speed step 1–4; the sim multiplier is speed × 0.5
 let paused = false;
-let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null };
+let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null, touchMode: 'select' };
+
+// Phone-sized UI (the sm breakpoint that turns the panel into a bottom
+// sheet): mode toggle, contextual tap popups, stats-only panel. Desktop
+// and ≥640px touch keep the classic interaction model.
+const mqDesktop = window.matchMedia('(min-width: 640px)');
+function isMobile() { return !mqDesktop.matches; }
+mqDesktop.addEventListener('change', () => {
+  lastPanelHTML = ''; // panel markup differs per breakpoint — force re-render
+  if (game) { renderPanel(true); }
+});
 let renderer = null, input = null;
 let groups = {};                      // control groups (#69): n -> {kind:'blobs', ids} | {kind:'settlement', id}
 let lastGroupTap = { n: 0, t: 0 };    // for double-tap-to-center
@@ -669,7 +679,7 @@ function startMatch(g) {
   stopAttract(); // the menu backdrop must cost nothing while playing
   game = g;
   resultPosted = false;
-  ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null };
+  ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null, touchMode: 'select' };
   groups = {};
   hideOrderPopup();
   acc = 0; speed = 1; paused = false; lastSaveTick = g.tick;
@@ -684,7 +694,14 @@ function startMatch(g) {
 
   if (!renderer) {
     renderer = createRenderer($('game-canvas'), $('minimap'));
-    input = createInput({ canvas: $('game-canvas'), minimap: $('minimap'), view, handlers: { tap: onTap, box: onBox, rightClick: onRightClick, cancel: onCancel, gesture: onGesture, groupKey: onGroupKey } });
+    input = createInput({
+      canvas: $('game-canvas'), minimap: $('minimap'), view,
+      handlers: {
+        tap: onTap, box: onBox, rightClick: onRightClick, cancel: onCancel, gesture: onGesture, groupKey: onGroupKey,
+        // phone Drag mode: a one-finger drag box-selects instead of panning
+        touchBox: () => !!(game && !game.result && isMobile() && ui.touchMode === 'drag'),
+      },
+    });
   }
   input.setMapSize(g.map.w, g.map.h);
   const start = g.map.starts[me] || g.map.starts[0];
@@ -848,18 +865,55 @@ function onTap(world, pointerType, screen) {
   if (ui.pending) { resolvePending(world, pointerType, screen); return; }
   // a tap while the order popup is open only dismisses it
   if (!orderPopup.classList.contains('hidden')) { hideOrderPopup(); return; }
+  // the phone UI's contextual tap model (Select/Drag modes)
+  const mobile = isMobile() && pointerType !== 'mouse';
+  const sel = mobile ? selectedBlobs() : null;
   // prefer own blob, then own settlement
   let b = S.blobAt(game, world.x, world.y, hitR);
   const eb = b && b.owner !== me ? b : null;
   if (b && b.owner !== me) b = null;
-  if (b) { ui.selected = { kind: 'blob', id: b.id }; renderPanel(true); return; }
+  if (b) {
+    // tapping a blob that's already in the selection → its action popup
+    if (mobile && sel.some(s => s.id === b.id)) { showUnitOptions(screen); return; }
+    // Drag mode: tapping a friendly blob adds it to the drag group
+    if (mobile && ui.touchMode === 'drag' && sel.length) {
+      const ids = [...new Set([...sel.map(s => s.id), b.id])];
+      ui.selected = ids.length === 1 ? { kind: 'blob', id: ids[0] } : { kind: 'multi', ids };
+      renderPanel(true);
+      return;
+    }
+    ui.selected = { kind: 'blob', id: b.id };
+    renderPanel(true);
+    return;
+  }
   const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
-  if (st && st.owner === me) { ui.selected = { kind: 'settlement', id: st.id }; renderPanel(true); return; }
+  if (st && st.owner === me) {
+    if (mobile && sel.length) {
+      const center = { x: st.x + 1, y: st.y + 1 };
+      // Drag mode confirms via popup (a stray tap can't move the group);
+      // Select mode marches the selection straight into the garrison
+      if (ui.touchMode === 'drag') { showOrderPopup(center, screen, null); return; }
+      orderMove(sel, center, null);
+      return;
+    }
+    ui.selected = { kind: 'settlement', id: st.id };
+    renderPanel(true);
+    return;
+  }
+  if (mobile && sel.length > 0) {
+    const target = findEnemyTargetAt(world);
+    // Drag mode: options popup (Move / Attack / Deselect). Select mode:
+    // the tap IS the order — move there, or attack the tapped enemy.
+    if (ui.touchMode === 'drag') { showOrderPopup(world, screen, target); return; }
+    orderMove(sel, world, target);
+    return;
+  }
   // tap elsewhere with blobs selected → inline order popup at the tap
   // point; a tapped enemy blob/settlement becomes a direct attack target.
   // Mouse skips this (#79): on desktop left-click only selects/inspects —
-  // right-click is the order button.
-  if (pointerType !== 'mouse' && selectedBlobs().length > 0) { showOrderPopup(world, screen, findEnemyTargetAt(world)); return; }
+  // right-click is the order button. (≥640px touch only — phones use the
+  // mode-based dispatch above.)
+  if (!mobile && pointerType !== 'mouse' && selectedBlobs().length > 0) { showOrderPopup(world, screen, findEnemyTargetAt(world)); return; }
   // nothing selected → inspect what was tapped
   if (eb && S.isVisible(game, eb.x, eb.y)) {
     ui.selected = { kind: 'enemy-blob', id: eb.id };
@@ -885,6 +939,14 @@ function onTap(world, pointerType, screen) {
 function onBox(rect, additive) {
   if (!game || game.result) return;
   hideOrderPopup();
+  // a box while an order is armed is clearly a selection gesture, not a
+  // destination — drop the pending state (incl. build placement)
+  if (ui.pending) {
+    ui.pending = null;
+    ui.buildSite = null;
+    ui.routeSrc = null;
+    updateHint();
+  }
   let ids = game.blobs
     .filter(b => !b.dead && b.owner === me && b.x >= rect.x0 && b.x <= rect.x1 && b.y >= rect.y0 && b.y <= rect.y1)
     .map(b => b.id);
@@ -1119,6 +1181,37 @@ function onCancel() {
   renderPanel(true);
 }
 
+// ---------------------------------------------------------------- Select/Drag mode toggle (phones)
+
+// Two thumb buttons bottom-left: Select (tap-first, today's model) and
+// Drag (one-finger drag box-selects, boxes union into a drag group).
+// Session-local UI state — never serialized.
+function updateModeToggle() {
+  const el = $('mode-toggle');
+  if (!el) return;
+  const show = game && !game.result && isMobile();
+  el.classList.toggle('hidden', !show);
+  if (!show) return;
+  const on = 'btn px-3 rounded-lg font-semibold border bg-violet-600 border-violet-400 text-white';
+  const off = 'btn px-3 rounded-lg font-semibold border bg-zinc-900/85 border-zinc-700 text-zinc-300';
+  $('btn-mode-select').className = ui.touchMode === 'drag' ? off : on;
+  $('btn-mode-drag').className = ui.touchMode === 'drag' ? on : off;
+  // float above the bottom-sheet panel + unit strip
+  let bottom = 8;
+  if (!panel.classList.contains('hidden')) bottom += panel.offsetHeight;
+  const strip = $('unit-strip');
+  if (!strip.classList.contains('hidden')) bottom += strip.offsetHeight;
+  el.style.bottom = bottom + 'px';
+}
+
+$('mode-toggle').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn || !game) return;
+  ui.touchMode = btn.id === 'btn-mode-drag' ? 'drag' : 'select';
+  updateModeToggle();
+  $('game-canvas').focus({ preventScroll: true });
+});
+
 // ---------------------------------------------------------------- order popup
 
 const orderPopup = $('order-popup');
@@ -1144,6 +1237,127 @@ function showOrderPopup(world, screen, target) {
   const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
   orderPopup.style.left = Math.max(4, Math.min(window.innerWidth - w - 4, px + 10)) + 'px';
   orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
+}
+
+// Unit-options popup (phone UI): tapping an already-selected blob opens
+// everything the desktop panel's button section offers, next to the finger.
+function showUnitOptions(screen) {
+  const blobs = selectedBlobs();
+  if (!blobs.length) return;
+  ui.orderTarget = null;
+  ui.orderTargetEnt = null;
+  splitHoldConsumed = false;
+  const tot = blobs.reduce((s, b) => s + S.total(b), 0);
+  const cnt = { deploy: 0, supply: 0, farm: 0 };
+  for (const b of blobs) { cnt.deploy += b.count.deploy; cnt.supply += b.count.supply; cnt.farm += b.count.farm; }
+  const pureSupply = cnt.supply === tot && tot > 0;
+  const atHome = blobs.some(b => S.isAtHome(game, b));
+  const pillaging = blobs.some(b => b.pillaging);
+  const canSplit = blobs.length === 1 && tot >= 2;
+  const canBuild = tot >= S.C.SETT_COST;
+  orderPopup.innerHTML = `
+    <button data-act="pmovearm" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move…</button>
+    <button data-act="ppillage" class="btn px-3 rounded-lg text-left ${pillaging ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 ${pillaging ? 'Stop pillaging' : 'Pillage'}</button>
+    ${canSplit ? `<button data-act="psplit" style="touch-action:none" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">✂️ Split ${Math.floor(tot / 2)} / ${tot} <span class="text-xs text-zinc-500">(hold to adjust)</span></button>` : ''}
+    <button data-act="pbuildarm" ${canBuild ? '' : 'disabled'} class="btn px-3 rounded-lg text-left ${canBuild ? 'bg-zinc-800 hover:bg-zinc-700' : 'bg-zinc-800 text-zinc-500 opacity-40'}">🏠 Build (${S.C.SETT_COST})</button>
+    ${pureSupply ? '<button data-act="proutearm" class="btn px-3 rounded-lg text-left bg-sky-800 hover:bg-sky-700">🚚 Supply route…</button>' : ''}
+    <div class="flex gap-1">
+      ${roleBtn('deploy', '⚔️', cnt.deploy === tot, false)}${roleBtn('supply', '🚚', pureSupply, false)}${roleBtn('farm', '🌱', cnt.farm === tot, !atHome)}
+    </div>
+    <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`
+    .replaceAll('data-act="role"', 'data-act="prole"');
+  orderPopup.classList.remove('hidden');
+  const px = screen ? screen.x : window.innerWidth / 2;
+  const py = screen ? screen.y : window.innerHeight / 2;
+  const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
+  orderPopup.style.left = Math.max(4, Math.min(window.innerWidth - w - 4, px + 10)) + 'px';
+  orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
+  const sbtn = orderPopup.querySelector('[data-act="psplit"]');
+  if (sbtn) attachSplitHold(sbtn);
+}
+
+// Split gesture: a plain tap splits off half (handled by the click
+// dispatcher); press-and-hold (~350 ms) reveals a slider row anchored in
+// the popup — while still holding, horizontal movement picks the amount
+// (clamped to 1…n−1), and release commits wherever the finger ends up
+// (pointer capture keeps the stream). pointercancel / popup dismissal
+// aborts without splitting.
+let splitHoldConsumed = false; // eat the synthesized click after a hold
+
+function attachSplitHold(btn) {
+  let timer = null, sliding = false, holdX = 0, lastX = 0, value = 1, maxV = 1, totNow = 2, row = null, fill = null, pxPerUnit = 4;
+
+  function cleanup() {
+    clearTimeout(timer);
+    timer = null;
+    sliding = false;
+    if (row) { row.remove(); row = null; fill = null; }
+  }
+
+  function update() {
+    if (fill) fill.style.width = (maxV <= 1 ? 100 : Math.round(100 * (value - 1) / (maxV - 1))) + '%';
+    btn.textContent = `✂️ Split ${value} / ${totNow}`;
+  }
+
+  function abort() {
+    // aborted hold: keep the consumed flag so the synthesized click can't
+    // fire a surprise half-split; the next popup build resets it
+    cleanup();
+  }
+
+  btn.addEventListener('pointerdown', (e) => {
+    const b = selectedBlobs()[0];
+    if (!b || S.total(b) < 2) return;
+    try { btn.setPointerCapture(e.pointerId); } catch { }
+    lastX = e.clientX;
+    timer = setTimeout(() => {
+      timer = null;
+      const b2 = selectedBlobs()[0];
+      if (!b2 || S.total(b2) < 2 || orderPopup.classList.contains('hidden')) return;
+      sliding = true;
+      splitHoldConsumed = true;
+      holdX = lastX;
+      totNow = S.total(b2);
+      maxV = totNow - 1;
+      value = Math.max(1, Math.min(maxV, Math.floor(totNow / 2)));
+      row = document.createElement('div');
+      row.className = 'px-1 pb-1';
+      row.innerHTML = '<div class="h-2 rounded bg-zinc-700 overflow-hidden"><div class="h-full bg-violet-500"></div></div>';
+      btn.insertAdjacentElement('afterend', row);
+      fill = row.firstElementChild.firstElementChild;
+      // px per unit from the track width, floored so huge groups stay controllable
+      pxPerUnit = Math.max(3, (orderPopup.offsetWidth - 12) / Math.max(1, maxV - 1));
+      update();
+    }, 350);
+    e.preventDefault();
+  });
+
+  btn.addEventListener('pointermove', (e) => {
+    lastX = e.clientX;
+    if (!sliding) return;
+    if (orderPopup.classList.contains('hidden')) { abort(); return; } // dismissed mid-hold
+    const start = Math.max(1, Math.min(maxV, Math.floor(totNow / 2)));
+    value = Math.max(1, Math.min(maxV, start + Math.round((e.clientX - holdX) / pxPerUnit)));
+    update();
+  });
+
+  function end(e) {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (!sliding) return; // plain tap — the click dispatcher does the half-split
+    const commit = e.type === 'pointerup' && !orderPopup.classList.contains('hidden');
+    cleanup();
+    hideOrderPopup();
+    if (!commit) return;
+    // the sim kept ticking during the hold — re-resolve and re-clamp
+    const b = selectedBlobs()[0];
+    if (b && S.total(b) >= 2) {
+      const r = doSplit(b, Math.max(1, Math.min(S.total(b) - 1, value)));
+      if (r.err) toast(r.err);
+    }
+    renderPanel(true);
+  }
+  btn.addEventListener('pointerup', end);
+  btn.addEventListener('pointercancel', end);
 }
 
 // Touch build placement (#94): the armed outline sits at ui.buildSite;
@@ -1229,6 +1443,40 @@ orderPopup.addEventListener('click', (e) => {
   if (act === 'pbuild') { confirmBuild(); return; }
   if (act === 'pbuildx') { onCancel(); renderPanel(true); return; }
   if (act === 'pclose') { ui.selected = null; renderPanel(true); return; }
+  // unit-options popup actions (phone UI) — mirror the panel's cases
+  if (act === 'pmovearm') { ui.pending = 'move'; updateHint(); return; }
+  if (act === 'proutearm') { ui.pending = 'route'; ui.routeSrc = null; updateHint(); return; }
+  if (act === 'pbuildarm') {
+    if (selectedBlobs().length) { ui.pending = 'build'; ui.buildSite = null; updateHint(); }
+    return;
+  }
+  if (act === 'ppillage') {
+    for (const b of selectedBlobs()) doPillage(b, !b.pillaging);
+    renderPanel(true);
+    return;
+  }
+  if (act === 'prole') {
+    let err = null, okCount = 0;
+    for (const b of selectedBlobs()) {
+      const res = doSetRole(b, btn.dataset.role);
+      if (res.err) err = res.err; else okCount++;
+    }
+    if (err && !okCount) toast(err);
+    renderPanel(true);
+    return;
+  }
+  if (act === 'psplit') {
+    // a hold-commit already split (and the browser still synthesizes a
+    // click on the captured button) — eat exactly one
+    if (splitHoldConsumed) { splitHoldConsumed = false; return; }
+    const b = selectedBlobs()[0];
+    if (b && S.total(b) >= 2) {
+      const r = doSplit(b, Math.floor(S.total(b) / 2));
+      if (r.err) toast(r.err);
+    }
+    renderPanel(true);
+    return;
+  }
   if (!world) return;
   const target = act === 'pattack' ? targetEnt : null;
   orderMove(selectedBlobs(), world, target);
@@ -1578,6 +1826,7 @@ function updateUnitStrip() {
 function renderPanel(force) {
   renderPanelInner(force);
   updateUnitStrip(); // after the panel, so the strip can sit on its top edge
+  updateModeToggle(); // after the strip, so the toggle can sit above both
 }
 
 function renderPanelInner(force) {
@@ -1758,7 +2007,7 @@ function renderPanelInner(force) {
       <div class="text-xs text-zinc-400 mb-1">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾
         · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></div>
       <div class="mb-2 pl-2 border-l border-zinc-800">${flowRows}</div>
-      <div class="text-xs text-zinc-500 mb-1">Production mode (sets new units' role)</div>
+      <div class="text-xs text-zinc-500 mb-1">Production mode${isMobile() ? '' : " (sets new units' role)"}</div>
       <div class="flex gap-1 mb-2">
         ${[['farm', '🌾 Farm'], ['supply', '🚚 Supply'], ['deploy', '⚔️ Deploy'], ['off', '📦 Stockpile']].map(([m, lbl]) => `<button data-act="mode" data-mode="${m}"
           class="btn-sm flex-1 px-1 rounded ${st.mode === m ? (m === 'off' ? 'bg-zinc-600 text-white' : 'bg-emerald-700 text-white') : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}">${lbl}</button>`).join('')}
@@ -1772,7 +2021,7 @@ function renderPanelInner(force) {
           <button data-act="recall" id="recall-btn" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Recall ${rc}</button>
         </div>` : wc === 1 ? '<div class="mt-1 text-right"><button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall 1</button></div>' : ''}
       </div>
-      <div class="text-xs text-zinc-500 mt-1">Each worked plot pays its own fertility — farmers claim the lushest free plot first, and two farmers on one plot don't double it. Unworked farmland only yields a small built-in base worth ${S.C.FARM_BASE_FARMERS} farmers. Plots poorer than Sparse aren't worth manning; farm growth stops once every worthwhile plot is worked. Sheltered, garrisoned or still-walking farmers earn nothing yet. Worked plots also heal scorched land fast — about one fertility level per 45 s.</div>
+      ${isMobile() ? '' : `<div class="text-xs text-zinc-500 mt-1">Each worked plot pays its own fertility — farmers claim the lushest free plot first, and two farmers on one plot don't double it. Unworked farmland only yields a small built-in base worth ${S.C.FARM_BASE_FARMERS} farmers. Plots poorer than Sparse aren't worth manning; farm growth stops once every worthwhile plot is worked. Sheltered, garrisoned or still-walking farmers earn nothing yet. Worked plots also heal scorched land fast — about one fertility level per 45 s.</div>`}
       <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}</div>
         ${gTot > 0 ? `
@@ -1820,19 +2069,29 @@ function renderPanelInner(force) {
     ui.splitCount = Math.max(1, Math.min(tot - 1, ui.splitCount || Math.floor(tot / 2)));
   }
 
-  setPanelHTML(`
+  // phone UI: stats only — all actions live in the tap popups
+  const statsHTML = `
     <div class="flex items-center justify-between mb-1">
       <span class="font-semibold">${multi ? `${blobs.length} blobs` : 'Blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
     <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
+    `;
+  const convertLine = blobs.some(b => b.convert) ? `<div class="text-xs text-amber-400 mb-2">⚔️ Arming… ready in ~${convertEta(blobs.filter(b => b.convert).reduce((a, b) => (a.convert.done >= b.convert.done ? a : b)).convert)}s — units fight as their old role until then; picking another role cancels</div>` : '';
+
+  if (isMobile()) {
+    setPanelHTML(statsHTML + convertLine);
+    return;
+  }
+
+  setPanelHTML(`${statsHTML}
     <div class="text-xs text-zinc-500 mb-1">Role ${!atHome ? '<span class="text-zinc-600">(farmers need a settlement)</span>' : ''}</div>
     <div class="flex gap-1 mb-2">
       ${roleBtn('deploy', '⚔️ Deploy', cnt.deploy === tot, false)}
       ${roleBtn('supply', '🚚 Supply', pureSupply, false)}
       ${roleBtn('farm', '🌱 Farmer', cnt.farm === tot, !atHome)}
     </div>
-    ${blobs.some(b => b.convert) ? `<div class="text-xs text-amber-400 mb-2">⚔️ Arming… ready in ~${convertEta(blobs.filter(b => b.convert).reduce((a, b) => (a.convert.done >= b.convert.done ? a : b)).convert)}s — units fight as their old role until then; picking another role cancels</div>` : ''}
+    ${convertLine}
     <div class="grid grid-cols-2 gap-1 mb-2">
       <button data-act="move" class="btn rounded bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
       <button data-act="pillage" class="btn rounded ${blobs.some(b => b.pillaging) ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 Pillage</button>
