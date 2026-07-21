@@ -4,6 +4,7 @@ const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 
 const attractPool = require('./attract-pool');
+const matchRunner = require('./match-runner');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -63,7 +64,6 @@ app.get('/api/attract-snapshot', (_req, res) => {
 const RESULTS = new Set(['win', 'loss', 'surrender']);
 const DIFFICULTIES = new Set(['easy', 'normal', 'hard', 'pvp']);
 const MAP_SIZES = new Set(['xsmall', 'small', 'medium', 'large']);
-const END_REASONS = new Set(['elimination', 'surrender', 'abandoned']);
 
 // Staging demo rows use negative user ids / ids in the 9001xx range so
 // they can never collide with (or be mistaken for) real rows.
@@ -240,13 +240,20 @@ app.post('/api/lobbies/:id/join', async (req, res) => {
       SELECT 1 FROM lobbies WHERE (host_user_id = $1 OR guest_user_id = $1) AND status = 'active' LIMIT 1
     `, [uid]);
     if (active.rows.length) return res.status(400).json({ error: 'You already have a match in progress — rejoin it first' });
+    if (!matchRunner.hasCapacity()) {
+      return res.status(400).json({ error: 'The server is at match capacity — try again in a few minutes' });
+    }
     const r = await pool.query(`
       UPDATE lobbies SET guest_user_id = $2, guest_username = $3, status = 'active', guest_seen_at = NOW()
       WHERE id = $1 AND status = 'open' AND guest_user_id IS NULL AND host_user_id <> $2 AND host_user_id > 0
         AND (challenge_username IS NULL OR LOWER(challenge_username) = LOWER($3))
       RETURNING *
     `, [id, uid, uname]);
-    if (r.rows.length) return res.json({ lobby: mineShape(r.rows[0], uid) });
+    if (r.rows.length) {
+      // the match is server-authoritative: spin up its simulation now
+      await matchRunner.start(r.rows[0]);
+      return res.json({ lobby: mineShape(r.rows[0], uid) });
+    }
     const row = (await pool.query(`SELECT * FROM lobbies WHERE id = $1`, [id])).rows[0];
     if (!row) return res.status(404).json({ error: 'Lobby not found' });
     if (row.host_user_id < 0) return res.status(400).json({ error: "That's a staging demo lobby — it can't be joined" });
@@ -292,7 +299,9 @@ app.post('/api/lobbies/:id/cancel', async (req, res) => {
   }
 });
 
-// Current lobby state for rejoin: role, opponent and the latest snapshot.
+// Current lobby state for rejoin: role, opponent and the freshest
+// snapshot — from the live runner when there is one, else the last
+// durability flush in the lobby row.
 app.get('/api/lobbies/:id/state', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -301,12 +310,11 @@ app.get('/api/lobbies/:id/state', async (req, res) => {
     const uid = req.user.id;
     if (row.host_user_id !== uid && row.guest_user_id !== uid) return res.status(403).json({ error: 'Not your lobby' });
     const m = mineShape(row, uid);
-    const lastCmd = await pool.query(`SELECT COALESCE(MAX(id), 0) AS max FROM lobby_commands WHERE lobby_id = $1`, [id]);
+    const live = matchRunner.peek(id);
     res.json({
       ...m,
-      snapshot: row.snapshot || null,
-      snapshot_tick: row.snapshot_tick || 0,
-      last_command_id: +lastCmd.rows[0].max,
+      snapshot: live ? live.snapshot : (row.snapshot || null),
+      snapshot_tick: live ? live.snapshot_tick : (row.snapshot_tick || 0),
       winner_owner: row.winner_owner,
       end_reason: row.end_reason,
     });
@@ -315,9 +323,10 @@ app.get('/api/lobbies/:id/state', async (req, res) => {
   }
 });
 
-// The single polling endpoint. The host uploads snapshots and drains
-// guest commands; the guest uploads commands and downloads snapshots.
-// Both calls double as presence heartbeats.
+// The single polling endpoint, symmetric for both players: register
+// presence, hand the runner this player's commands, download the
+// authoritative snapshot when behind. While the lobby is still 'open'
+// it doubles as the host's waiting-room heartbeat.
 app.post('/api/lobbies/:id/sync', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -326,106 +335,14 @@ app.post('/api/lobbies/:id/sync', async (req, res) => {
     const uid = req.user.id;
     const isHost = row.host_user_id === uid;
     if (!isHost && row.guest_user_id !== uid) return res.status(403).json({ error: 'Not your lobby' });
-    const body = req.body || {};
-    const now = Date.now();
 
-    if (isHost) {
-      if (body.snapshot && typeof body.snapshot === 'object' && row.status === 'active') {
-        await pool.query(`
-          UPDATE lobbies SET host_seen_at = NOW(), snapshot = $2, snapshot_tick = $3 WHERE id = $1
-        `, [id, JSON.stringify(body.snapshot), Math.max(0, parseInt(body.tick, 10) || 0)]);
-      } else {
-        await pool.query(`UPDATE lobbies SET host_seen_at = NOW() WHERE id = $1`, [id]);
-      }
-      const after = Math.max(0, parseInt(body.commandsAfter, 10) || 0);
-      const cmds = await pool.query(`
-        SELECT id, payload FROM lobby_commands WHERE lobby_id = $1 AND id > $2 ORDER BY id LIMIT 200
-      `, [id, after]);
-      return res.json({
-        status: row.status,
-        guest_username: row.guest_username,
-        commands: cmds.rows,
-        opponentSeenAgoMs: row.guest_seen_at ? now - new Date(row.guest_seen_at).getTime() : null,
-        winner_owner: row.winner_owner,
-        end_reason: row.end_reason,
-      });
+    if (row.status === 'open' || row.status === 'declined') {
+      if (isHost) await pool.query(`UPDATE lobbies SET host_seen_at = NOW() WHERE id = $1`, [id]);
+      return res.json({ status: row.status, guest_username: row.guest_username, command_ids: [] });
     }
 
-    // guest
-    await pool.query(`UPDATE lobbies SET guest_seen_at = NOW() WHERE id = $1`, [id]);
-    const commands = Array.isArray(body.commands) ? body.commands.slice(0, 50) : [];
-    if (commands.length && row.status === 'active') {
-      const values = [];
-      const params = [id];
-      for (const c of commands) {
-        params.push(JSON.stringify(c));
-        values.push(`($1, $${params.length})`);
-      }
-      await pool.query(`INSERT INTO lobby_commands (lobby_id, payload) VALUES ${values.join(', ')}`, params);
-    }
-    const haveTick = parseInt(body.haveTick, 10);
-    const wantSnap = row.snapshot && (isNaN(haveTick) || haveTick < (row.snapshot_tick || 0));
-    return res.json({
-      status: row.status,
-      snapshot_tick: row.snapshot_tick || 0,
-      snapshot: wantSnap ? row.snapshot : undefined,
-      opponentSeenAgoMs: row.host_seen_at ? now - new Date(row.host_seen_at).getTime() : null,
-      winner_owner: row.winner_owner,
-      end_reason: row.end_reason,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Report the outcome. Host reports elimination/surrender; either player
-// may claim an abandoned win once the opponent has been gone >60 s.
-app.post('/api/lobbies/:id/result', async (req, res) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { winnerOwner, reason } = req.body || {};
-    const winner = winnerOwner === 0 || winnerOwner === 1 ? winnerOwner : null;
-    if (winner == null || !END_REASONS.has(reason)) return res.status(400).json({ error: 'Bad result' });
-    const row = (await pool.query(`SELECT * FROM lobbies WHERE id = $1`, [id])).rows[0];
-    if (!row) return res.status(404).json({ error: 'Lobby not found' });
-    const uid = req.user.id;
-    const isHost = row.host_user_id === uid;
-    if (!isHost && row.guest_user_id !== uid) return res.status(403).json({ error: 'Not your lobby' });
-    if (row.status !== 'active') {
-      return res.json({ ok: false, status: row.status, winner_owner: row.winner_owner, end_reason: row.end_reason });
-    }
-    if (reason === 'abandoned') {
-      // claimant must be the winner, and the opponent genuinely gone
-      const myOwner = isHost ? 0 : 1;
-      if (winner !== myOwner) return res.status(400).json({ error: 'Bad claim' });
-      const oppSeen = isHost ? row.guest_seen_at : row.host_seen_at;
-      const ageMs = oppSeen ? Date.now() - new Date(oppSeen).getTime() : Infinity;
-      if (ageMs < 60000) return res.status(400).json({ error: 'Opponent is still connected' });
-    } else if (!isHost) {
-      return res.status(403).json({ error: 'Only the host reports this result' });
-    }
-    const upd = await pool.query(`
-      UPDATE lobbies SET status = 'finished', winner_owner = $2, end_reason = $3
-      WHERE id = $1 AND status = 'active' RETURNING *
-    `, [id, winner, reason]);
-    if (!upd.rows.length) {
-      const cur = (await pool.query(`SELECT status, winner_owner, end_reason FROM lobbies WHERE id = $1`, [id])).rows[0];
-      return res.json({ ok: false, ...cur });
-    }
-    const l = upd.rows[0];
-    const duration = Math.max(0, Math.min(86400, Math.round((l.snapshot_tick || 0) / 10)));
-    const rowResult = (owner) => owner === winner ? 'win' : (reason === 'surrender' ? 'surrender' : 'loss');
-    if (l.guest_user_id != null) {
-      await pool.query(`
-        INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, mode, opponent)
-        VALUES ($1, $2, $3, 'pvp', $4, $5, 'pvp', $6),
-               ($7, $8, $9, 'pvp', $4, $5, 'pvp', $10)
-      `, [
-        l.host_user_id, l.host_username, rowResult(0), duration, l.seed, l.guest_username,
-        l.guest_user_id, l.guest_username, rowResult(1), l.host_username,
-      ]);
-    }
-    res.json({ ok: true, winner_owner: winner, end_reason: reason });
+    const out = await matchRunner.sync(row, isHost ? 0 : 1, req.body || {});
+    res.json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -537,6 +454,7 @@ async function start() {
     `);
   }
 
+  matchRunner.init(pool); // server-authoritative PvP simulations
   app.listen(port, () => console.log(`Listening on :${port}`));
   attractPool.warmUp(); // fill the attract-snapshot pool in the background
 }
