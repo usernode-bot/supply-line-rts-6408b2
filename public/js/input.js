@@ -2,7 +2,8 @@
 // pen. Single-pointer drag pans (touch) or box-selects (mouse); pinch
 // zooms; a tap within the slop threshold selects / resolves an armed
 // order. Desktop extras (right-click orders, WASD/edge pan, wheel zoom,
-// Esc) are shortcuts layered on top — never the only path.
+// trackpad scroll-pan / pinch-zoom, Esc) are shortcuts layered on top —
+// never the only path.
 
 const SLOP = 8; // CSS px before a press becomes a drag
 
@@ -49,6 +50,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
     // transfer, so without this a focused slider would swallow keys.
     canvas.focus({ preventScroll: true });
     if (e.button === 2) return; // handled via contextmenu
+    gestureBase = null; // a real pointer takes over from any Safari pinch
     canvas.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY });
     if (pointers.size === 2) {
@@ -150,22 +152,82 @@ export function createInput({ canvas, minimap, view, handlers }) {
     handlers.rightClick(worldFromScreen(e.clientX, e.clientY), isAttackHeld());
   });
 
+  // Trackpad two-finger scroll pans, pinch zooms (#124). Pinch arrives as
+  // ctrl-wheel (Chrome/Edge/Firefox); plain wheel is classified trackpad
+  // (pan) vs mouse (zoom) by the shape of its deltas, erring toward mouse.
+  let trackpadUntil = 0; // hysteresis: mid-stream samples stay trackpad
+
+  function zoomAt(clientX, clientY, factor) {
+    const before = worldFromScreen(clientX, clientY);
+    view.scale *= factor;
+    clampView();
+    const { w, h } = cssSize();
+    view.cx = before.x - (clientX - w / 2) / view.scale;
+    view.cy = before.y - (clientY - h / 2) / view.scale;
+    clampView();
+  }
+
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     if (handlers.gesture) handlers.gesture();
-    const before = worldFromScreen(e.clientX, e.clientY);
-    // delta-proportional zoom (#81): ~×1.08 per standard 120px wheel
-    // notch, smooth on trackpads; line/page delta modes normalised to px
-    let dy = e.deltaY;
-    if (e.deltaMode === 1) dy *= 33;
-    else if (e.deltaMode === 2) dy *= cssSize().h;
-    view.scale *= Math.pow(2, -dy * 0.0009);
-    clampView();
-    const { w, h } = cssSize();
-    view.cx = before.x - (e.clientX - w / 2) / view.scale;
-    view.cy = before.y - (e.clientY - h / 2) / view.scale;
-    clampView();
+    // line/page delta modes normalised to px
+    let dy = e.deltaY, dx = e.deltaX;
+    if (e.deltaMode === 1) { dy *= 33; dx *= 33; }
+    else if (e.deltaMode === 2) { dy *= cssSize().h; dx *= cssSize().h; }
+
+    // pinch (synthesised as ctrl-wheel) or explicit ctrl/cmd+scroll: zoom
+    // at pinch rate — the conventional exp(-dy/100) mapping for pinch deltas
+    if (e.ctrlKey || e.metaKey) {
+      zoomAt(e.clientX, e.clientY, Math.exp(-dy / 100));
+      return;
+    }
+
+    // classify trackpad-scroll vs mouse-wheel: wheels never send horizontal
+    // or fractional deltas, and their non-standard wheelDeltaY comes in
+    // multiples of 120; ambiguous samples inside an active trackpad stream
+    // stay trackpad (hysteresis) so a pan never zoom-jumps mid-flick
+    const now = performance.now();
+    let trackpad;
+    if (e.deltaMode !== 0) trackpad = false;
+    else if (e.deltaX !== 0 || !Number.isInteger(e.deltaY)) trackpad = true;
+    else if (now < trackpadUntil) trackpad = true;
+    else if (typeof e.wheelDeltaY === 'number') trackpad = !(e.wheelDeltaY !== 0 && e.wheelDeltaY % 120 === 0);
+    else trackpad = false; // no signal → preserve mouse-wheel zoom
+
+    if (trackpad) {
+      trackpadUntil = now + 300;
+      view.cx += dx / view.scale;
+      view.cy += dy / view.scale;
+      clampView();
+    } else {
+      trackpadUntil = 0;
+      // delta-proportional zoom (#81): ~×1.08 per standard 120px wheel notch
+      zoomAt(e.clientX, e.clientY, Math.pow(2, -dy * 0.0009));
+    }
   }, { passive: false });
+
+  // Safari doesn't synthesise ctrl-wheel for trackpad pinch — it fires
+  // proprietary gesture events instead. preventDefault() is what stops
+  // Safari's full-page pinch zoom (touch-action doesn't cover trackpads).
+  // Other browsers never fire these, so the listeners are inert there.
+  let gestureBase = null;
+  canvas.addEventListener('gesturestart', (e) => {
+    e.preventDefault();
+    // iPadOS Safari fires gesture events for touch pinches too — the
+    // pointer-event pinch path already owns those
+    if (pointers.size >= 2) return;
+    gestureBase = { scale: view.scale, x: e.clientX, y: e.clientY };
+    if (handlers.gesture) handlers.gesture();
+  });
+  canvas.addEventListener('gesturechange', (e) => {
+    e.preventDefault();
+    if (!gestureBase) return;
+    zoomAt(e.clientX, e.clientY, (gestureBase.scale * e.scale) / view.scale);
+  });
+  canvas.addEventListener('gestureend', (e) => {
+    e.preventDefault();
+    gestureBase = null;
+  });
 
   // -- minimap: tap/drag to jump --------------------------------------
 
