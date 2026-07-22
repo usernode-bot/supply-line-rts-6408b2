@@ -887,10 +887,11 @@ function onTap(world, pointerType, screen) {
   if (b) {
     // tapping a blob that's already in the selection → its action popup
     if (mobile && sel.some(s => s.id === b.id)) { showUnitOptions(screen); return; }
-    // Select mode: tapping a friendly blob asks Select / Deselect instead
-    // of silently swapping the selection, so a stray tap near a group
-    // can't lose what's already picked
-    if (mobile) { showSelectPopup(b, screen); return; }
+    // Select mode with units in hand: tapping another friendly blob asks
+    // Select / Move / Deselect instead of silently swapping the selection,
+    // so a stray tap near a group can't lose what's already picked. With
+    // nothing selected there's nothing to lose — select it directly.
+    if (mobile && sel.length > 0) { showSelectPopup(b, screen); return; }
     ui.selected = { kind: 'blob', id: b.id };
     renderPanel(true);
     return;
@@ -1256,22 +1257,21 @@ function showOrderPopup(world, screen, target) {
 }
 
 // Select popup (phone UI, Select mode): tapping a friendly blob outside
-// the current selection asks before switching — Select swaps the
-// selection to the tapped blob. With units already in hand the popup
-// also offers Move ('pmove' rides the shared orderMove dispatch),
-// marching the selection to the tapped blob's spot while keeping it
-// selected, and Deselect, which clears the current selection; with
-// nothing selected there's nothing to lose, so only Select is offered.
+// the current selection while units are already in hand asks before
+// switching — Select swaps the selection to the tapped blob, Move
+// ('pmove' rides the shared orderMove dispatch) marches the selection
+// to the tapped blob's spot while keeping it selected, and Deselect
+// clears the current selection. With nothing selected the tap selects
+// the blob directly (see onTap) and this popup never shows.
 let tapBlobId = null;
 function showSelectPopup(b, screen) {
-  const hasSel = selectedBlobs().length > 0;
-  ui.orderTarget = hasSel ? { x: b.x, y: b.y } : null;
+  ui.orderTarget = { x: b.x, y: b.y };
   ui.orderTargetEnt = null;
   tapBlobId = b.id;
   orderPopup.innerHTML = `
-    ${hasSel ? '<button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move here</button>' : ''}
+    <button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move here</button>
     <button data-act="pselect" class="btn px-3 rounded-lg text-left bg-violet-700 hover:bg-violet-600 text-white">👆 Select</button>
-    ${hasSel ? '<button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>' : ''}`;
+    <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`;
   orderPopup.classList.remove('hidden');
   const px = screen ? screen.x : window.innerWidth / 2;
   const py = screen ? screen.y : window.innerHeight / 2;
