@@ -782,7 +782,9 @@ export function createRenderer(canvas, minimap) {
           ctx.fillStyle = 'rgba(74,222,128,0.15)';
           ctx.strokeStyle = 'rgba(74,222,128,0.35)';
           ctx.lineWidth = 1;
-          for (const i of S.previewFields(game, ax, ay)) {
+          // owner-aware (#167): show the exact plots the site would win,
+          // including contested same-owner tiles it takes from a neighbor
+          for (const i of S.previewFields(game, ax, ay, viewer(game))) {
             const tx = i % game.map.w, ty = (i / game.map.w) | 0;
             ctx.fillRect(wx(tx), wy(ty), s, s);
             ctx.strokeRect(wx(tx) + 0.5, wy(ty) + 0.5, s - 1, s - 1);

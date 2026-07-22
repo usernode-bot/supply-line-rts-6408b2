@@ -283,6 +283,12 @@ export function createInput({ canvas, minimap, view, handlers }) {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     keys.add(e.code);
     if (e.code === 'Escape') handlers.cancel();
+    // space toggles pause in single-player (#168); preventDefault stops
+    // the page scrolling and a focused button from being "clicked"
+    if (e.code === 'Space' && handlers.pauseKey) {
+      handlers.pauseKey();
+      e.preventDefault();
+    }
     // control groups (#69): shift+digit assigns, digit selects (double-tap
     // centers) — main.js owns the group state via the groupKey handler
     const dg = /^Digit([1-9])$/.exec(e.code);
