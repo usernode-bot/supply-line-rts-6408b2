@@ -868,6 +868,18 @@ function onTap(world, pointerType, screen) {
   // the phone UI's contextual tap model (Select/Drag modes)
   const mobile = isMobile() && pointerType !== 'mouse';
   const sel = mobile ? selectedBlobs() : null;
+  // Drag mode (phones) is drag-only: one-finger boxes build up the group
+  // across as many drags as it takes, and every order waits for Select
+  // mode. The one live tap target is an own settlement, which switches
+  // the active selection to it.
+  if (mobile && ui.touchMode === 'drag') {
+    const dst = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+    if (dst && dst.owner === me) {
+      ui.selected = { kind: 'settlement', id: dst.id };
+      renderPanel(true);
+    }
+    return;
+  }
   // prefer own blob, then own settlement
   let b = S.blobAt(game, world.x, world.y, hitR);
   const eb = b && b.owner !== me ? b : null;
@@ -875,13 +887,10 @@ function onTap(world, pointerType, screen) {
   if (b) {
     // tapping a blob that's already in the selection → its action popup
     if (mobile && sel.some(s => s.id === b.id)) { showUnitOptions(screen); return; }
-    // Drag mode: tapping a friendly blob adds it to the drag group
-    if (mobile && ui.touchMode === 'drag' && sel.length) {
-      const ids = [...new Set([...sel.map(s => s.id), b.id])];
-      ui.selected = ids.length === 1 ? { kind: 'blob', id: ids[0] } : { kind: 'multi', ids };
-      renderPanel(true);
-      return;
-    }
+    // Select mode: tapping a friendly blob asks Select / Deselect instead
+    // of silently swapping the selection, so a stray tap near a group
+    // can't lose what's already picked
+    if (mobile) { showSelectPopup(b, screen); return; }
     ui.selected = { kind: 'blob', id: b.id };
     renderPanel(true);
     return;
@@ -889,11 +898,9 @@ function onTap(world, pointerType, screen) {
   const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
   if (st && st.owner === me) {
     if (mobile && sel.length) {
-      const center = { x: st.x + 1, y: st.y + 1 };
-      // Drag mode confirms via popup (a stray tap can't move the group);
-      // Select mode marches the selection straight into the garrison
-      if (ui.touchMode === 'drag') { showOrderPopup(center, screen, null); return; }
-      orderMove(sel, center, null);
+      // with units in hand the tap is ambiguous — ask: switch to the
+      // settlement, march the group into its garrison, or deselect
+      showGarrisonPopup(st, screen);
       return;
     }
     ui.selected = { kind: 'settlement', id: st.id };
@@ -901,11 +908,8 @@ function onTap(world, pointerType, screen) {
     return;
   }
   if (mobile && sel.length > 0) {
-    const target = findEnemyTargetAt(world);
-    // Drag mode: options popup (Move / Attack / Deselect). Select mode:
-    // the tap IS the order — move there, or attack the tapped enemy.
-    if (ui.touchMode === 'drag') { showOrderPopup(world, screen, target); return; }
-    orderMove(sel, world, target);
+    // the tap IS the order — move there, or attack the tapped enemy
+    orderMove(sel, world, findEnemyTargetAt(world));
     return;
   }
   // tap elsewhere with blobs selected → inline order popup at the tap
@@ -1183,17 +1187,17 @@ function onCancel() {
 
 // ---------------------------------------------------------------- Select/Drag mode toggle (phones)
 
-// Two thumb buttons bottom-left: Select (tap-first, today's model) and
-// Drag (one-finger drag box-selects, boxes union into a drag group).
-// Session-local UI state — never serialized.
+// Two icon buttons bottom-left: Select (cursor — tap-first, all orders)
+// and Drag (dashed box — drag-only selection building; entering it drops
+// the current unit selection). Session-local UI state — never serialized.
 function updateModeToggle() {
   const el = $('mode-toggle');
   if (!el) return;
   const show = game && !game.result && isMobile();
   el.classList.toggle('hidden', !show);
   if (!show) return;
-  const on = 'btn px-3 rounded-lg font-semibold border bg-violet-600 border-violet-400 text-white';
-  const off = 'btn px-3 rounded-lg font-semibold border bg-zinc-900/85 border-zinc-700 text-zinc-300';
+  const on = 'btn px-3 rounded-lg border flex items-center justify-center bg-violet-600 border-violet-400 text-white';
+  const off = 'btn px-3 rounded-lg border flex items-center justify-center bg-zinc-900/85 border-zinc-700 text-zinc-300';
   $('btn-mode-select').className = ui.touchMode === 'drag' ? off : on;
   $('btn-mode-drag').className = ui.touchMode === 'drag' ? on : off;
   // float above the bottom-sheet panel + unit strip
@@ -1208,6 +1212,17 @@ $('mode-toggle').addEventListener('click', (e) => {
   const btn = e.target.closest('button');
   if (!btn || !game) return;
   ui.touchMode = btn.id === 'btn-mode-drag' ? 'drag' : 'select';
+  if (btn.id === 'btn-mode-drag') {
+    // Drag always starts a fresh group: drop any selected units and any
+    // armed order (every tap of the button, not just mode changes)
+    if (ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'multi')) ui.selected = null;
+    ui.pending = null;
+    ui.buildSite = null;
+    ui.routeSrc = null;
+    hideOrderPopup();
+    updateHint();
+    renderPanel(true);
+  }
   updateModeToggle();
   $('game-canvas').focus({ preventScroll: true });
 });
@@ -1230,6 +1245,50 @@ function showOrderPopup(world, screen, target) {
   orderPopup.innerHTML = `
     ${target && hasDeploy ? `<button data-act="pattack" class="btn px-3 rounded-lg text-left bg-red-900/80 hover:bg-red-800 text-red-100">${atkLabel}</button>` : ''}
     <button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
+    <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`;
+  orderPopup.classList.remove('hidden');
+  const px = screen ? screen.x : window.innerWidth / 2;
+  const py = screen ? screen.y : window.innerHeight / 2;
+  const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
+  orderPopup.style.left = Math.max(4, Math.min(window.innerWidth - w - 4, px + 10)) + 'px';
+  orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
+}
+
+// Select/Deselect popup (phone UI, Select mode): tapping a friendly blob
+// outside the current selection asks before switching — Select swaps the
+// selection to the tapped blob, Deselect clears the current selection.
+// With units already in hand the popup also offers Move ('pmove' rides
+// the shared orderMove dispatch), marching the selection to the tapped
+// blob's spot while keeping it selected.
+let tapBlobId = null;
+function showSelectPopup(b, screen) {
+  const hasSel = selectedBlobs().length > 0;
+  ui.orderTarget = hasSel ? { x: b.x, y: b.y } : null;
+  ui.orderTargetEnt = null;
+  tapBlobId = b.id;
+  orderPopup.innerHTML = `
+    ${hasSel ? '<button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move here</button>' : ''}
+    <button data-act="pselect" class="btn px-3 rounded-lg text-left bg-violet-700 hover:bg-violet-600 text-white">👆 Select</button>
+    <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`;
+  orderPopup.classList.remove('hidden');
+  const px = screen ? screen.x : window.innerWidth / 2;
+  const py = screen ? screen.y : window.innerHeight / 2;
+  const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
+  orderPopup.style.left = Math.max(4, Math.min(window.innerWidth - w - 4, px + 10)) + 'px';
+  orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
+}
+
+// Garrison popup (phone UI, Select mode): tapping an own settlement with
+// units in hand asks — switch the selection to the settlement, march the
+// group into its garrison, or clear the selection.
+let tapSettId = null;
+function showGarrisonPopup(st, screen) {
+  ui.orderTarget = { x: st.x + 1, y: st.y + 1 }; // 'pgarrison' marches here
+  ui.orderTargetEnt = null;
+  tapSettId = st.id;
+  orderPopup.innerHTML = `
+    <button data-act="pselsett" class="btn px-3 rounded-lg text-left bg-violet-700 hover:bg-violet-600 text-white">🏠 Select settlement</button>
+    <button data-act="pgarrison" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">🛡️ Garrison units</button>
     <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`;
   orderPopup.classList.remove('hidden');
   const px = screen ? screen.x : window.innerWidth / 2;
@@ -1443,6 +1502,23 @@ orderPopup.addEventListener('click', (e) => {
   if (act === 'pbuild') { confirmBuild(); return; }
   if (act === 'pbuildx') { onCancel(); renderPanel(true); return; }
   if (act === 'pclose') { ui.selected = null; renderPanel(true); return; }
+  // Select/Deselect popup: commit the tapped blob as the selection
+  if (act === 'pselect') {
+    if (tapBlobId != null && findBlob(tapBlobId)) ui.selected = { kind: 'blob', id: tapBlobId };
+    tapBlobId = null;
+    renderPanel(true);
+    return;
+  }
+  // garrison popup: switch the selection to the tapped settlement
+  // ('pgarrison' falls through to the orderMove dispatch below, marching
+  // the group to the settlement center — the garrison order)
+  if (act === 'pselsett') {
+    const gst = tapSettId != null && game.settlements.find(s => s.id === tapSettId && s.owner === me);
+    if (gst) ui.selected = { kind: 'settlement', id: gst.id };
+    tapSettId = null;
+    renderPanel(true);
+    return;
+  }
   // unit-options popup actions (phone UI) — mirror the panel's cases
   if (act === 'pmovearm') { ui.pending = 'move'; updateHint(); return; }
   if (act === 'proutearm') { ui.pending = 'route'; ui.routeSrc = null; updateHint(); return; }
