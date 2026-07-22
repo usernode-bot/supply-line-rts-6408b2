@@ -33,8 +33,6 @@ export const C = {
   FARM_PER_CELL: 0.04,     // stockpile per tick per unit of fertility of a worked plot
                            // (= the old reference ring 20 × FARM_PER_FARMER, so a farmer
                            // on a Lush plot matches the old full share — see farmYield)
-                           // (TRAIN_* / FARM_* figures are restated in plain
-                           // language in index.html's How to Play — keep in sync)
   VISION_BLOB: 6,
   VISION_SETT: 8,
   AGGRO: 4,
@@ -2087,7 +2085,6 @@ function applyStarvation(game, b) {
 // for 5 s. Each unit regains HEAL_FRAC of its own max HP per tick
 // (1%/s: half-dead to full in ~50 s — deliberately far below combat
 // damage, so healing rewards rotating home, never turns a fight).
-// (Restated in index.html's How to Play — keep in sync.)
 function tickHeal(game, b) {
   if (b.food <= 0.0001) return;            // starving — never heals
   if (game.tick - b.engagedT < 50) return; // too fresh out of combat
