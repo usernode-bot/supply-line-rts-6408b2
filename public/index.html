@@ -69,6 +69,19 @@
   <script>tailwind.config = { darkMode: 'class' }</script>
   <style>
     html, body { height: 100%; overscroll-behavior: none; }
+    /* #158: game UI is not selectable text — touch drags on mobile must
+       never start a text selection or an iOS long-press callout. Real
+       text fields below opt back in. */
+    body {
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    input, textarea, [contenteditable] {
+      user-select: text;
+      -webkit-user-select: text;
+    }
     #game-canvas { touch-action: none; user-select: none; -webkit-user-select: none; display: block; }
     #game-canvas:focus { outline: none; }
     #minimap { touch-action: none; }
@@ -293,6 +306,16 @@
     </div>
   </div>
 
+  <script>
+  // #158: belt-and-braces for browsers that still start a text selection
+  // during a touch drag despite user-select:none (older Android WebViews).
+  // Editable fields keep normal selection behavior.
+  document.addEventListener('selectstart', function (e) {
+    var t = e.target;
+    if (t && t.closest && t.closest('input, textarea, [contenteditable]')) return;
+    e.preventDefault();
+  });
+  </script>
   <script type="module" src="/js/main.js"></script>
 </body>
 </html>
