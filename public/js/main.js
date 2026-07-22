@@ -1257,12 +1257,17 @@ function showOrderPopup(world, screen, target) {
 // Select/Deselect popup (phone UI, Select mode): tapping a friendly blob
 // outside the current selection asks before switching — Select swaps the
 // selection to the tapped blob, Deselect clears the current selection.
+// With units already in hand the popup also offers Move ('pmove' rides
+// the shared orderMove dispatch), marching the selection to the tapped
+// blob's spot while keeping it selected.
 let tapBlobId = null;
 function showSelectPopup(b, screen) {
-  ui.orderTarget = null;
+  const hasSel = selectedBlobs().length > 0;
+  ui.orderTarget = hasSel ? { x: b.x, y: b.y } : null;
   ui.orderTargetEnt = null;
   tapBlobId = b.id;
   orderPopup.innerHTML = `
+    ${hasSel ? '<button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move here</button>' : ''}
     <button data-act="pselect" class="btn px-3 rounded-lg text-left bg-violet-700 hover:bg-violet-600 text-white">👆 Select</button>
     <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`;
   orderPopup.classList.remove('hidden');
