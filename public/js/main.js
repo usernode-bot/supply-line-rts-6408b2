@@ -664,6 +664,10 @@ function doFieldRole(st, role, n) {
   if (inPvp()) sendCmd({ op: 'fieldRole', settlementId: st.id, role, n });
   return S.opFieldRole(game, st, role, n);
 }
+function doFieldFarmerGroup(st) {
+  if (inPvp()) sendCmd({ op: 'fieldFarmerGroup', settlementId: st.id });
+  return S.opFieldFarmerGroup(game, st);
+}
 function doGarrisonRole(st, role) {
   if (inPvp()) sendCmd({ op: 'garrisonRole', settlementId: st.id, role });
   return S.opGarrisonRole(game, st, role);
@@ -698,6 +702,7 @@ function startMatch(g) {
       canvas: $('game-canvas'), minimap: $('minimap'), view,
       handlers: {
         tap: onTap, box: onBox, rightClick: onRightClick, cancel: onCancel, gesture: onGesture, groupKey: onGroupKey,
+        pauseKey: togglePause, // space bar (#168) — togglePause itself guards solo/result
         // phone Drag mode: a one-finger drag box-selects instead of panning
         touchBox: () => !!(game && !game.result && isMobile() && ui.touchMode === 'drag'),
       },
@@ -743,7 +748,7 @@ function showEndModal(win, reason) {
   $('end-emoji').textContent = win ? '🏆' : '🏳️';
   $('end-title').textContent = win ? 'Victory!' : (reason === 'surrender' ? 'Surrendered' : 'Defeat');
   const opp = mp ? mp.opponent : 'your opponent';
-  const dur = game ? fmtDur(game.tick / 10) : '';
+  const dur = game ? fmtDur(S.gameSeconds(game.tick)) : '';
   $('end-detail').textContent = win
     ? (reason === 'abandoned'
       ? `${opp} abandoned the match — victory is yours.`
@@ -769,8 +774,8 @@ function endMatch(result) {
   $('end-emoji').textContent = win ? '🏆' : '🏳️';
   $('end-title').textContent = win ? 'Victory!' : result === 'surrender' ? 'Surrendered' : 'Defeat';
   $('end-detail').textContent = win
-    ? `Enemy settlements razed and their last forces scattered in ${fmtDur(game.tick / 10)}.`
-    : `Your war effort collapsed after ${fmtDur(game.tick / 10)}.`;
+    ? `Enemy settlements razed and their last forces scattered in ${fmtDur(S.gameSeconds(game.tick))}.`
+    : `Your war effort collapsed after ${fmtDur(S.gameSeconds(game.tick))}.`;
   $('end-modal').classList.remove('hidden');
   // fire-and-forget record
   fetch('/api/match-result', {
@@ -779,7 +784,7 @@ function endMatch(result) {
     body: JSON.stringify({
       result,
       difficulty: game.difficulty,
-      duration_seconds: Math.round(game.tick / 10),
+      duration_seconds: Math.round(S.gameSeconds(game.tick)),
       map_seed: game.seed,
     }),
   }).catch(() => { });
@@ -801,11 +806,14 @@ $('btn-surrender').addEventListener('click', () => {
     } },
   ]);
 });
-$('btn-pause').addEventListener('click', () => {
-  if (game && game.pvp) return;
+// Shared by the ⏸ button and the space bar (#168). Solo only — the PvP
+// sim is shared and never pauses.
+function togglePause() {
+  if (!game || game.pvp || game.result) return;
   paused = !paused;
   $('btn-pause').textContent = paused ? '▶' : '⏸';
-});
+}
+$('btn-pause').addEventListener('click', togglePause);
 $('sel-speed').addEventListener('change', () => {
   if (game && game.pvp) { $('sel-speed').value = '1'; return; }
   speed = Math.max(1, Math.min(4, +$('sel-speed').value || 1));
@@ -859,6 +867,16 @@ function selectedSettlement() {
   return game.settlements.find(s => s.id === ui.selected.id) || null;
 }
 
+// Footprint-first hit test (#165): the settlement whose 2×2 footprint
+// the world point lies on, via the settAt claim map — exact, so a unit
+// circle visually overlapping the buildings can never steal the tap.
+function settlementAtFootprint(world) {
+  const tx = Math.floor(world.x), ty = Math.floor(world.y);
+  if (tx < 0 || ty < 0 || tx >= game.map.w || ty >= game.map.h) return null;
+  const id = game.settAt[ty * game.map.w + tx];
+  return id ? game.settlements.find(s => s.id === id) || null : null;
+}
+
 function onTap(world, pointerType, screen) {
   if (!game || game.result) return;
   const hitR = 24 / view.scale;
@@ -868,16 +886,27 @@ function onTap(world, pointerType, screen) {
   // the phone UI's contextual tap model (Select/Drag modes)
   const mobile = isMobile() && pointerType !== 'mouse';
   const sel = mobile ? selectedBlobs() : null;
+  const fp = settlementAtFootprint(world); // footprint-first (#165)
   // Drag mode (phones) is drag-only: one-finger boxes build up the group
   // across as many drags as it takes, and every order waits for Select
   // mode. The one live tap target is an own settlement, which switches
   // the active selection to it.
   if (mobile && ui.touchMode === 'drag') {
-    const dst = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+    const dst = fp && fp.owner === me
+      ? fp : S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
     if (dst && dst.owner === me) {
       ui.selected = { kind: 'settlement', id: dst.id };
       renderPanel(true);
     }
+    return;
+  }
+  // a tap on an own settlement's footprint selects the settlement before
+  // any unit is considered (#165); the mobile units-in-hand ambiguity
+  // popup still applies
+  if (fp && fp.owner === me) {
+    if (mobile && sel.length > 0) { showGarrisonPopup(fp, screen); return; }
+    ui.selected = { kind: 'settlement', id: fp.id };
+    renderPanel(true);
     return;
   }
   // prefer own blob, then own settlement
@@ -920,13 +949,19 @@ function onTap(world, pointerType, screen) {
   // right-click is the order button. (≥640px touch only — phones use the
   // mode-based dispatch above.)
   if (!mobile && pointerType !== 'mouse' && selectedBlobs().length > 0) { showOrderPopup(world, screen, findEnemyTargetAt(world)); return; }
-  // nothing selected → inspect what was tapped
+  // nothing selected → inspect what was tapped; an enemy settlement's
+  // footprint outranks any unit overlapping it (#165)
+  const known = game.pvp ? game.knowns[me] : game.known;
+  if (fp && fp.owner !== me && (S.settVisible(game, fp) || known[fp.id])) {
+    ui.selected = { kind: 'enemy-settlement', id: fp.id };
+    renderPanel(true);
+    return;
+  }
   if (eb && S.isVisible(game, eb.x, eb.y)) {
     ui.selected = { kind: 'enemy-blob', id: eb.id };
     renderPanel(true);
     return;
   }
-  const known = game.pvp ? game.knowns[me] : game.known;
   if (st && st.owner !== me && (S.settVisible(game, st) || known[st.id])) {
     ui.selected = { kind: 'enemy-settlement', id: st.id };
     renderPanel(true);
@@ -972,11 +1007,17 @@ function onBox(rect, additive) {
 // directly: a visible enemy blob, or an enemy settlement that is visible
 // or remembered on the map.
 function findEnemyTargetAt(world) {
+  const known = game.pvp ? game.knowns[me] : game.known;
+  // footprint-first (#165): a tap on an enemy settlement's 2×2 grounds
+  // targets the settlement even when an enemy blob overlaps it
+  const fp = settlementAtFootprint(world);
+  if (fp && fp.owner !== me && (S.settVisible(game, fp) || known[fp.id])) {
+    return { kind: 'settlement', id: fp.id };
+  }
   const hitR = Math.max(1.5, 24 / view.scale);
   const eb = S.blobAt(game, world.x, world.y, hitR);
   if (eb && eb.owner !== me && S.isVisible(game, eb.x, eb.y)) return { kind: 'blob', id: eb.id };
   const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
-  const known = game.pvp ? game.knowns[me] : game.known;
   if (st && st.owner !== me && (S.settVisible(game, st) || known[st.id])) {
     return { kind: 'settlement', id: st.id };
   }
@@ -1788,6 +1829,19 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'grole': if (st) { r = doGarrisonRole(st, btn.dataset.role); if (r.err) toast(r.err); } break;
+    case 'fieldgroup': {
+      // surplus farmers (#171): field the garrisoned farmers as one
+      // grouped blob at the gate and hand it to the player, selected
+      if (st) {
+        r = doFieldFarmerGroup(st);
+        if (r.err) toast(r.err);
+        else {
+          ui.selected = { kind: 'blob', id: r.blob.id };
+          toast(`🌱 ${r.fielded} farmer${r.fielded === 1 ? '' : 's'} fielded at the gate — pick their destination`);
+        }
+      }
+      break;
+    }
     case 'fieldn': {
       if (st) {
         const role = btn.dataset.role;
@@ -2130,6 +2184,7 @@ function renderPanelInner(force) {
           </div>
           ${st.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(st.convert)}s (fielding cancels)</div>` : ''}
           ${fieldRows}
+          ${g.farm > 0 && wc >= y.worthwhileCells ? `<button data-act="fieldgroup" class="btn w-full rounded bg-emerald-800 hover:bg-emerald-700 mt-1">🌱 Field ${g.farm} surplus farmer${g.farm === 1 ? '' : 's'}</button>` : ''}
           ${g.supply >= 1 ? '<button data-act="settroute" class="btn w-full rounded bg-sky-800 hover:bg-sky-700 mt-1">🚚 Supply route to another settlement…</button>' : ''}
           <button data-act="field" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>
         `.replaceAll('data-act="role"', 'data-act="grole"') : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the settlement.</div>'}
@@ -2212,7 +2267,7 @@ function updateHUD() {
   const p = S.unitCounts(game, me);
   $('stat-units').textContent = `👥 ${p.units}`;
   $('stat-setts').textContent = `🏠 ${p.setts}`;
-  $('stat-time').textContent = fmtDur(game.tick / 10);
+  $('stat-time').textContent = fmtDur(S.gameSeconds(game.tick));
   const idle = S.idleFarmers(game, 0);
   const idleN = idle.field + idle.walk;
   const btw = $('btn-backtowork');

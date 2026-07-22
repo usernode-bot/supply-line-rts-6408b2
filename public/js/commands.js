@@ -75,6 +75,7 @@ export function applyCommand(g, owner, c) {
     case 'setMode': if (st) S.opSetMode(g, st, c.mode); break;
     case 'fieldGarrison': if (st) S.opFieldGarrison(g, st); break;
     case 'fieldRole': if (st) S.opFieldRole(g, st, c.role, Math.max(1, c.n | 0)); break;
+    case 'fieldFarmerGroup': if (st) S.opFieldFarmerGroup(g, st); break;
     case 'garrisonRole': if (st) S.opGarrisonRole(g, st, c.role); break;
     case 'supplyRoute':
       // settlement-to-settlement line (#108): validate the target is the

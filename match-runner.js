@@ -107,6 +107,7 @@ async function persist(r, extra) {
 
 async function finalize(r, winnerOwner, reason) {
   if (r.status !== 'active') return;
+  const { S } = mods; // loaded before any runner exists
   r.status = 'finished';
   r.winnerOwner = winnerOwner;
   r.endReason = reason;
@@ -125,7 +126,8 @@ async function finalize(r, winnerOwner, reason) {
     `, [r.lobbyId, winnerOwner, reason, JSON.stringify(r.snapObj), r.snapTick]);
     // only the update that actually flipped the row records history
     if (upd.rows.length && r.guestUserId != null) {
-      const duration = Math.max(0, Math.min(86400, Math.round(r.game.tick / 10)));
+      // durations use the 1×-real-time scale (#172), same as the client
+      const duration = Math.max(0, Math.min(86400, Math.round(S.gameSeconds(r.game.tick))));
       const rowResult = (owner) => owner === winnerOwner ? 'win' : (reason === 'surrender' ? 'surrender' : 'loss');
       await pool.query(`
         INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, mode, opponent)

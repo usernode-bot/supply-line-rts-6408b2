@@ -118,6 +118,12 @@ export function blobSpeed(b) {
 }
 export function garrisonTotal(s) { return s.garrison.deploy + s.garrison.supply + s.garrison.farm; }
 
+// Real seconds elapsed at the 1× display speed (#172): the sim's native
+// rate is 10 ticks/s but 1× runs it at half that, so one in-game second
+// is 5 ticks. Every displayed or recorded duration uses this scale so
+// the clock matches wall time at 1×.
+export function gameSeconds(tick) { return tick / 5; }
+
 function tileIdx(game, x, y) { return Math.floor(y) * game.map.w + Math.floor(x); }
 
 // Per-component stockpile-flow ledger for the settlement panel's food
@@ -399,7 +405,11 @@ const FARM_RING = 2.7;
 // qualify (#83): flood (4-connected) through the candidate ring from
 // tiles touching the footprint — plots sealed off behind mountains
 // never become fields.
-export function previewFields(game, ax, ay) {
+// Proximity split (#167): with `owner` given, a ring tile already
+// tilled by a SAME-OWNER settlement is contested — it goes to whichever
+// footprint center is strictly closer (ties keep the incumbent, so a
+// boundary tile never flip-flops). Enemy farmland is never contested.
+export function previewFields(game, ax, ay, owner) {
   const { w, h } = game.map;
   const c = { x: ax + 1, y: ay + 1 };
   const span = Math.ceil(FARM_RING);
@@ -411,7 +421,21 @@ export function previewFields(game, ax, ay) {
       if (onFoot(tx, ty)) continue; // the footprint itself is never tilled
       if (dist(tx + 0.5, ty + 0.5, c.x, c.y) > FARM_RING) continue;
       const i = ty * w + tx;
-      if (game.map.mountain[i] || game.tilledBy[i] || game.settAt[i]) continue;
+      if (game.map.mountain[i] || game.settAt[i]) continue;
+      if (game.tilledBy[i]) {
+        if (owner == null) continue; // legacy callers: never contest
+        const o = game.settlements.find(x => x.id === game.tilledBy[i]);
+        if (!o) continue;
+        // a plot whose incumbent anchors at (ax, ay) is the settlement's
+        // OWN — keep it in the ring so a re-till (reclamation after a
+        // neighbor falls) stays flood-connected through it
+        if (o.x !== ax || o.y !== ay) {
+          if (o.owner !== owner) continue; // enemy land stays put
+          const dNew = dist(tx + 0.5, ty + 0.5, c.x, c.y);
+          const dOld = dist(tx + 0.5, ty + 0.5, o.x + 1, o.y + 1);
+          if (dNew >= dOld) continue; // incumbent keeps ties and closer plots
+        }
+      }
       ring.add(i);
     }
   }
@@ -438,8 +462,26 @@ export function previewFields(game, ax, ay) {
   return [...reached].sort((a, b) => a - b);
 }
 
+// Till (or re-till) every plot previewFields grants the settlement.
+// Contested same-owner tiles (#167) are taken over from their incumbent:
+// removed from its `tilled`, re-pointed in `tilledBy`, and any farmer
+// standing on (or walking to) the plot keeps working it for the new
+// settlement. Append-only and idempotent, so it doubles as reclamation
+// after a neighbor is destroyed.
 function tillFields(game, s) {
-  for (const i of previewFields(game, s.x, s.y)) {
+  const w = game.map.w;
+  for (const i of previewFields(game, s.x, s.y, s.owner)) {
+    if (game.tilledBy[i] === s.id) continue;
+    const prev = game.tilledBy[i];
+    if (prev) {
+      const o = game.settlements.find(x => x.id === prev);
+      if (o) o.tilled = o.tilled.filter(t => t !== i);
+      for (const b of game.blobs) {
+        if (b.dead || b.working !== prev) continue;
+        const g = b.pathGoal || b;
+        if (Math.floor(g.y) * w + Math.floor(g.x) === i) b.working = s.id;
+      }
+    }
     game.tilledBy[i] = s.id;
     s.tilled.push(i);
     game.dirty.add(i);
@@ -538,6 +580,14 @@ function destroySettlement(game, s, why) {
   }
   for (const b of game.blobs) if (b.working === s.id) b.working = null;
   game.settlements = game.settlements.filter(x => x.id !== s.id);
+  // neighbors reclaim the freed farmland (#167): every surviving completed
+  // settlement re-tills in ascending id, so a freed plot lands with the
+  // lowest-id claimant and later, closer same-owner settlements contest it
+  // away — the exact sequence deserialize's array-order re-till replays,
+  // keeping live state and save/load byte-identical.
+  for (const o of [...game.settlements].sort((a, b) => a.id - b.id)) {
+    if (!o.building) tillFields(game, o);
+  }
   for (const r of [...game.routes]) {
     if (r.settlementId === s.id || (r.targetKind === 'settlement' && r.targetId === s.id)) {
       SUP.dissolveRoute(game, r);
@@ -623,9 +673,11 @@ export function opMove(game, b, x, y, target) {
   if (target && target.kind && target.id != null) { o.tkind = target.kind; o.tid = target.id; }
   b.order = o;
   b.chaseId = null;
-  const p = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), blockedTiles(game, b.owner));
-  if (!p) { b.order = null; return { err: 'No path there' }; }
-  b.path = p; b.pathGoal = { x, y };
+  // soft enemy avoidance (#169): plan around visible enemy war parties
+  // from the start; ensurePath falls back to the direct plan when the
+  // detour doesn't exist, so avoidance never refuses an order
+  const avoid = avoidTiles(game, b, o.tkind === 'blob' ? o.tid : null);
+  if (!ensurePath(game, b, x, y, avoid)) { b.order = null; return { err: 'No path there' }; }
   return { ok: true };
 }
 
@@ -932,6 +984,27 @@ export function opFieldRole(game, s, role, n) {
   return { ok: true, blob: b };
 }
 
+// Field the settlement's garrisoned farmers as ONE grouped blob at the
+// gate (#171) — no destination chosen and no field work started, so the
+// player decides where the surplus hands go (march them to another
+// farm, garrison them elsewhere, or re-role them). Contrast the farm
+// branch of opFieldRole, which disperses farmers straight onto the
+// local plots as individual working field hands.
+export function opFieldFarmerGroup(game, s) {
+  if (s.building) return { err: 'Still under construction' };
+  const n = s.garrison.farm;
+  if (n <= 0) return { err: 'None to field' };
+  s.convert = null; // fielding cancels a pending garrison arm-up (#108)
+  const spot = nearestPassable(game.map, s.x + 2, s.y + 1, 4, null, new Set(settTiles(game.map, s)))
+    || { x: s.x + 2, y: s.y + 1 };
+  const b = makeBlob(game, s.owner, spot.x + 0.5, spot.y + 0.5, { deploy: 0, supply: 0, farm: n });
+  s.garrison.farm = 0;
+  const give = Math.min(s.stockpile, foodCap(b));
+  s.stockpile -= give;
+  b.food = give;
+  return { ok: true, blob: b, fielded: n };
+}
+
 export function opGarrisonRole(game, s, role) {
   if (s.building) return { err: 'Still under construction' };
   const g = garrisonTotal(s);
@@ -963,12 +1036,15 @@ function backToWorkPlan(game, owner) {
   const plan = { garrison: [], home: [], walk: [], sawIdle: false, sawDanger: false };
   for (const s of setts) {
     if (s.garrison.farm <= 0) continue;
+    if (s.convert) continue; // garrison arming up (#170) — not idle, and fielding would cancel it
     plan.sawIdle = true;
     if (!safe.has(s.id)) { plan.sawDanger = true; continue; }
     plan.garrison.push({ s, n: s.garrison.farm });
   }
   for (const b of game.blobs) {
-    if (b.dead || b.owner !== owner || b.working != null || b.order || b.count.farm <= 0) continue;
+    // a pending arm-up (#170) means the group is deliberately converting,
+    // not idle — sending it to the fields would silently cancel the order
+    if (b.dead || b.owner !== owner || b.working != null || b.order || b.convert || b.count.farm <= 0) continue;
     // nearest safe settlement, at home and anywhere
     let homeSett = null, hd = Infinity, atHomeOfAny = false;
     let walkSett = null, wd = Infinity;
@@ -1262,6 +1338,27 @@ function tickOrder(game, b) {
     b.order = null; b.pathGoal = null;
     game.events.push({ owner: b.owner, msg: '⛰️ No way through — order cancelled', x: b.x, y: b.y });
     return;
+  }
+  // soft enemy avoidance (#169): when the path ahead runs through a
+  // visible enemy war party, detour around it. Re-checked periodically
+  // so moving enemies are dodged too; a contested destination is walked
+  // into directly rather than orbited forever.
+  if (b.path && b.path.length && game.tick % 10 === 0) {
+    const avoid = avoidTiles(game, b, null);
+    if (avoid.size) {
+      const w = game.map.w;
+      const di = Math.floor(o.y) * w + Math.floor(o.x);
+      if (!avoid.has(di)) {
+        const n = Math.min(3, b.path.length);
+        for (let i = 0; i < n; i++) {
+          const wp = b.path[i];
+          if (avoid.has(Math.floor(wp.y) * w + Math.floor(wp.x))) {
+            ensurePath(game, b, o.x, o.y, avoid);
+            break;
+          }
+        }
+      }
+    }
   }
   const arrived = moveBlob(game, b);
   if (arrived) {
@@ -2699,7 +2796,13 @@ export function deserialize(data, prev) {
       }
     }
     claimFootprint(game, s);
-    if (!s.building) tillFields(game, s); // sites till on completion (#95)
+    // Sites till on completion (#95). INVARIANT (#167): settlements are
+    // serialized in founding order (ids ascend), and the proximity-split
+    // rule in previewFields resolves each pairwise contest the same way
+    // regardless of who tills first — so re-tilling in array order here
+    // reproduces the live land division exactly. Never serialize
+    // settlements out of founding order.
+    if (!s.building) tillFields(game, s);
     game.settlements.push(s);
   }
   for (const bd of data.blobs) {
