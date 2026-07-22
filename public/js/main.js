@@ -898,8 +898,9 @@ function onTap(world, pointerType, screen) {
   const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
   if (st && st.owner === me) {
     if (mobile && sel.length) {
-      // marches the selection straight into the garrison
-      orderMove(sel, { x: st.x + 1, y: st.y + 1 }, null);
+      // with units in hand the tap is ambiguous — ask: switch to the
+      // settlement, march the group into its garrison, or deselect
+      showGarrisonPopup(st, screen);
       return;
     }
     ui.selected = { kind: 'settlement', id: st.id };
@@ -1272,6 +1273,26 @@ function showSelectPopup(b, screen) {
   orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
 }
 
+// Garrison popup (phone UI, Select mode): tapping an own settlement with
+// units in hand asks — switch the selection to the settlement, march the
+// group into its garrison, or clear the selection.
+let tapSettId = null;
+function showGarrisonPopup(st, screen) {
+  ui.orderTarget = { x: st.x + 1, y: st.y + 1 }; // 'pgarrison' marches here
+  ui.orderTargetEnt = null;
+  tapSettId = st.id;
+  orderPopup.innerHTML = `
+    <button data-act="pselsett" class="btn px-3 rounded-lg text-left bg-violet-700 hover:bg-violet-600 text-white">🏠 Select settlement</button>
+    <button data-act="pgarrison" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">🛡️ Garrison units</button>
+    <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`;
+  orderPopup.classList.remove('hidden');
+  const px = screen ? screen.x : window.innerWidth / 2;
+  const py = screen ? screen.y : window.innerHeight / 2;
+  const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
+  orderPopup.style.left = Math.max(4, Math.min(window.innerWidth - w - 4, px + 10)) + 'px';
+  orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
+}
+
 // Unit-options popup (phone UI): tapping an already-selected blob opens
 // everything the desktop panel's button section offers, next to the finger.
 function showUnitOptions(screen) {
@@ -1480,6 +1501,16 @@ orderPopup.addEventListener('click', (e) => {
   if (act === 'pselect') {
     if (tapBlobId != null && findBlob(tapBlobId)) ui.selected = { kind: 'blob', id: tapBlobId };
     tapBlobId = null;
+    renderPanel(true);
+    return;
+  }
+  // garrison popup: switch the selection to the tapped settlement
+  // ('pgarrison' falls through to the orderMove dispatch below, marching
+  // the group to the settlement center — the garrison order)
+  if (act === 'pselsett') {
+    const gst = tapSettId != null && game.settlements.find(s => s.id === tapSettId && s.owner === me);
+    if (gst) ui.selected = { kind: 'settlement', id: gst.id };
+    tapSettId = null;
     renderPanel(true);
     return;
   }

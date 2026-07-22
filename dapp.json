@@ -46,6 +46,7 @@
     { "name": "Surrender button is the flag emoji", "path": "/?demo=1", "expectSelector": "#btn-surrender[aria-label=Surrender]" },
     { "name": "Touch help describes drag-only additive box-select", "path": "/?demo=1", "expectText": "every new box adding to the group" },
     { "name": "Touch help describes the Select/Deselect tap popup", "path": "/?demo=1", "expectText": "asking whether to" },
+    { "name": "Touch help describes the settlement garrison popup", "path": "/?demo=1", "expectText": "Garrison units" },
     { "name": "Touch help describes settlement switching in Drag mode", "path": "/?demo=1", "expectText": "switches the selection to that settlement" },
     { "name": "Touch help describes the hold-to-adjust split", "path": "/?demo=1", "expectText": "release to split off exactly that many" }
   ]
