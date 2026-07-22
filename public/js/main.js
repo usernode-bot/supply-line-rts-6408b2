@@ -1433,11 +1433,33 @@ function showBuildConfirm(screen) {
     <button data-act="pbuild" class="btn px-3 rounded-lg text-left ${ok ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-500 opacity-40'}" ${ok ? '' : 'disabled'}>✓ Found here</button>
     <button data-act="pbuildx" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Cancel</button>`;
   orderPopup.classList.remove('hidden');
-  const px = screen ? screen.x : window.innerWidth / 2;
-  const py = screen ? screen.y : window.innerHeight / 2;
   const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
-  orderPopup.style.left = Math.max(4, Math.min(window.innerWidth - w - 4, px + 10)) + 'px';
-  orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
+  const vw = window.innerWidth, vh = window.innerHeight;
+  // Keep the popup clear of the settlement grounds (#157): the 2×2
+  // footprint plus the farm ring it will till reach ~3.2 tiles from the
+  // site center, so anchor the popup just outside that circle — on
+  // whichever side has screen room — instead of on top of the site.
+  let cx = screen ? screen.x : vw / 2, cy = screen ? screen.y : vh / 2;
+  if (ui.buildSite) {
+    cx = (ui.buildSite.x + 1 - view.cx) * view.scale + vw / 2;
+    cy = (ui.buildSite.y + 1 - view.cy) * view.scale + vh / 2;
+  }
+  const r = 3.2 * view.scale + 12;
+  const clampX = (x) => Math.max(4, Math.min(vw - w - 4, x));
+  const clampY = (y) => Math.max(4, Math.min(vh - h - 4, y));
+  const fitsRight = cx + r + w + 4 <= vw;
+  const fitsLeft = cx - r - w >= 4;
+  let left, top;
+  if (fitsRight || fitsLeft) {
+    left = (fitsRight && (cx <= vw / 2 || !fitsLeft)) ? cx + r : cx - r - w;
+    top = clampY(cy - h / 2);
+  } else {
+    // zoomed in tight — no room beside the grounds, go above or below
+    left = clampX(cx - w / 2);
+    top = cy - r - h >= 4 ? cy - r - h : clampY(cy + r);
+  }
+  orderPopup.style.left = left + 'px';
+  orderPopup.style.top = top + 'px';
 }
 
 // Group build (#130): the selected blob nearest the site is the founder
