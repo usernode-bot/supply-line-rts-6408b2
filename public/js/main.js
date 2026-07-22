@@ -908,8 +908,9 @@ function onTap(world, pointerType, screen) {
     return;
   }
   if (mobile && sel.length > 0) {
-    // the tap IS the order — move there, or attack the tapped enemy
-    orderMove(sel, world, findEnemyTargetAt(world));
+    // ask before acting — Move/Attack at the tap point, or Deselect, so a
+    // stray tap can't send the group marching across the map
+    showOrderPopup(world, screen, findEnemyTargetAt(world));
     return;
   }
   // tap elsewhere with blobs selected → inline order popup at the tap
@@ -1254,12 +1255,13 @@ function showOrderPopup(world, screen, target) {
   orderPopup.style.top = Math.max(4, Math.min(window.innerHeight - h - 4, py - h / 2)) + 'px';
 }
 
-// Select/Deselect popup (phone UI, Select mode): tapping a friendly blob
-// outside the current selection asks before switching — Select swaps the
-// selection to the tapped blob, Deselect clears the current selection.
-// With units already in hand the popup also offers Move ('pmove' rides
-// the shared orderMove dispatch), marching the selection to the tapped
-// blob's spot while keeping it selected.
+// Select popup (phone UI, Select mode): tapping a friendly blob outside
+// the current selection asks before switching — Select swaps the
+// selection to the tapped blob. With units already in hand the popup
+// also offers Move ('pmove' rides the shared orderMove dispatch),
+// marching the selection to the tapped blob's spot while keeping it
+// selected, and Deselect, which clears the current selection; with
+// nothing selected there's nothing to lose, so only Select is offered.
 let tapBlobId = null;
 function showSelectPopup(b, screen) {
   const hasSel = selectedBlobs().length > 0;
@@ -1269,7 +1271,7 @@ function showSelectPopup(b, screen) {
   orderPopup.innerHTML = `
     ${hasSel ? '<button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move here</button>' : ''}
     <button data-act="pselect" class="btn px-3 rounded-lg text-left bg-violet-700 hover:bg-violet-600 text-white">👆 Select</button>
-    <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`;
+    ${hasSel ? '<button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>' : ''}`;
   orderPopup.classList.remove('hidden');
   const px = screen ? screen.x : window.innerWidth / 2;
   const py = screen ? screen.y : window.innerHeight / 2;
