@@ -53,6 +53,7 @@ export function createRoute(game, blob, target, initialCargo, sourceId) {
       targetKind: target.kind,
       targetId: target.id,
       carrierIds: [blob.id],
+      runSiege: false, // attempt delivery through a siege (#181, serialized)
       window: [], // [{t, amt}]
     };
     game.routes.push(route);

@@ -536,6 +536,7 @@ function foundSettlement(game, owner, x, y, opts) {
     building: construction,
     mode: 'farm', stockpile: 40,
     garrison: { deploy: 0, supply: 0, farm: 0 },
+    garrFood: 0,   // garrison fed meter (#180) — cap is garrisonTotal × FOOD_PER_UNIT
     trainAcc: 0, garrLoss: 0, lastHitT: -999,
     convert: null,             // pending garrison arm-up (#108, serialized)
     starving: false,           // one-shot garrison-starvation toast latch (transient)
@@ -931,11 +932,30 @@ export function opSupplyRoute(game, s, target) {
   return { ok: true, blob: r.blob };
 }
 
+// Run-the-siege toggle (#181): while set, the route's carriers attempt
+// delivery to a besieged destination instead of holding outside the ring.
+export function opSiegeRun(game, routeId, on) {
+  const r = game.routes.find(x => x.id === routeId);
+  if (!r) return { err: 'No such route' };
+  r.runSiege = !!on;
+  return { ok: true };
+}
+
 export function opSetMode(game, s, mode) {
   if (s.building) return { err: 'Still under construction' };
   if (!['farm', 'supply', 'deploy', 'off'].includes(mode)) return { err: 'Bad mode' };
   s.mode = mode;
   return { ok: true };
+}
+
+// Fielded units march out with their share of the garrison's rations
+// (#180) — the garrFood meter — then top up from the stockpile if it has
+// food to spare. A starving settlement honestly fields starving units.
+function grantFieldedFood(s, b, share) {
+  b.food = Math.min(foodCap(b), Math.max(0, share));
+  const give = Math.min(s.stockpile, foodCap(b) - b.food);
+  s.stockpile -= give;
+  b.food += give;
 }
 
 export function opFieldGarrison(game, s) {
@@ -946,9 +966,9 @@ export function opFieldGarrison(game, s) {
   const spot = nearestPassable(game.map, s.x + 2, s.y + 1, 4, null, new Set(settTiles(game.map, s)))
     || { x: s.x + 2, y: s.y + 1 };
   const b = makeBlob(game, s.owner, spot.x + 0.5, spot.y + 0.5, s.garrison);
-  const give = Math.min(s.stockpile, foodCap(b));
-  s.stockpile -= give;
-  b.food = give;
+  const share = s.garrFood || 0; // the whole garrison marches out
+  s.garrFood = 0;
+  grantFieldedFood(s, b, share);
   s.garrison = { deploy: 0, supply: 0, farm: 0 };
   return { ok: true, blob: b };
 }
@@ -962,12 +982,12 @@ export function opFieldRole(game, s, role, n) {
   if (role === 'farm') {
     // farmers go straight out to work the fields as individual units
     let first = null;
+    const perShare = (s.garrFood || 0) / Math.max(1, garrisonTotal(s));
     for (let k = 0; k < n; k++) {
       const b = spawnWorkingFarmer(game, s);
       s.garrison.farm--;
-      const give = Math.min(s.stockpile, foodCap(b));
-      s.stockpile -= give;
-      b.food = give;
+      s.garrFood = Math.max(0, (s.garrFood || 0) - perShare);
+      grantFieldedFood(s, b, perShare);
       if (!first) first = b;
     }
     return { ok: true, blob: first };
@@ -976,11 +996,11 @@ export function opFieldRole(game, s, role, n) {
     || { x: s.x + 2, y: s.y + 1 };
   const count = { deploy: 0, supply: 0, farm: 0 };
   count[role] = n;
+  const share = (s.garrFood || 0) * n / Math.max(1, garrisonTotal(s));
   const b = makeBlob(game, s.owner, spot.x + 0.5, spot.y + 0.5, count);
   s.garrison[role] -= n;
-  const give = Math.min(s.stockpile, foodCap(b));
-  s.stockpile -= give;
-  b.food = give;
+  s.garrFood = Math.max(0, (s.garrFood || 0) - share);
+  grantFieldedFood(s, b, share);
   return { ok: true, blob: b };
 }
 
@@ -997,11 +1017,11 @@ export function opFieldFarmerGroup(game, s) {
   s.convert = null; // fielding cancels a pending garrison arm-up (#108)
   const spot = nearestPassable(game.map, s.x + 2, s.y + 1, 4, null, new Set(settTiles(game.map, s)))
     || { x: s.x + 2, y: s.y + 1 };
+  const share = (s.garrFood || 0) * n / Math.max(1, garrisonTotal(s));
   const b = makeBlob(game, s.owner, spot.x + 0.5, spot.y + 0.5, { deploy: 0, supply: 0, farm: n });
   s.garrison.farm = 0;
-  const give = Math.min(s.stockpile, foodCap(b));
-  s.stockpile -= give;
-  b.food = give;
+  s.garrFood = Math.max(0, (s.garrFood || 0) - share);
+  grantFieldedFood(s, b, share);
   return { ok: true, blob: b, fielded: n };
 }
 
@@ -1400,7 +1420,12 @@ function tickOrder(game, b) {
         s.garrison.deploy += b.count.deploy;
         s.garrison.supply += b.count.supply;
         s.garrison.farm += b.count.farm;
-        s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + b.food);
+        // the arriving units keep their rations in the garrison meter
+        // (#180); only the overflow goes to the stockpile
+        const gcap = garrisonTotal(s) * C.FOOD_PER_UNIT;
+        const toMeter = Math.max(0, Math.min(b.food, gcap - (s.garrFood || 0)));
+        s.garrFood = (s.garrFood || 0) + toMeter;
+        s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + (b.food - toMeter));
         b.dead = true;
         // announce the absorb (#135) — a silent disappearance reads as a bug
         game.events.push({ owner: b.owner, msg: `🏠 +${n} garrisoned into ${s.name}`, x: s.x + 1, y: s.y + 1 });
@@ -1518,15 +1543,22 @@ function tickCarrier(game, b) {
   } else if (o.phase === 'go') {
     const tp = targetPos(tgt, route.targetKind);
     // siege line (#108): deliveries to a besieged settlement are blocked —
-    // the caravan holds off outside and resumes when the siege breaks
+    // the caravan holds off outside and resumes when the siege breaks,
+    // unless the route is ordered to run the siege (#181)
     if (route.targetKind === 'settlement' && besieged(game, tgt)
       && dist(b.x, b.y, tp.x, tp.y) <= C.BESIEGE_RANGE + 1.5) {
-      b.path = null;
-      if (!o.holding) {
-        o.holding = true;
-        game.events.push({ owner: b.owner, msg: '🚧 Caravan waiting out a siege', x: b.x, y: b.y });
+      if (!route.runSiege) {
+        b.path = null;
+        if (!o.holding) {
+          o.holding = true;
+          game.events.push({ owner: b.owner, msg: '🚧 Caravan waiting out a siege', x: b.x, y: b.y });
+        }
+        return;
       }
-      return;
+      if (!o.running) {
+        o.running = true;
+        game.events.push({ owner: b.owner, msg: '⚔️ Caravan running the siege', x: b.x, y: b.y });
+      }
     }
     o.holding = false;
     // touching-radii docking (#132, #147): a delivery to an army arrives
@@ -1541,7 +1573,7 @@ function tickCarrier(game, b) {
     moveBlob(game, b);
   } else if (o.phase === 'unload') {
     const tp = targetPos(tgt, route.targetKind);
-    if (route.targetKind === 'settlement' && besieged(game, tgt)) { o.phase = 'go'; return; }
+    if (route.targetKind === 'settlement' && besieged(game, tgt) && !route.runSiege) { o.phase = 'go'; return; }
     const dock = dockRange(b, tgt, route.targetKind);
     if (dist(b.x, b.y, tp.x, tp.y) > dock + SUP.UNLOAD_SLACK) { o.phase = 'go'; return; }
     const give = Math.min(o.cargo, cap / 20);
@@ -1559,7 +1591,7 @@ function tickCarrier(game, b) {
     }
     o.cargo -= taken;
     if (taken > 0) SUP.recordDelivery(game, route, taken);
-    if (o.cargo <= 0.01) { o.phase = 'return'; b.path = null; }
+    if (o.cargo <= 0.01) { o.phase = 'return'; o.running = false; b.path = null; }
     else if (taken <= 0.001 && b.food < 0.25 * foodCap(b)) {
       // destination is topped off (#143): park at the dock and keep it
       // fed as it eats instead of hauling the leftover cargo home. The
@@ -2358,22 +2390,31 @@ function tickSettlement(game, s) {
     const src = wheatFxSource(game, s);
     if (src) pushFx(game, { kind: 'wheat', x: src.x, y: src.y, tx: s.x + 1, ty: s.y + 1, t: game.tick });
   }
-  // garrison eats from the stockpile; starves when it's empty. The
-  // starving latch toasts once per famine and re-arms only after the
-  // stockpile has genuinely recovered (hysteresis, like blob.starving).
+  // The garrison eats its own rations (the garrFood meter, #180) and
+  // refills them from the stockpile like a field blob in territory —
+  // steady-state stockpile drain is unchanged. Starvation begins only
+  // when the meter itself runs dry; the starving latch toasts once per
+  // famine and re-arms after the meter genuinely recovers (hysteresis,
+  // like blob.starving).
   const g = garrisonTotal(s);
   if (g > 0) {
-    const eat = g * C.EAT_PER_SEC * C.DT;
-    if (s.stockpile >= eat) {
-      s.stockpile -= eat; s.flowAcc -= eat; s.parts.upkeep -= eat;
-      if (s.starving && s.stockpile >= 5) s.starving = false;
-    } else {
-      s.flowAcc -= s.stockpile; s.parts.upkeep -= s.stockpile; s.stockpile = 0;
+    const gcap = g * C.FOOD_PER_UNIT;
+    if (s.garrFood == null) s.garrFood = gcap; // pre-#180 state
+    s.garrFood = Math.min(s.garrFood, gcap);   // clamp after count drops
+    s.garrFood = Math.max(0, s.garrFood - g * C.EAT_PER_SEC * C.DT);
+    const topup = Math.min(gcap - s.garrFood, s.stockpile, g * 0.1);
+    if (topup > 0) {
+      s.stockpile -= topup; s.garrFood += topup;
+      s.flowAcc -= topup; s.parts.upkeep -= topup;
+    }
+    if (s.garrFood <= 0.0001) {
       if (!s.starving) {
         s.starving = true;
         game.events.push({ owner: s.owner, msg: `💀 The inhabitants of ${s.name} are starving!`, x: s.x + 1, y: s.y + 1 });
       }
       applyGarrisonLosses(game, s, g * C.STARVE_FRAC, true);
+    } else if (s.starving && s.garrFood >= 0.25 * gcap) {
+      s.starving = false;
     }
   } else if (s.starving && s.stockpile >= 5) {
     s.starving = false;
@@ -2609,6 +2650,12 @@ function updateVisionFor(game, owner, fog, known) {
   // remember enemy settlements we can currently see; forget destroyed ones
   for (const s of game.settlements) {
     if (s.owner !== owner && settTiles(game.map, s).some(i => fog[i] === 2)) {
+      if (!known[s.id]) {
+        // newly discovered (#182): repaint its plaza/farmland, which the
+        // terrain layer keeps hidden while the settlement is unknown
+        for (const i of settTiles(game.map, s)) game.dirty.add(i);
+        for (const i of s.tilled) game.dirty.add(i);
+      }
       known[s.id] = { x: s.x, y: s.y, name: s.name };
     }
   }
@@ -2685,11 +2732,13 @@ export function serialize(game) {
       id: s.id, owner: s.owner, x: s.x, y: s.y, hp: s.hp,
       name: s.name, building: !!s.building,
       mode: s.mode, stockpile: s.stockpile, garrison: s.garrison,
+      garrFood: s.garrFood || 0,
       trainAcc: s.trainAcc, flow: s.flow, convert: s.convert || null,
     })),
     routes: game.routes.map(r => ({
       id: r.id, owner: r.owner, settlementId: r.settlementId,
       targetKind: r.targetKind, targetId: r.targetId, carrierIds: r.carrierIds,
+      runSiege: !!r.runSiege,
     })),
     ruins: game.ruins,
     fertDelta,
@@ -2768,6 +2817,10 @@ export function deserialize(data, prev) {
       building: !!sd.building, // older saves lack the flag → completed
       mode: sd.mode, stockpile: sd.stockpile,
       garrison: sd.garrison,
+      // pre-#180 saves carry no garrison fed meter — default to full (the
+      // old model's fiction that garrisons were fed), a one-time grant
+      garrFood: sd.garrFood != null ? sd.garrFood
+        : (sd.garrison ? (sd.garrison.deploy + sd.garrison.supply + sd.garrison.farm) * C.FOOD_PER_UNIT : 0),
       // older saves stored tick-based progress; convert to invested food
       trainAcc: sd.trainAcc != null ? sd.trainAcc
         : (sd.trainTicks ? sd.trainTicks / C.TRAIN_TICKS * C.TRAIN_COST : 0),

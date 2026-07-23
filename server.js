@@ -109,6 +109,48 @@ app.get('/api/matches', async (req, res) => {
   }
 });
 
+// ------------------------------------------------------------- solo saves (#176)
+// One save slot per user (mirrors the client's single localStorage slot)
+// so an in-progress solo match resumes on any device. The payload is the
+// client's serialized sim state, validated only for shape/version — the
+// sim itself re-validates everything at deserialize time.
+
+const validSaveData = (d) => d && typeof d === 'object' && !Array.isArray(d)
+  && d.v >= 2 && d.v <= 4 && !d.pvp && !d.result;
+
+app.get('/api/save', async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT data, saved_at FROM saves WHERE user_id = $1`, [req.user.id]);
+    res.json({ save: r.rows.length ? { data: r.rows[0].data, saved_at: r.rows[0].saved_at } : null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/save', async (req, res) => {
+  try {
+    const data = req.body;
+    if (!validSaveData(data)) return res.status(400).json({ error: 'Bad save data' });
+    await pool.query(`
+      INSERT INTO saves (user_id, username, data, saved_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, data = EXCLUDED.data, saved_at = NOW()
+    `, [req.user.id, req.user.username, data]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/save', async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM saves WHERE user_id = $1`, [req.user.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ---------------------------------------------------------------- multiplayer
 
 // Challenge-field autocomplete: usernames of people who've played here.
@@ -420,6 +462,16 @@ async function start() {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS lobby_commands_lobby_idx ON lobby_commands (lobby_id, id)`);
+
+  // Cross-device solo resume (#176): one save slot per user.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS saves (
+      user_id INTEGER PRIMARY KEY,
+      username VARCHAR(255) NOT NULL,
+      data JSONB NOT NULL,
+      saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
 
   // Staging-only demo rows so the menu's match-history panel and the
   // multiplayer lobby list have content in previews. Obviously-fake

@@ -118,21 +118,54 @@ function sizeLabel(key) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// v1 saves predate per-unit health and are not migratable — discard.
+// v2–v4 saves load fine (new fields default; farmer HP is clamped;
+// old attack-move orders are migrated by deserialize).
+function validSave(data) {
+  return !!(data && data.v >= 2 && data.v <= 4 && !data.result && !data.pvp);
+}
+
 function loadSaveData() {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    // v1 saves predate per-unit health and are not migratable — discard.
-    // v2–v4 saves load fine (new fields default; farmer HP is clamped;
-    // old attack-move orders are migrated by deserialize).
-    if (!(data.v >= 2 && data.v <= 4) || data.result || data.pvp) return null;
-    return data;
+    return validSave(data) ? data : null;
   } catch { return null; }
 }
 
+// Cross-device resume (#176): solo saves also live server-side under the
+// player's account. The freshest of the local and server copies (by the
+// savedAt stamp; older saves without one count as 0) drives Resume.
+let serverSaveData = null;
+
+function bestSave() {
+  const local = loadSaveData();
+  const remote = validSave(serverSaveData) ? serverSaveData : null;
+  if (local && remote) return (remote.savedAt || 0) > (local.savedAt || 0) ? remote : local;
+  return local || remote;
+}
+
+async function refreshServerSave() {
+  if (!token) return; // no account outside the platform shell — local only
+  try {
+    const r = await fetch('/api/save', { headers: apiHeaders });
+    const j = r.ok ? await r.json() : null;
+    serverSaveData = j && j.save ? j.save.data : null;
+  } catch { serverSaveData = null; }
+  refreshMenu();
+}
+
+// Finished/discarded matches clear the save everywhere (fire-and-forget
+// on the server side, like the match-result post).
+function clearSaves() {
+  localStorage.removeItem(SAVE_KEY);
+  serverSaveData = null;
+  if (token) fetch('/api/save', { method: 'DELETE', headers: apiHeaders }).catch(() => { });
+}
+
 function refreshMenu() {
-  $('btn-resume').classList.toggle('hidden', !loadSaveData());
+  $('btn-resume').classList.toggle('hidden', !bestSave());
 }
 
 // Every difficulty plays by the player's economic rules — the levels
@@ -149,7 +182,7 @@ $('sel-difficulty').addEventListener('change', refreshDifficultyHint);
 refreshDifficultyHint();
 
 function startNewMatch() {
-  localStorage.removeItem(SAVE_KEY);
+  clearSaves();
   const seed = $('inp-seed').value.trim() || Math.random().toString(36).slice(2, 10);
   const size = $('sel-mapsize').value;
   const diff = $('sel-difficulty').value;
@@ -163,7 +196,7 @@ function startNewMatch() {
 
 $('btn-new').addEventListener('click', () => {
   if (waiting) { showMenuError('Cancel your multiplayer lobby first.'); return; }
-  if (loadSaveData()) {
+  if (bestSave()) {
     showConfirm('Match already in progress',
       'You have a match in progress. You can resume it, or discard it and start a new one.', [
       { label: '▶ Resume that match', cls: 'bg-emerald-700 hover:bg-emerald-600 text-white', fn: () => $('btn-resume').click() },
@@ -175,13 +208,16 @@ $('btn-new').addEventListener('click', () => {
 });
 
 $('btn-resume').addEventListener('click', () => {
-  const data = loadSaveData();
+  const data = bestSave();
   if (!data) { refreshMenu(); return; }
   try {
     me = 0;
     startMatch(S.deserialize(data));
+    // the chosen save becomes the local copy — it may have arrived from
+    // another device (#176)
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch { }
   } catch (e) {
-    localStorage.removeItem(SAVE_KEY);
+    clearSaves();
     refreshMenu();
     showMenuError('Saved match could not be loaded — it was discarded.');
   }
@@ -676,6 +712,10 @@ function doSupplyRoute(st, target) {
   if (inPvp()) sendCmd({ op: 'supplyRoute', settlementId: st.id, target });
   return S.opSupplyRoute(game, st, target);
 }
+function doSiegeRun(routeId, on) {
+  if (inPvp()) sendCmd({ op: 'siegeRun', routeId, on: !!on });
+  return S.opSiegeRun(game, routeId, !!on);
+}
 
 // ---------------------------------------------------------------- match lifecycle
 
@@ -734,14 +774,30 @@ function backToMenu() {
   $('end-modal').classList.add('hidden');
   $('main-menu').classList.remove('hidden');
   refreshMenu();
+  refreshServerSave();
   loadHistory();
   startMenuPolling();
   startAttract();
 }
 
-function saveGame() {
+function saveGame(push) {
   if (!game || game.result || game.pvp) return;
-  try { localStorage.setItem(SAVE_KEY, JSON.stringify(S.serialize(game))); } catch { }
+  try {
+    const data = S.serialize(game);
+    data.savedAt = Date.now();
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    // cross-device resume (#176): mirror the save to the server. Skipped
+    // on beforeunload (keepalive fetches cap at ~64 KB and saves can
+    // exceed that) — the ≤60 s-stale periodic copy is accepted, and the
+    // freshest savedAt wins at resume time.
+    if (push && token) {
+      fetch('/api/save', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...apiHeaders },
+        body: JSON.stringify(data),
+      }).catch(() => { });
+    }
+  } catch { }
 }
 
 function showEndModal(win, reason) {
@@ -769,7 +825,7 @@ function showEndModal(win, reason) {
 // local sim until the server confirms or corrects it within a second.
 function endMatch(result) {
   resultPosted = true;
-  localStorage.removeItem(SAVE_KEY);
+  clearSaves();
   const win = result === 'win';
   $('end-emoji').textContent = win ? '🏆' : '🏳️';
   $('end-title').textContent = win ? 'Victory!' : result === 'surrender' ? 'Surrendered' : 'Defeat';
@@ -836,8 +892,8 @@ $('btn-backtowork').addEventListener('click', () => {
 });
 $('btn-cancel-order').addEventListener('click', onCancel);
 
-document.addEventListener('visibilitychange', () => { if (document.hidden) saveGame(); });
-window.addEventListener('beforeunload', saveGame);
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveGame(true); });
+window.addEventListener('beforeunload', () => saveGame(false));
 
 // ---------------------------------------------------------------- selection & orders
 
@@ -1027,8 +1083,30 @@ function findEnemyTargetAt(world) {
 function onRightClick(world) {
   if (!game || game.result) return;
   hideOrderPopup();
+  // armed route mode: a right-click resolves it exactly like a tap (#178)
+  if (ui.pending === 'route' || ui.pending === 'route-sett') {
+    resolvePending(world, 'mouse');
+    return;
+  }
   const blobs = selectedBlobs();
   if (!blobs.length) return;
+  // a pure-supply selection right-clicking one of the player's completed
+  // settlements starts a supply route FROM that settlement (#179); the
+  // next right-click or tap picks the destination
+  const tot = blobs.reduce((s, b) => s + S.total(b), 0);
+  const pureSupply = tot > 0 && blobs.reduce((s, b) => s + b.count.supply, 0) === tot;
+  if (pureSupply && !ui.pending) {
+    const hitR = Math.max(1.5, 24 / view.scale);
+    const fp = settlementAtFootprint(world) || S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+    if (fp && fp.owner === me && !fp.building) {
+      ui.pending = 'route';
+      ui.routeSrc = fp.id;
+      pingRoute(fp.x + 1, fp.y + 1);
+      updateHint();
+      renderPanel(true);
+      return;
+    }
+  }
   orderMove(blobs, world, findEnemyTargetAt(world));
 }
 
@@ -1739,10 +1817,10 @@ function updateHint() {
       ? (ui.buildSite ? 'Tap ✓ to found here — or tap elsewhere to move the site'
         : 'Tap where to found the settlement…')
       : ui.pending === 'route-sett'
-        ? 'Tap the destination settlement (or army) to supply…'
+        ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination settlement (or army) to supply…`
         : ui.routeSrc != null
-          ? 'Tap the destination — a friendly settlement or army…'
-          : 'Tap the source settlement to load from…';
+          ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination — a friendly settlement or army…`
+          : `${isMobile() ? 'Tap' : 'Tap or right-click'} the source settlement to load from…`;
   $('hint-text').textContent = text;
   el.classList.remove('hidden');
 }
@@ -1817,6 +1895,24 @@ panel.addEventListener('click', (e) => {
         ui.pending = 'route-sett';
         ui.routeSrc = st.id;
         updateHint();
+      }
+      break;
+    }
+    case 'siegerun': {
+      // run-the-siege toggle (#181): from a besieged settlement it flips
+      // every inbound route at once; from a selected carrier, its route
+      if (st) {
+        const inbound = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'settlement' && r2.targetId === st.id);
+        const on = !(inbound.length > 0 && inbound.every(r2 => r2.runSiege));
+        for (const r2 of inbound) doSiegeRun(r2.id, on);
+        toast(on ? '⚔️ Caravans will run the siege' : '🚧 Caravans will wait out the siege');
+      } else if (blobs.length === 1 && blobs[0].order && blobs[0].order.type === 'route') {
+        const r2 = SUP.findRoute(game, blobs[0].order.routeId);
+        if (r2 && r2.owner === me) {
+          const on = !r2.runSiege;
+          doSiegeRun(r2.id, on);
+          toast(on ? '⚔️ Caravan will run the siege' : '🚧 Caravan will wait out the siege');
+        }
       }
       break;
     }
@@ -2031,11 +2127,19 @@ function renderPanelInner(force) {
   if (ui.selected && ui.selected.kind === 'tile') {
     const i = ui.selected.i;
     panel.classList.remove('hidden');
+    // fog secrecy (#182): an enemy settlement's plaza/farmland only reads
+    // as built/tilled once the settlement is discovered (or the tile is
+    // currently visible) — otherwise the inspector describes plain land
+    const knownMap = game.pvp ? game.knowns[me] : game.known;
+    const tileSeen = (sid) => {
+      const s2 = game.settlements.find(x => x.id === sid);
+      return !s2 || s2.owner === me || knownMap[s2.id] != null || game.fog[i] === 2;
+    };
     if (game.map.mountain[i]) {
       setPanelHTML(`
         <div class="font-semibold mb-1">⛰️ Mountain</div>
         <div class="text-xs text-zinc-400">Impassable terrain. Nothing grows here.</div>`);
-    } else if (game.settAt[i]) {
+    } else if (game.settAt[i] && tileSeen(game.settAt[i])) {
       const so = game.settlements.find(s => s.id === game.settAt[i]);
       const mine2 = so && so.owner === me;
       setPanelHTML(`
@@ -2045,7 +2149,7 @@ function renderPanelInner(force) {
       const f = game.map.fert[i], o = game.map.orig[i];
       const tier = fertTier(f), otier = fertTier(o);
       const label = FERT_TIERS[tier];
-      const tb = game.tilledBy[i] ? game.settlements.find(s => s.id === game.tilledBy[i]) : null;
+      const tb = game.tilledBy[i] && tileSeen(game.tilledBy[i]) ? game.settlements.find(s => s.id === game.tilledBy[i]) : null;
       setPanelHTML(`
         <div class="flex items-center justify-between mb-1">
           <span class="font-semibold">🟩 ${label} land</span>
@@ -2078,7 +2182,7 @@ function renderPanelInner(force) {
         <span class="text-xs text-amber-300">${pct}%</span>
       </div>
       <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-amber-500" style="width:${pct}%"></div></div>
-      <div class="text-xs text-zinc-400">The founding party is building. It produces nothing, feeds no one and trains no units until the bar is full — and enemies can attack it the whole time. Construction health climbs to ${S.C.SETT_HP}; damage taken now sets it back.</div>`);
+      <div class="text-xs text-zinc-400">The founding party is building — no production or training until complete, and it can be attacked the whole time.</div>`);
     return;
   }
 
@@ -2151,13 +2255,24 @@ function renderPanelInner(force) {
     }).join('');
     const hpBarPct = Math.max(0, Math.min(100, Math.round(100 * st.hp / S.C.SETT_HP)));
     const hpBarCol = hpBarPct >= 75 ? 'bg-emerald-500' : hpBarPct >= 40 ? 'bg-amber-500' : 'bg-red-500';
+    // run-the-siege toggle (#181): shown while besieged if any of the
+    // player's supply routes deliver here — it flips them all at once
+    const sieged = S.besieged(game, st);
+    const inbound = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'settlement' && r2.targetId === st.id);
+    const siegeRunOn = inbound.length > 0 && inbound.every(r2 => r2.runSiege);
+    const siegeBanner = sieged ? `
+      <div class="text-xs text-amber-400 mb-1">⏳ <b>Besieged</b> — no farm income or deliveries; the garrison eats the stockpile.</div>
+      ${inbound.length ? `<button data-act="siegerun" class="btn w-full rounded mb-1 ${siegeRunOn ? 'bg-amber-600 text-white hover:bg-amber-500' : 'bg-zinc-800 hover:bg-zinc-700'}">🚚 Run the siege: ${siegeRunOn ? 'ON' : 'OFF'}</button>` : ''}` : '';
+    // garrison fed state (#180): the meter fielded units emerge at
+    const gMeter = gTot > 0 ? Math.max(0, Math.min(1, (st.garrFood || 0) / (gTot * S.C.FOOD_PER_UNIT))) : 0;
+    const gFedColor = gMeter >= 0.75 ? 'text-emerald-400' : gMeter >= 0.5 ? 'text-lime-400' : gMeter >= 0.25 ? 'text-amber-400' : 'text-red-400';
     setPanelHTML(`
       <div class="flex items-center justify-between mb-1">
         <span class="font-semibold">🏠 ${st.name || 'Settlement'}</span>
         <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
       </div>
       <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full ${hpBarCol}" style="width:${hpBarPct}%"></div></div>
-      ${S.besieged(game, st) ? '<div class="text-xs text-amber-400 mb-1">⏳ <b>Besieged</b> — no farm income, supply deliveries blocked. The garrison eats from the stockpile: break the siege or watch the clock.</div>' : ''}
+      ${siegeBanner}
       <div class="text-xs text-zinc-400 mb-1">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾
         · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></div>
       <div class="mb-2 pl-2 border-l border-zinc-800">${flowRows}</div>
@@ -2175,9 +2290,9 @@ function renderPanelInner(force) {
           <button data-act="recall" id="recall-btn" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Recall ${rc}</button>
         </div>` : wc === 1 ? '<div class="mt-1 text-right"><button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall 1</button></div>' : ''}
       </div>
-      ${isMobile() ? '' : `<div class="text-xs text-zinc-500 mt-1">Each worked plot pays its own fertility — farmers claim the lushest free plot first, and two farmers on one plot don't double it. Unworked farmland only yields a small built-in base worth ${S.C.FARM_BASE_FARMERS} farmers. Plots poorer than Sparse aren't worth manning; farm growth stops once every worthwhile plot is worked. Sheltered, garrisoned or still-walking farmers earn nothing yet. Worked plots also heal scorched land fast — about one fertility level per 45 s.</div>`}
+      ${isMobile() ? '' : '<div class="text-xs text-zinc-500 mt-1">Farmers claim the lushest free plots — plots poorer than Sparse aren\'t worth manning.</div>'}
       <div class="mt-2 pt-2 border-t border-zinc-800">
-        <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}</div>
+        <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}${gTot > 0 ? ` · <span class="${gFedColor}">${S.fedLabel(gMeter)}</span>` : ''}</div>
         ${gTot > 0 ? `
           <div class="flex gap-1 mb-2">
             ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
@@ -2205,6 +2320,13 @@ function renderPanelInner(force) {
   const atHome = blobs.some(b => S.isAtHome(game, b));
   const fedColor = meter >= 0.75 ? 'text-emerald-400' : meter >= 0.5 ? 'text-lime-400' : meter >= 0.25 ? 'text-amber-400' : 'text-red-400';
   const onRoute = !multi && b0.order && b0.order.type === 'route';
+  // run-the-siege toggle (#181) for a selected carrier whose destination
+  // settlement is under siege (or that is already holding outside one)
+  const carrierRoute = onRoute && b0.owner === me ? SUP.findRoute(game, b0.order.routeId) : null;
+  const carrierSiege = !!(carrierRoute && carrierRoute.targetKind === 'settlement' && (() => {
+    const tgt2 = game.settlements.find(s2 => s2.id === carrierRoute.targetId);
+    return (tgt2 && S.besieged(game, tgt2)) || b0.order.holding;
+  })());
   // group build (#130): an under-strength founding party holding its site
   const waitingBuild = blobs.some(b => b.order && b.order.type === 'move' && b.order.build && b.order.waiting);
   const hpSum = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + u.hp, 0), 0);
@@ -2253,6 +2375,7 @@ function renderPanelInner(force) {
       <button data-act="build" class="btn rounded bg-zinc-800 hover:bg-zinc-700 ${tot < S.C.SETT_COST ? 'opacity-40' : ''}" ${tot < S.C.SETT_COST ? 'disabled' : ''}>🏠 Build (${S.C.SETT_COST})</button>
       <button data-act="route" class="btn rounded ${pureSupply ? 'bg-sky-800 hover:bg-sky-700' : 'bg-zinc-800 opacity-40'}" ${pureSupply ? '' : 'disabled'}>🚚 Supply route…</button>
     </div>
+    ${carrierSiege ? `<button data-act="siegerun" class="btn w-full rounded mb-2 ${carrierRoute.runSiege ? 'bg-amber-600 text-white hover:bg-amber-500' : 'bg-zinc-800 hover:bg-zinc-700'}">🚚 Run the siege: ${carrierRoute.runSiege ? 'ON' : 'OFF'}</button>` : ''}
     ${!multi && tot >= 2 ? `
     <div class="flex items-center gap-2">
       <button data-act="split" class="btn px-3 rounded bg-zinc-800 hover:bg-zinc-700">✂️ Split</button>
@@ -2318,7 +2441,7 @@ function frame(ts) {
   }
   if (!game.pvp && game.tick - lastSaveTick >= 300) {
     lastSaveTick = game.tick;
-    saveGame();
+    saveGame(true);
   }
   if (game.result && !resultPosted && !game.pvp) endMatch(game.result);
 }
@@ -2328,6 +2451,7 @@ requestAnimationFrame(frame);
 // ---------------------------------------------------------------- boot
 
 refreshMenu();
+refreshServerSave();
 loadHistory();
 startMenuPolling();
 startAttract();
