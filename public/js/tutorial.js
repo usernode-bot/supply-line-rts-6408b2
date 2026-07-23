@@ -151,8 +151,8 @@ const STEPS = [
   },
   { // 9 — attack
     text: (m) => m
-      ? 'An enemy war party is camped past your outpost. Tap your army to select it, then tap the marked enemy and choose ⚔️ Attack. Your troops are fed and rested — theirs won\'t save them.'
-      : 'An enemy war party is camped past your outpost. Select your army, then right-click the marked enemy to attack. Your troops are fed and rested — theirs won\'t save them.',
+      ? 'An enemy war party is camped nearby. Tap your army to select it, then tap the marked enemy and choose ⚔️ Attack. Your troops are fed and rested — theirs won\'t save them.'
+      : 'An enemy war party is camped nearby. Select your army, then right-click the marked enemy to attack. Your troops are fed and rested — theirs won\'t save them.',
     ops: ['move'],
     acts: ['move', 'pmove', 'pmovearm', 'pattack'],
     select: (g, sel) => selIsArmy(g, sel),

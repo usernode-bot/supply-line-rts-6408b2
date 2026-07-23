@@ -392,13 +392,17 @@ export function newTutorialGame() {
     fb.food = foodCap(fb);
   }
   // Enemy war party camped near the outpost: inside its vision
-  // (VISION_SETT 8) so it renders immediately, but beyond AGGRO reach of
+  // (VISION_SETT 8) so it renders immediately, and beyond AGGRO reach of
   // the field crews (farmers work up to ~2.7 from the center, so ≥ 6.8
-  // keeps everyone calm until the player attacks). Among the qualifying
-  // passable tiles, prefer the one farthest from home — "past" the outpost.
+  // keeps everyone calm until the player attacks). Straight-line distance
+  // alone isn't enough — a mountain ridge between the camp and the outpost
+  // can force the attack step into a long detour — so candidates must also
+  // be a SHORT WALK from the outpost (bounded A* path length). Among the
+  // qualifying tiles, prefer the one farthest from home. The last band
+  // drops the path bound as a never-fail fallback.
   const oc = settCenter(outpost);
   let camp = null;
-  for (const [lo, hi] of [[6.8, 7.8], [6.8, 9.5]]) {
+  for (const [lo, hi, maxSteps] of [[6.8, 7.8, 12], [6.8, 9.5, 15], [6.8, 9.5, Infinity]]) {
     for (let ty = 1; ty < game.map.h - 1; ty++) {
       for (let tx = 1; tx < game.map.w - 1; tx++) {
         const d = dist(tx + 0.5, ty + 0.5, oc.x, oc.y);
@@ -407,7 +411,12 @@ export function newTutorialGame() {
         const i = ty * game.map.w + tx;
         if (game.settAt[i] || game.tilledBy[i]) continue;
         const dh = dist(tx + 0.5, ty + 0.5, hc.x, hc.y);
-        if (!camp || dh > camp.dh) camp = { x: tx + 0.5, y: ty + 0.5, dh };
+        if (camp && dh <= camp.dh) continue; // path check only for improvements
+        if (maxSteps !== Infinity) {
+          const p = findPath(game.map, oc.x, oc.y, tx + 0.5, ty + 0.5, null, null);
+          if (!p || p.length > maxSteps) continue;
+        }
+        camp = { x: tx + 0.5, y: ty + 0.5, dh };
       }
     }
     if (camp) break;
