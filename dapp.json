@@ -25,6 +25,8 @@
     { "name": "How to Play brief block renders", "path": "/?demo=1", "expectSelector": "#howto-brief" },
     { "name": "How to Play states the combined defeat condition (no settlements + under 5 units)", "path": "/?demo=1", "expectText": "fewer than 5 units left" },
     { "name": "How to Play summarizes the three unit roles", "path": "/?demo=1", "expectText": "One unit type, three switchable roles" },
-    { "name": "Resume button present for cross-device saves", "path": "/?demo=1", "expectSelector": "#btn-resume" }
+    { "name": "Resume button present for cross-device saves", "path": "/?demo=1", "expectSelector": "#btn-resume" },
+    { "name": "Tutorial button on main menu", "path": "/?demo=1", "expectSelector": "#btn-tutorial" },
+    { "name": "Tutorial overlay container present", "path": "/?demo=1", "expectSelector": "#tutorial-box" }
   ]
 }

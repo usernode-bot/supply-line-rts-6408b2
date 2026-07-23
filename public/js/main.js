@@ -9,6 +9,7 @@ import { aiTick } from './ai.js';
 import { createRenderer } from './render.js';
 import { createInput } from './input.js';
 import { startAttract, stopAttract } from './attract.js';
+import * as TUT from './tutorial.js';
 import { dist, fertTier, FERT_TIERS } from './mapgen.js';
 
 const $ = (id) => document.getElementById(id);
@@ -222,6 +223,60 @@ $('btn-resume').addEventListener('click', () => {
     showMenuError('Saved match could not be loaded — it was discarded.');
   }
 });
+
+// ---------------------------------------------------------------- tutorial (#185)
+// A scripted, ephemeral solo scenario driven by tutorial.js: never saved,
+// never recorded, and it leaves any in-progress solo save untouched.
+
+const TUT_DONE_KEY = 'supply-line-tutorial-done-v1';
+
+function refreshTutorialButton() {
+  let done = false;
+  try { done = localStorage.getItem(TUT_DONE_KEY) === '1'; } catch { }
+  $('btn-tutorial').textContent = done ? '📖 Replay tutorial' : '📖 Tutorial';
+}
+
+function startTutorial() {
+  try {
+    me = 0;
+    const g = S.newTutorialGame();
+    startMatch(g);
+    TUT.begin(g, { ui, isMobile, onExit: confirmExitTutorial, onFinish: finishTutorial });
+  } catch (e) {
+    showMenuError('Could not start the tutorial: ' + (e && e.message || e));
+  }
+}
+
+$('btn-tutorial').addEventListener('click', () => {
+  if (waiting) { showMenuError('Cancel your multiplayer lobby first.'); return; }
+  startTutorial();
+});
+
+function confirmExitTutorial() {
+  showConfirm('Exit the tutorial?', 'You can restart it any time from the main menu.', [
+    { label: '🚪 Exit tutorial', cls: 'bg-red-700 hover:bg-red-600 text-white', fn: () => { TUT.end(); backToMenu(); } },
+  ]);
+}
+
+function finishTutorial() {
+  try { localStorage.setItem(TUT_DONE_KEY, '1'); } catch { }
+  TUT.end();
+  backToMenu();
+}
+
+// A tutorial game that somehow reaches a result (the whole force lost, or
+// the enemy wiped out ahead of the script) gets its own card — no match
+// record, no save clearing, unlike endMatch.
+function tutorialOver(result) {
+  const win = result === 'win';
+  showConfirm(win ? 'Tutorial: victory!' : 'Tutorial over',
+    win ? 'You wiped out the enemy entirely — ahead of schedule. Ready for a real match!'
+      : 'Your force was lost — it happens. Restart the tutorial or head back to the menu.',
+    [
+      { label: '🔁 Restart tutorial', cls: 'bg-violet-600 hover:bg-violet-500 text-white', fn: () => { TUT.end(); startTutorial(); } },
+      { label: '🏠 Back to menu', cls: 'bg-zinc-700 hover:bg-zinc-600 text-zinc-100', fn: () => { TUT.end(); backToMenu(); } },
+    ]);
+}
 
 // In-app confirm dialog — native confirm() is blocked inside the sandboxed
 // platform iframe (it silently returns false), so never use it.
@@ -660,59 +715,83 @@ function sendCmd(c) {
   if (!mp.kick) mp.kick = setTimeout(() => { if (mp) { mp.kick = null; mpSync(); } }, 200);
 }
 
+// Tutorial op guard (#185): belt-and-braces under the UI-level gating —
+// every mutation path funnels through these wrappers, so a step can only
+// ever reach its whitelisted sim ops.
+const TUT_BLOCKED = { err: 'Not yet — follow the tutorial instruction above' };
+function tutBlocked(op) {
+  if (!game || !game.tutorial || TUT.allowsOp(op)) return false;
+  TUT.nudge();
+  return true;
+}
+
 function doMove(b, x, y, target) {
+  if (tutBlocked('move')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'move', blobId: b.id, x, y, target: target || null });
   return S.opMove(game, b, x, y, target);
 }
 function doSetRole(b, role) {
+  if (tutBlocked('setRole')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'setRole', blobId: b.id, role });
   return S.opSetRole(game, b, role);
 }
 function doSplit(b, n) {
+  if (tutBlocked('split')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'split', blobId: b.id, take: n });
   return S.opSplit(game, b, n);
 }
 function doBuild(b) {
+  if (tutBlocked('build')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'build', blobId: b.id });
   return S.opBuild(game, b);
 }
 function doBuildAt(b, x, y) {
+  if (tutBlocked('buildAt')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'buildAt', blobId: b.id, x, y });
   return S.opBuildAt(game, b, x, y);
 }
 function doPillage(b, on) {
+  if (tutBlocked('pillage')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'pillage', blobId: b.id, on: !!on });
   return S.opPillage(game, b, on);
 }
 function doRoute(b, target, sourceId) {
+  if (tutBlocked('route')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'route', blobId: b.id, target, sourceId: sourceId == null ? null : sourceId });
   return S.opRoute(game, b, target, sourceId);
 }
 function doSetMode(st, mode) {
+  if (tutBlocked('setMode')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'setMode', settlementId: st.id, mode });
   return S.opSetMode(game, st, mode);
 }
 function doFieldGarrison(st) {
+  if (tutBlocked('fieldGarrison')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'fieldGarrison', settlementId: st.id });
   return S.opFieldGarrison(game, st);
 }
 function doFieldRole(st, role, n) {
+  if (tutBlocked('fieldRole')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'fieldRole', settlementId: st.id, role, n });
   return S.opFieldRole(game, st, role, n);
 }
 function doFieldFarmerGroup(st) {
+  if (tutBlocked('fieldFarmerGroup')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'fieldFarmerGroup', settlementId: st.id });
   return S.opFieldFarmerGroup(game, st);
 }
 function doGarrisonRole(st, role) {
+  if (tutBlocked('garrisonRole')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'garrisonRole', settlementId: st.id, role });
   return S.opGarrisonRole(game, st, role);
 }
 function doSupplyRoute(st, target) {
+  if (tutBlocked('supplyRoute')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'supplyRoute', settlementId: st.id, target });
   return S.opSupplyRoute(game, st, target);
 }
 function doSiegeRun(routeId, on) {
+  if (tutBlocked('siegeRun')) return TUT_BLOCKED;
   if (inPvp()) sendCmd({ op: 'siegeRun', routeId, on: !!on });
   return S.opSiegeRun(game, routeId, !!on);
 }
@@ -730,9 +809,12 @@ function startMatch(g) {
   $('sel-speed').value = '1';
   $('btn-pause').textContent = '⏸';
   // no pause / fast-forward in multiplayer — the sim is shared, and both
-  // clients run it at the 1× default (speed stays forced to 1)
+  // clients run it at the 1× default (speed stays forced to 1). The
+  // tutorial (#185) keeps pause but pins 1× and swaps surrender for the
+  // card's own Exit link.
   $('btn-pause').classList.toggle('hidden', !!g.pvp);
-  $('sel-speed').classList.toggle('hidden', !!g.pvp);
+  $('sel-speed').classList.toggle('hidden', !!g.pvp || !!g.tutorial);
+  $('btn-surrender').classList.toggle('hidden', !!g.tutorial);
   updateOppLabel();
   stopMenuPolling();
 
@@ -764,6 +846,7 @@ function startMatch(g) {
 }
 
 function backToMenu() {
+  TUT.end(); // no-op unless a tutorial session is live
   stopMpTimers();
   mp = null;
   me = 0;
@@ -774,6 +857,7 @@ function backToMenu() {
   $('end-modal').classList.add('hidden');
   $('main-menu').classList.remove('hidden');
   refreshMenu();
+  refreshTutorialButton();
   refreshServerSave();
   loadHistory();
   startMenuPolling();
@@ -781,7 +865,7 @@ function backToMenu() {
 }
 
 function saveGame(push) {
-  if (!game || game.result || game.pvp) return;
+  if (!game || game.result || game.pvp || game.tutorial) return;
   try {
     const data = S.serialize(game);
     data.savedAt = Date.now();
@@ -879,6 +963,7 @@ $('sel-speed').addEventListener('change', () => {
 });
 $('btn-backtowork').addEventListener('click', () => {
   if (!game || game.result) return;
+  if (game.tutorial) { TUT.nudge(); return; }
   const r = S.opBackToWork(game, 0);
   if (r.fielded + r.walking > 0) {
     const parts = [];
@@ -933,8 +1018,24 @@ function settlementAtFootprint(world) {
   return id ? game.settlements.find(s => s.id === id) || null : null;
 }
 
+// Tutorial gate (#185): decide whether a map tap serves the current step
+// BEFORE onTap's dispatch runs — disallowed taps are swallowed + nudged,
+// so nothing off-script can be selected or ordered.
+function tutTapAllowed(world) {
+  if (ui.pending) return TUT.allowsTarget(world); // resolving an armed order
+  if (!orderPopup.classList.contains('hidden')) return true; // tap only dismisses it
+  if (TUT.allowsTarget(world)) return true; // the step's world target (order/attack)
+  const hitR = 24 / view.scale;
+  const b = S.blobAt(game, world.x, world.y, hitR);
+  if (b && TUT.allowsSelect({ kind: 'blob', id: b.id })) return true;
+  const st = settlementAtFootprint(world) || S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+  if (st && TUT.allowsSelect({ kind: 'settlement', id: st.id })) return true;
+  return false;
+}
+
 function onTap(world, pointerType, screen) {
   if (!game || game.result) return;
+  if (game.tutorial && !tutTapAllowed(world)) { TUT.nudge(); return; }
   const hitR = 24 / view.scale;
   if (ui.pending) { resolvePending(world, pointerType, screen); return; }
   // a tap while the order popup is open only dismisses it
@@ -1035,6 +1136,17 @@ function onTap(world, pointerType, screen) {
 
 function onBox(rect, additive) {
   if (!game || game.result) return;
+  if (game.tutorial) {
+    // box-select is allowed only when everything it would pick is the
+    // step's own selection target (an empty box just clears — harmless)
+    const ids = game.blobs
+      .filter(b => !b.dead && b.owner === me && b.x >= rect.x0 && b.x <= rect.x1 && b.y >= rect.y0 && b.y <= rect.y1)
+      .map(b => b.id);
+    if (ids.length && !TUT.allowsSelect(ids.length === 1 ? { kind: 'blob', id: ids[0] } : { kind: 'multi', ids })) {
+      TUT.nudge();
+      return;
+    }
+  }
   hideOrderPopup();
   // a box while an order is armed is clearly a selection gesture, not a
   // destination — drop the pending state (incl. build placement)
@@ -1082,6 +1194,10 @@ function findEnemyTargetAt(world) {
 
 function onRightClick(world) {
   if (!game || game.result) return;
+  // tutorial (#185): a right-click always means "act at this point" —
+  // whether resolving an armed pending or issuing a move/attack — so the
+  // one gate is the step's world target
+  if (game.tutorial && !TUT.allowsTarget(world)) { TUT.nudge(); return; }
   hideOrderPopup();
   // armed route mode: a right-click resolves it exactly like a tap (#178)
   if (ui.pending === 'route' || ui.pending === 'route-sett') {
@@ -1203,7 +1319,7 @@ function selectGroup(n) {
 }
 
 function onGroupKey(n, shift) {
-  if (!game || game.result) return;
+  if (!game || game.result || game.tutorial) return;
   if (shift) {
     if (!assignGroup(n) && groups[n]) {
       delete groups[n];
@@ -1252,7 +1368,7 @@ function updateGroupsBar() {
       <b>${n}</b><span class="text-xs">${label}</span>${active ? `<span data-gdel="${n}" class="text-xs text-violet-200 pl-1">✕</span>` : ''}
     </button>`);
   }
-  const canAssign = ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'multi' || ui.selected.kind === 'settlement');
+  const canAssign = !game.tutorial && ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'multi' || ui.selected.kind === 'settlement');
   if (canAssign) {
     chips.push('<button data-gadd="1" class="btn-sm px-2 rounded-lg bg-zinc-900/70 border border-dashed border-zinc-600 text-zinc-400 hover:bg-zinc-800">＋</button>');
   }
@@ -1265,7 +1381,7 @@ function updateGroupsBar() {
 }
 
 $('groups-bar').addEventListener('click', (e) => {
-  if (!game || game.result) return;
+  if (!game || game.result || game.tutorial) return;
   const del = e.target.closest('[data-gdel]');
   if (del) {
     delete groups[+del.dataset.gdel];
@@ -1638,6 +1754,7 @@ function confirmBuild() {
 orderPopup.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-act]');
   if (!btn || !game) return;
+  if (game.tutorial && !TUT.allowsAct(btn.dataset)) { TUT.nudge(); return; }
   const act = btn.dataset.act;
   const world = ui.orderTarget;
   const targetEnt = ui.orderTargetEnt;
@@ -1811,7 +1928,8 @@ function resolvePending(world, pointerType, screen) {
 
 function updateHint() {
   const el = $('hint');
-  if (!ui.pending) { el.classList.add('hidden'); return; }
+  // the tutorial card owns the instruction slot for its whole session
+  if (!ui.pending || (game && game.tutorial)) { el.classList.add('hidden'); return; }
   const text = ui.pending === 'move' ? 'Tap a destination — or an enemy to attack…'
     : ui.pending === 'build'
       ? (ui.buildSite ? 'Tap ✓ to found here — or tap elsewhere to move the site'
@@ -1851,6 +1969,7 @@ window.addEventListener('pointerup', () => {
 panel.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-act]');
   if (!btn || !game) return;
+  if (game.tutorial && !TUT.allowsAct(btn.dataset)) { TUT.nudge(); return; }
   hideOrderPopup();
   const act = btn.dataset.act;
   const blobs = selectedBlobs();
@@ -2423,13 +2542,16 @@ function frame(ts) {
     let iter = 0;
     while (acc >= 100 && iter++ < 40) {
       S.step(game);
-      if (!game.pvp && game.tick % 20 === 0) aiTick(game, S);
+      // tutorial (#185): the enemy commander is switched off — its camp
+      // sits passive until the player attacks (sim-side combat still runs)
+      if (!game.pvp && !game.tutorial && game.tick % 20 === 0) aiTick(game, S);
       acc -= 100;
     }
     if (acc >= 100) acc = 0; // fell behind (background tab); drop the backlog
   }
 
   input.update(dt);
+  if (game.tutorial) TUT.tick(game, ui); // markers/card before this frame draws
   // desktop build-placement preview follows the mouse (#94)
   ui.hover = ui.pending === 'build' ? input.mouseWorld : null;
   renderer.draw(game, view, ui, Math.max(0, Math.min(1, acc / 100)));
@@ -2443,7 +2565,10 @@ function frame(ts) {
     lastSaveTick = game.tick;
     saveGame(true);
   }
-  if (game.result && !resultPosted && !game.pvp) endMatch(game.result);
+  if (game.result && !resultPosted && !game.pvp) {
+    if (game.tutorial) { resultPosted = true; tutorialOver(game.result); }
+    else endMatch(game.result);
+  }
 }
 
 requestAnimationFrame(frame);
@@ -2451,6 +2576,7 @@ requestAnimationFrame(frame);
 // ---------------------------------------------------------------- boot
 
 refreshMenu();
+refreshTutorialButton();
 refreshServerSave();
 loadHistory();
 startMenuPolling();
