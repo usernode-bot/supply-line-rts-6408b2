@@ -351,6 +351,88 @@ export function newGame(seedStr, sizeKey, difficulty, pvp) {
   return game;
 }
 
+// Scripted tutorial scenario (#185): the standard solo start plus a
+// second completed settlement a short march away and a small, passive
+// enemy war party camped within the outpost's sight. Solo-only and
+// ephemeral — the UI never saves it and skips the AI while
+// game.tutorial is set; the sim itself needs no special casing.
+export function newTutorialGame() {
+  const game = newGame('tutorial-1', 'xsmall', 'easy');
+  game.tutorial = true;
+  const home = game.settlements.find(s => s.owner === 0);
+  home.stockpile = 300;
+  // the "create a supply line" step needs carriers ready in the garrison
+  home.garrison.supply = 4;
+  home.garrFood = garrisonTotal(home) * C.FOOD_PER_UNIT;
+  // Outpost: the best-fertility clear 2×2 anchor 7–10 tiles from home —
+  // deterministic on the fixed seed, no hardcoded coordinates (widening
+  // once to 6–14 if the band somehow has no fit).
+  const hc = settCenter(home);
+  const inMap = (ax, ay, m) => ax >= m && ay >= m && ax < game.map.w - 1 - m && ay < game.map.h - 1 - m;
+  let best = null;
+  for (const [lo, hi] of [[7, 10], [6, 14]]) {
+    for (let ay = 0; ay < game.map.h - 1; ay++) {
+      for (let ax = 0; ax < game.map.w - 1; ax++) {
+        // keep the whole farm ring on the map so the outpost isn't clipped
+        if (!inMap(ax, ay, 3)) continue;
+        const d = dist(ax + 1, ay + 1, hc.x, hc.y);
+        if (d < lo || d > hi) continue;
+        if (!footprintFits(game, ax, ay)) continue;
+        let f = 0;
+        for (const i of previewFields(game, ax, ay, 0)) f += game.map.fert[i];
+        if (!best || f > best.f) best = { ax, ay, f };
+      }
+    }
+    if (best) break;
+  }
+  const outpost = foundSettlement(game, 0, best.ax, best.ay);
+  outpost.stockpile = 30; // low on purpose — the delivered food visibly matters
+  for (let k = 0; k < 2; k++) {
+    const fb = spawnWorkingFarmer(game, outpost);
+    fb.food = foodCap(fb);
+  }
+  // Enemy war party camped near the outpost: inside its vision
+  // (VISION_SETT 8) so it renders immediately, and beyond AGGRO reach of
+  // the field crews (farmers work up to ~2.7 from the center, so ≥ 6.8
+  // keeps everyone calm until the player attacks). Straight-line distance
+  // alone isn't enough — a mountain ridge between the camp and the outpost
+  // can force the attack step into a long detour — so candidates must also
+  // be a SHORT WALK from the outpost (bounded A* path length). Among the
+  // qualifying tiles, prefer the one farthest from home. The last band
+  // drops the path bound as a never-fail fallback.
+  const oc = settCenter(outpost);
+  let camp = null;
+  for (const [lo, hi, maxSteps] of [[6.8, 7.8, 12], [6.8, 9.5, 15], [6.8, 9.5, Infinity]]) {
+    for (let ty = 1; ty < game.map.h - 1; ty++) {
+      for (let tx = 1; tx < game.map.w - 1; tx++) {
+        const d = dist(tx + 0.5, ty + 0.5, oc.x, oc.y);
+        if (d < lo || d > hi) continue;
+        if (!passable(game.map, tx + 0.5, ty + 0.5)) continue;
+        const i = ty * game.map.w + tx;
+        if (game.settAt[i] || game.tilledBy[i]) continue;
+        const dh = dist(tx + 0.5, ty + 0.5, hc.x, hc.y);
+        if (camp && dh <= camp.dh) continue; // path check only for improvements
+        if (maxSteps !== Infinity) {
+          const p = findPath(game.map, oc.x, oc.y, tx + 0.5, ty + 0.5, null, null);
+          if (!p || p.length > maxSteps) continue;
+        }
+        camp = { x: tx + 0.5, y: ty + 0.5, dh };
+      }
+    }
+    if (camp) break;
+  }
+  const eb = makeBlob(game, 1, camp.x, camp.y, { deploy: 2, supply: 0, farm: 0 });
+  // A quick first kill: combat damage is fractional (K_COMBAT × attacker
+  // count), so the war party's SIZE doesn't change how long it survives —
+  // its units' HP does. Two half-worn soldiers fall in ~9 s at 1× speed.
+  for (const u of eb.units) u.hp = Math.round(unitMaxHP(u.role) * 0.5);
+  eb.food = foodCap(eb);
+  const army = game.blobs.find(b => b.owner === 0 && b.count.deploy >= C.SETT_COST);
+  game.tutorialIds = { home: home.id, outpost: outpost.id, army: army.id, enemy: eb.id };
+  updateVision(game);
+  return game;
+}
+
 // Which side this client plays. In PvP, `game.fog` stays aliased to the
 // viewer's own fog array so all render/UI fog reads are viewer-relative.
 export function setViewer(game, me) {

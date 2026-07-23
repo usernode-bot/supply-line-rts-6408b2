@@ -869,6 +869,25 @@ export function createRenderer(canvas, minimap) {
       }
     }
 
+    // tutorial marker (#185): a persistent slow-pulsing ring on the
+    // current step's target — route-blue, above fog like the ping
+    if (ui.tutMarker) {
+      const PER = 1300;
+      const p = (now % PER) / PER;
+      const px = wx(ui.tutMarker.x), py = wy(ui.tutMarker.y);
+      const base = Math.max(16, (ui.tutMarker.r || 1.5) * s);
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(px, py, base * (0.8 + 0.35 * p), 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(56,189,248,${(0.85 * (1 - p)).toFixed(2)})`;
+      ctx.stroke();
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(px, py, base * 0.8, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(56,189,248,0.9)';
+      ctx.stroke();
+    }
+
     // inspected-tile outline (above fog so it stays crisp)
     if (ui.selected && ui.selected.kind === 'tile') {
       const ti = ui.selected.i;

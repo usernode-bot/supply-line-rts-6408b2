@@ -91,6 +91,27 @@
        fades in once the first mid-game frame is drawn */
     #menu-canvas { opacity: 0; transition: opacity 0.6s ease; }
     #menu-canvas.attract-visible { opacity: 1; }
+    /* tutorial input gating (#185): everything the current step doesn't
+       ask for is dimmed and inert; the asked-for button pulses; the card
+       shakes when a blocked input is swallowed */
+    .tut-dim { opacity: 0.35 !important; pointer-events: none !important; }
+    @keyframes tut-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.85); }
+      70% { box-shadow: 0 0 0 7px rgba(56, 189, 248, 0); }
+    }
+    .tut-pulse {
+      outline: 2px solid rgba(56, 189, 248, 0.9);
+      outline-offset: 1px;
+      animation: tut-pulse 1.3s ease-out infinite;
+    }
+    @keyframes tut-shake {
+      0%, 100% { transform: translateX(0); }
+      20% { transform: translateX(-7px); }
+      40% { transform: translateX(7px); }
+      60% { transform: translateX(-5px); }
+      80% { transform: translateX(5px); }
+    }
+    .tut-shake { animation: tut-shake 0.35s ease; }
   </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 h-full overflow-hidden">
@@ -126,6 +147,18 @@
 
     <!-- toast -->
     <div id="toast" class="hidden absolute top-12 inset-x-0 mx-auto w-fit max-w-[90%] px-4 py-2 rounded-lg bg-zinc-800/95 text-zinc-100 text-sm shadow-lg z-30"></div>
+
+    <!-- tutorial card (#185): step-by-step instructions; visible for the
+         whole tutorial session (the free-form #hint is suppressed then) -->
+    <div id="tutorial-box" class="hidden absolute top-12 inset-x-0 mx-auto w-fit max-w-[92%] sm:max-w-md px-4 py-3 rounded-xl bg-indigo-950/95 backdrop-blur border border-sky-700 text-sm shadow-lg z-20">
+      <div class="flex items-center justify-between gap-4 mb-1">
+        <span id="tut-step" class="text-xs font-semibold text-sky-300"></span>
+        <button id="tut-exit" class="text-xs text-zinc-400 hover:text-zinc-200 underline">Exit tutorial</button>
+      </div>
+      <p id="tut-text" class="text-zinc-100"></p>
+      <button id="tut-next" class="hidden btn mt-2 w-full rounded-lg bg-sky-700 hover:bg-sky-600 font-semibold">Next</button>
+      <button id="tut-keep" class="hidden btn mt-2 w-full rounded-lg bg-emerald-700 hover:bg-emerald-600 font-semibold">⚔️ Keep playing</button>
+    </div>
 
     <!-- multiplayer disconnect banner -->
     <div id="mp-banner" class="hidden absolute top-24 inset-x-0 mx-auto w-fit max-w-[90%] px-4 py-2 rounded-lg bg-amber-900/95 text-amber-100 text-sm shadow-lg z-20 flex items-center gap-3">
@@ -210,6 +243,8 @@
         </label>
         <button id="btn-new" class="btn w-full py-3 rounded-xl bg-violet-600 hover:bg-violet-500 font-semibold text-lg">Start Match</button>
       </div>
+
+      <button id="btn-tutorial" class="btn w-full py-3 rounded-xl bg-sky-800 hover:bg-sky-700 font-semibold">📖 Tutorial</button>
 
       <div id="mp-section" class="bg-zinc-900 rounded-xl p-4 flex flex-col gap-3 border border-zinc-800">
         <h2 class="font-semibold text-zinc-200">Multiplayer</h2>
