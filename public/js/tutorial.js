@@ -9,11 +9,11 @@ import { dist, passable } from './mapgen.js';
 const $ = (id) => document.getElementById(id);
 
 let st = null;      // { game, ui, idx, flashUntil, movePoint } while active
-let deps = null;    // { ui, isMobile, onExit, onFinish } from main.js
+let deps = null;    // { ui, isMobile, onExit, onFinish, onKeepPlaying } from main.js
 let wired = false;
 let lastText = '';
-let lastDomSync = 0;
 let lastNudge = 0;
+let domObserver = null; // re-applies dim/pulse the instant a panel/popup rebuilds
 
 // Follow the merge log like main.js's findBlob so a tracked blob survives
 // merges (e.g. the army absorbing a stray friendly on the march).
@@ -163,7 +163,7 @@ const STEPS = [
   { // 10 — done
     next: true,
     finish: true,
-    text: () => 'Victory! You\'ve covered selecting, moving, settlement modes, supply lines, and combat. In a real match the enemy fights back: found settlements on lush land, keep your armies fed, and starve theirs. Good luck, commander!',
+    text: () => 'Victory! You\'ve covered selecting, moving, settlement modes, supply lines, and combat. Keep playing on this map — the enemy commander wakes up — or head back to the menu. Good luck, commander!',
   },
 ];
 
@@ -177,6 +177,11 @@ function wire() {
     st.idx = Math.min(st.idx + 1, STEPS.length - 1);
     lastText = '';
     render(st.game, st.ui);
+    syncButtons();
+  });
+  $('tut-keep').addEventListener('click', () => {
+    if (!st) return;
+    if (deps && deps.onKeepPlaying) deps.onKeepPlaying();
   });
   $('tut-exit').addEventListener('click', () => {
     if (deps && deps.onExit) deps.onExit();
@@ -195,7 +200,8 @@ function render(game, ui) {
   t.classList.remove('text-emerald-300');
   const next = $('tut-next');
   next.classList.toggle('hidden', !step.next);
-  next.textContent = step.finish ? '🏁 Finish' : 'Next';
+  next.textContent = step.finish ? '🏠 Back to menu' : 'Next';
+  $('tut-keep').classList.toggle('hidden', !step.finish);
 }
 
 function actAllowed(step, ds) {
@@ -206,9 +212,16 @@ function actAllowed(step, ds) {
 }
 
 // Dim every [data-act] button the step doesn't allow and pulse the ones
-// it does — re-applied on a short throttle so panel/popup re-renders
-// (which rebuild innerHTML) pick the classes back up.
+// it does. The panel rebuilds its whole innerHTML every 400 ms while its
+// live numbers change, wiping these classes — a MutationObserver (see
+// begin) re-applies them in the same microtask, before the browser can
+// paint an un-dimmed frame. The pulse animation is phased off a global
+// clock so those rebuilds (shorter than its 1.3 s period) continue the
+// pulse instead of restarting it — a restarting animation reads as
+// flicker.
+const PULSE_MS = 1300; // keep in sync with the .tut-pulse animation duration
 function syncButtons() {
+  if (!st) return;
   const step = STEPS[st.idx];
   for (const rootId of ['panel', 'order-popup']) {
     const root = $(rootId);
@@ -216,7 +229,13 @@ function syncButtons() {
     for (const btn of root.querySelectorAll('[data-act]')) {
       const ok = actAllowed(step, btn.dataset);
       btn.classList.toggle('tut-dim', !ok);
-      btn.classList.toggle('tut-pulse', ok);
+      if (ok && !btn.classList.contains('tut-pulse')) {
+        btn.style.animationDelay = (-(performance.now() % PULSE_MS)) + 'ms';
+        btn.classList.add('tut-pulse');
+      } else if (!ok && btn.classList.contains('tut-pulse')) {
+        btn.classList.remove('tut-pulse');
+        btn.style.animationDelay = '';
+      }
     }
   }
 }
@@ -258,6 +277,14 @@ export function begin(game, d) {
   wire();
   lastText = '';
   render(game, d.ui);
+  // childList-only observer: fires (as a microtask, pre-paint) whenever a
+  // panel/popup innerHTML rebuild replaces the buttons, so dim/pulse state
+  // never misses a frame. Class toggles are attribute mutations — they
+  // don't retrigger it.
+  domObserver = new MutationObserver(syncButtons);
+  domObserver.observe($('panel'), { childList: true, subtree: true });
+  domObserver.observe($('order-popup'), { childList: true, subtree: true });
+  syncButtons();
   $('tutorial-box').classList.remove('hidden');
 }
 
@@ -267,9 +294,11 @@ export function end() {
   st = null;
   deps = null;
   lastText = '';
+  if (domObserver) { domObserver.disconnect(); domObserver = null; }
   $('tutorial-box').classList.add('hidden');
   for (const el of document.querySelectorAll('.tut-dim, .tut-pulse')) {
     el.classList.remove('tut-dim', 'tut-pulse');
+    el.style.animationDelay = '';
   }
 }
 
@@ -282,12 +311,18 @@ export function tick(game, ui) {
   if (!st) return;
   st.game = game;
   st.ui = ui;
+  // The camp has no supply line of its own and would starve out in ~4
+  // idle minutes — keep it fed so a slow player still gets their fight.
+  // Stops the moment the guided session ends (finish, exit, keep playing).
+  const en = enemy(game);
+  if (en) en.food = S.foodCap(en);
   const now = performance.now();
   if (st.flashUntil) {
     if (now < st.flashUntil) return;
     st.flashUntil = 0;
     st.idx = Math.min(st.idx + 1, STEPS.length - 1);
     lastText = '';
+    syncButtons(); // the allowed set changed without a DOM rebuild
   }
   const step = STEPS[st.idx];
   if (step.done && step.done(game, ui)) {
@@ -300,10 +335,6 @@ export function tick(game, ui) {
   }
   render(game, ui);
   ui.tutMarker = step.marker ? step.marker(game, ui) : null;
-  if (now - lastDomSync > 150) {
-    lastDomSync = now;
-    syncButtons();
-  }
 }
 
 // -- gating queries (all default to "allowed" when no tutorial runs) ----

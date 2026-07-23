@@ -27,6 +27,7 @@
     { "name": "How to Play summarizes the three unit roles", "path": "/?demo=1", "expectText": "One unit type, three switchable roles" },
     { "name": "Resume button present for cross-device saves", "path": "/?demo=1", "expectSelector": "#btn-resume" },
     { "name": "Tutorial button on main menu", "path": "/?demo=1", "expectSelector": "#btn-tutorial" },
-    { "name": "Tutorial overlay container present", "path": "/?demo=1", "expectSelector": "#tutorial-box" }
+    { "name": "Tutorial overlay container present", "path": "/?demo=1", "expectSelector": "#tutorial-box" },
+    { "name": "Tutorial keep-playing button present", "path": "/?demo=1", "expectSelector": "#tut-keep" }
   ]
 }

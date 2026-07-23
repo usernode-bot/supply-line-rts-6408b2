@@ -421,7 +421,11 @@ export function newTutorialGame() {
     }
     if (camp) break;
   }
-  const eb = makeBlob(game, 1, camp.x, camp.y, { deploy: 4, supply: 0, farm: 0 });
+  const eb = makeBlob(game, 1, camp.x, camp.y, { deploy: 2, supply: 0, farm: 0 });
+  // A quick first kill: combat damage is fractional (K_COMBAT × attacker
+  // count), so the war party's SIZE doesn't change how long it survives —
+  // its units' HP does. Two half-worn soldiers fall in ~9 s at 1× speed.
+  for (const u of eb.units) u.hp = Math.round(unitMaxHP(u.role) * 0.5);
   eb.food = foodCap(eb);
   const army = game.blobs.find(b => b.owner === 0 && b.count.deploy >= C.SETT_COST);
   game.tutorialIds = { home: home.id, outpost: outpost.id, army: army.id, enemy: eb.id };

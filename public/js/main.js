@@ -241,7 +241,7 @@ function startTutorial() {
     me = 0;
     const g = S.newTutorialGame();
     startMatch(g);
-    TUT.begin(g, { ui, isMobile, onExit: confirmExitTutorial, onFinish: finishTutorial });
+    TUT.begin(g, { ui, isMobile, onExit: confirmExitTutorial, onFinish: finishTutorial, onKeepPlaying: keepPlayingTutorial });
   } catch (e) {
     showMenuError('Could not start the tutorial: ' + (e && e.message || e));
   }
@@ -262,6 +262,22 @@ function finishTutorial() {
   try { localStorage.setItem(TUT_DONE_KEY, '1'); } catch { }
   TUT.end();
   backToMenu();
+}
+
+// "Keep playing" on the completion step: the guided session ends (card,
+// markers, input gating, hidden top-bar controls) but the match carries on
+// with the enemy commander switched on. game.sandbox keeps it a throwaway —
+// never saved, never recorded, and it never clears the player's real save.
+function keepPlayingTutorial() {
+  if (!game || !game.tutorial) return;
+  try { localStorage.setItem(TUT_DONE_KEY, '1'); } catch { }
+  TUT.end();
+  game.tutorial = false; // gating, AI skip and hint suppression all key off this
+  game.sandbox = true;
+  $('sel-speed').classList.remove('hidden');
+  $('btn-surrender').classList.remove('hidden');
+  renderPanel(true);
+  toast('⚔️ The enemy commander wakes up — good luck!');
 }
 
 // A tutorial game that somehow reaches a result (the whole force lost, or
@@ -865,7 +881,7 @@ function backToMenu() {
 }
 
 function saveGame(push) {
-  if (!game || game.result || game.pvp || game.tutorial) return;
+  if (!game || game.result || game.pvp || game.tutorial || game.sandbox) return;
   try {
     const data = S.serialize(game);
     data.savedAt = Date.now();
@@ -909,7 +925,9 @@ function showEndModal(win, reason) {
 // local sim until the server confirms or corrects it within a second.
 function endMatch(result) {
   resultPosted = true;
-  clearSaves();
+  // sandbox (tutorial "keep playing"): show the end modal, but the match
+  // is a throwaway — never recorded, and the player's real save survives
+  if (!game.sandbox) clearSaves();
   const win = result === 'win';
   $('end-emoji').textContent = win ? '🏆' : '🏳️';
   $('end-title').textContent = win ? 'Victory!' : result === 'surrender' ? 'Surrendered' : 'Defeat';
@@ -917,6 +935,7 @@ function endMatch(result) {
     ? `Enemy settlements razed and their last forces scattered in ${fmtDur(S.gameSeconds(game.tick))}.`
     : `Your war effort collapsed after ${fmtDur(S.gameSeconds(game.tick))}.`;
   $('end-modal').classList.remove('hidden');
+  if (game.sandbox) return;
   // fire-and-forget record
   fetch('/api/match-result', {
     method: 'POST',
