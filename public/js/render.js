@@ -30,13 +30,25 @@ function mix(c1, c2, t) {
 }
 const BARREN = [192, 172, 126], MID = [127, 160, 84], LUSH = [42, 110, 48];
 
+// Fog secrecy for terrain (#182): enemy-built plaza/farmland renders only
+// once the viewer has discovered the owning settlement (it's in `known`)
+// or currently sees the tile. Own and neutral terrain always renders.
+function terrainKnown(game, i) {
+  const sid = (game.settAt && game.settAt[i]) || game.tilledBy[i];
+  if (!sid) return true;
+  const s = game.settlements.find(x => x.id === sid);
+  if (!s || s.owner === viewer(game)) return true;
+  return knownOf(game)[sid] != null || game.fog[i] === 2;
+}
+
 function tileRGB(game, i) {
   if (game.map.mountain[i]) {
     const v = 108 + ((i * 2654435761) % 24);
     return [v, v + 4, v + 10];
   }
-  // built-over settlement ground: a flat stone/earth plaza, not farmland
-  if (game.settAt && game.settAt[i]) {
+  // built-over settlement ground: a flat stone/earth plaza, not farmland —
+  // hidden until the viewer discovers the settlement (#182)
+  if (game.settAt && game.settAt[i] && terrainKnown(game, i)) {
     const v = (i * 2654435761) % 10;
     return [148 + v, 131 + v, 104 + v];
   }
@@ -76,6 +88,9 @@ export function createRenderer(canvas, minimap) {
   let terrain = null, tctx = null;
   let fogCanvas = null, fctx = null, fogData = null, fogAlpha = null;
   let mapRef = null;
+  // dirty tiles the viewer can't currently see (#182): the terrain canvas
+  // keeps their last-seen pixels; they repaint once they come into vision
+  let pendingDirty = new Set();
   let dpr = 1, cssW = 0, cssH = 0;
   let lastFrameT = 0;
 
@@ -92,6 +107,7 @@ export function createRenderer(canvas, minimap) {
   function ensureLayers(game) {
     if (mapRef === game.map) return;
     mapRef = game.map;
+    pendingDirty.clear();
     const { w, h } = game.map;
     terrain = document.createElement('canvas');
     terrain.width = w * T; terrain.height = h * T;
@@ -127,7 +143,8 @@ export function createRenderer(canvas, minimap) {
     const { w } = game.map;
     const px = (i % w) * T, py = ((i / w) | 0) * T;
     let [r, g, b] = tileRGB(game, i);
-    const sid = game.tilledBy[i];
+    // undiscovered enemy farmland paints as plain land (#182)
+    const sid = terrainKnown(game, i) ? game.tilledBy[i] : 0;
     if (sid) {
       // per-tile tone jitter on farmland only — breaks up the flat tier
       // color so a plot reads as worked ground, not wallpaper (#49)
@@ -231,8 +248,19 @@ export function createRenderer(canvas, minimap) {
   function draw(game, view, ui, alpha) {
     if (alpha == null) alpha = 1;
     ensureLayers(game);
-    for (const i of game.dirty) paintTile(game, i);
+    // fog memory (#182): repaint a dirty tile only while the viewer sees
+    // it; everything else waits in pendingDirty so fogged terrain keeps
+    // its last-seen pixels. (Own terrain changes always happen in vision —
+    // VISION_SETT exceeds the farm ring — so nothing of ours is delayed.)
+    const fog = game.fog;
+    for (const i of game.dirty) {
+      if (fog[i] === 2) paintTile(game, i);
+      else pendingDirty.add(i);
+    }
     game.dirty.clear();
+    for (const i of pendingDirty) {
+      if (fog[i] === 2) { paintTile(game, i); pendingDirty.delete(i); }
+    }
     const now = performance.now();
     const dt = Math.min(100, now - lastFrameT || 16);
     lastFrameT = now;

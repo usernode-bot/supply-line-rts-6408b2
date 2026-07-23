@@ -72,6 +72,12 @@ export function applyCommand(g, owner, c) {
         }
       }
       break;
+    case 'siegeRun': {
+      // run-the-siege toggle (#181): only the acting player's own route
+      const r = g.routes.find(x => x.id === c.routeId && x.owner === owner);
+      if (r) S.opSiegeRun(g, r.id, !!c.on);
+      break;
+    }
     case 'setMode': if (st) S.opSetMode(g, st, c.mode); break;
     case 'fieldGarrison': if (st) S.opFieldGarrison(g, st); break;
     case 'fieldRole': if (st) S.opFieldRole(g, st, c.role, Math.max(1, c.n | 0)); break;
