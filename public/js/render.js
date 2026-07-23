@@ -206,13 +206,16 @@ export function createRenderer(canvas, minimap) {
     }
     // pillage scorch (#144, recolored per #175 feedback): raided ground
     // reads as burnt earth, not naturally barren — a burnt-umber wash plus
-    // ember-brown and pale ash-tan flecks whose strength tracks the missing
-    // fertility, fading out as the land regenerates (the regen tick
+    // ember-brown and pale ash-tan flecks whose strength tracks the
+    // fraction of the tile's ORIGINAL fertility destroyed, so a lightly
+    // nibbled tile shows a faint singe and only a near-Barren tile renders
+    // fully scorched; it fades out as the land regenerates (the regen tick
     // re-dirties the tile every tick, so this repaints on its own).
     // Hashed per tile — repainting reproduces identical pixels.
     if (game.pillaged && game.pillaged.has(i)) {
-      const missing = game.map.orig[i] - game.map.fert[i];
-      const k = Math.max(0, Math.min(1, missing / S.C.FERT_LEVEL));
+      const orig = game.map.orig[i];
+      const missing = orig - game.map.fert[i];
+      const k = orig > 0 ? Math.max(0, Math.min(1, missing / orig)) : 0;
       if (k > 0.02) {
         tctx.fillStyle = `rgba(124,76,36,${(0.32 * k).toFixed(3)})`;
         tctx.fillRect(px, py, T, T);
