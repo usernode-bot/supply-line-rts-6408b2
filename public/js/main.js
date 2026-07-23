@@ -851,6 +851,14 @@ function startMatch(g) {
   view.cx = start.x + 2; view.cy = start.y;
   const cssW = window.innerWidth;
   view.scale = Math.max(10, Math.min(20, cssW / (cssW < 640 ? 22 : 30)));
+  if (g.tutorial) {
+    // open on a close-up of the first steps' subjects — the home
+    // settlement and the army camped beside it (the settlement center is
+    // at start+1, the army at start+(2.5,0.5)); panning/zooming stays free
+    view.cx = start.x + 1.5;
+    view.cy = start.y + 0.5;
+    view.scale = Math.min(48, view.scale * 1.9);
+  }
   input.clampView();
 
   $('main-menu').classList.add('hidden');
