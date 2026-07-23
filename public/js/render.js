@@ -204,24 +204,44 @@ export function createRenderer(canvas, minimap) {
                       py + 1 + ((kh >>> 9) % (T - 2 - size)), size, size);
       }
     }
-    // pillage scorch (#144): raided ground reads as damaged, not naturally
-    // barren — a charcoal wash plus ash flecks whose strength tracks the
-    // missing fertility, fading out as the land regenerates (the regen
-    // tick re-dirties the tile every tick, so this repaints on its own).
+    // pillage scorch (#144, recolored per #175 feedback): raided ground
+    // reads as burnt earth, not naturally barren — a burnt-umber wash plus
+    // ember-brown and pale ash-tan flecks whose strength tracks the
+    // fraction of the tile's ORIGINAL fertility destroyed, so a lightly
+    // nibbled tile shows a faint singe and only a near-Barren tile renders
+    // fully scorched; it fades out as the land regenerates (the regen tick
+    // re-dirties the tile every tick, so this repaints on its own).
     // Hashed per tile — repainting reproduces identical pixels.
     if (game.pillaged && game.pillaged.has(i)) {
-      const missing = game.map.orig[i] - game.map.fert[i];
-      const k = Math.max(0, Math.min(1, missing / S.C.FERT_LEVEL));
-      if (k > 0.02) {
-        tctx.fillStyle = `rgba(30,20,12,${(0.22 * k).toFixed(3)})`;
+      const orig = game.map.orig[i];
+      const missing = orig - game.map.fert[i];
+      const k = orig > 0 ? Math.max(0, Math.min(1, missing / orig)) : 0;
+      // eased ramp (k²): a light nibble is a barely-there tint with no
+      // flecks; the ember/ash fleck look builds in only as the tile
+      // approaches Barren
+      const e = k * k;
+      if (e > 0.02) {
+        tctx.fillStyle = `rgba(124,76,36,${(0.32 * e).toFixed(3)})`;
         tctx.fillRect(px, py, T, T);
-        const flecks = 2 + Math.round(k * 3);
-        tctx.fillStyle = `rgba(15,10,8,${(0.35 + 0.4 * k).toFixed(2)})`;
-        for (let f = 0; f < flecks; f++) {
-          const fh = ((i + 1) * 2654435761 + f * 40503) >>> 0;
-          const size = 1 + (fh & 1);
-          tctx.fillRect(px + 1 + ((fh >>> 3) % (T - 2 - size)),
-                        py + 1 + ((fh >>> 11) % (T - 2 - size)), size, size);
+        if (k > 0.35) {
+          const flecks = 1 + Math.round(e * 4);
+          tctx.fillStyle = `rgba(94,52,22,${(0.15 + 0.55 * e).toFixed(2)})`;
+          for (let f = 0; f < flecks; f++) {
+            const fh = ((i + 1) * 2654435761 + f * 40503) >>> 0;
+            const size = 1 + (fh & 1);
+            tctx.fillRect(px + 1 + ((fh >>> 3) % (T - 2 - size)),
+                          py + 1 + ((fh >>> 11) % (T - 2 - size)), size, size);
+          }
+        }
+        // pale ash-tan specks so a heavy burn reads dry and dusty, not muddy
+        if (k > 0.6) {
+          tctx.fillStyle = `rgba(205,176,132,${(0.08 + 0.4 * e).toFixed(2)})`;
+          for (let f = 0; f < 2; f++) {
+            const fh = ((i + 1) * 1597334677 + (f + 5) * 668265263) >>> 0;
+            const size = 1 + (fh & 1);
+            tctx.fillRect(px + 1 + ((fh >>> 3) % (T - 2 - size)),
+                          py + 1 + ((fh >>> 11) % (T - 2 - size)), size, size);
+          }
         }
       }
     }
