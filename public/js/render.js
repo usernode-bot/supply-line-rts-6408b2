@@ -1388,6 +1388,29 @@ export function createRenderer(canvas, minimap) {
       ctx.fillStyle = '#e4e4e7';
       ctx.fillText(label, lx, ly);
     }
+    // garrison rations meter (#187): a tiny fed-state bar under the tile
+    // (below the HP bar when one is showing), same palette as the blob
+    // fed rings — calm green when provisioned, amber when low, and a
+    // slow-blinking red when the garrison is starving on an empty meter.
+    // Same s ≥ 8 threshold as the chip so it stays unobtrusive.
+    if (!ghost && !building && gTot > 0 && s >= 8) {
+      const meter = Math.max(0, Math.min(1, (w.garrFood || 0) / (gTot * S.C.FOOD_PER_UNIT)));
+      let ry = y0 + size + 1;
+      if (w.hp < S.C.WALL_HP) ry += 4; // stack under the damage bar
+      const rx = x0 + size * 0.15, rw = size * 0.7;
+      ctx.fillStyle = '#111827';
+      ctx.fillRect(rx, ry, rw, 2);
+      if (meter <= 0.02) {
+        const blink = 0.45 + 0.45 * Math.sin(game.tick * 0.35);
+        ctx.fillStyle = `rgba(248,113,113,${blink.toFixed(2)})`;
+        ctx.fillRect(rx, ry, rw, 2);
+      } else {
+        ctx.fillStyle = meter >= 0.75 ? '#4ade80'
+          : meter >= 0.5 ? '#a3e635'
+            : meter >= 0.25 ? '#fbbf24' : '#f87171';
+        ctx.fillRect(rx, ry, rw * meter, 2);
+      }
+    }
     ctx.globalAlpha = 1;
   }
 
