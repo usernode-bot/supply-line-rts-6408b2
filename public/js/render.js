@@ -1365,51 +1365,74 @@ export function createRenderer(canvas, minimap) {
       ctx.textBaseline = 'middle';
       ctx.fillText('🔨', x0 + size / 2, y0 + size / 2);
     }
-    // build-progress / damage bar below the tile
-    if (!ghost && w.hp < S.C.WALL_HP) {
-      const barY = y0 + size + 1;
-      ctx.fillStyle = '#111827';
-      ctx.fillRect(x0, barY, size, 3);
-      ctx.fillStyle = building ? '#fbbf24' : '#f87171';
-      ctx.fillRect(x0, barY, size * Math.max(0, Math.min(1, w.hp / S.C.WALL_HP)), 3);
-    }
-    // garrison count chip
+    // chips + bars mirror the settlement treatment (render drawSettlement):
+    // 🌾 stockpile chip (own walls only — the enemy's stays private, #86),
+    // a garrison chip whose icons reflect the actual role mix, and bars
+    // stacked below the tile: damage/progress, rations, arming progress.
     const gTot = w.garrison ? w.garrison.deploy + w.garrison.supply + w.garrison.farm : 0;
-    if (!ghost && gTot > 0 && s >= 8) {
-      const fs = Math.max(9, Math.min(12, s * 0.5));
-      const label = `⚔️${gTot}`;
+    const own = !ghost && w.owner === viewer(game);
+    const chipAt = (label, lx, ly, fs) => {
       ctx.font = `600 ${fs}px system-ui`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       const tw = ctx.measureText(label).width;
-      const lx = x0 + size / 2, ly = y0 + size * 0.45;
       ctx.fillStyle = 'rgba(0,0,0,0.45)';
       ctx.fillRect(lx - tw / 2 - 2, ly - fs * 0.7, tw + 4, fs * 1.4);
       ctx.fillStyle = '#e4e4e7';
       ctx.fillText(label, lx, ly);
+    };
+    const fs = Math.max(9, Math.min(12, s * 0.5));
+    const showStock = own && !building && s >= 8 && (gTot > 0 || (w.garrFood || 0) >= 1);
+    if (showStock) {
+      chipAt(`🌾${Math.floor(w.garrFood || 0)}`, x0 + size / 2, y0 + size * 0.3, fs);
     }
-    // garrison rations meter (#187): a tiny fed-state bar under the tile
-    // (below the HP bar when one is showing), same palette as the blob
-    // fed rings — calm green when provisioned, amber when low, and a
-    // slow-blinking red when the garrison is starving on an empty meter.
-    // Same s ≥ 8 threshold as the chip so it stays unobtrusive.
+    if (!ghost && gTot > 0 && s >= 8) {
+      // role-mix icons, like settlement garrison chips, not a flat ⚔️
+      const parts = [];
+      if (w.garrison.deploy > 0) parts.push(`⚔️${w.garrison.deploy}`);
+      if (w.garrison.supply > 0) parts.push(`🚚${w.garrison.supply}`);
+      if (w.garrison.farm > 0) parts.push(`🌱${w.garrison.farm}`);
+      chipAt(parts.join(' '), x0 + size / 2, y0 + size * (showStock ? 0.66 : 0.45), fs);
+    }
+    let barY = y0 + size + 1;
+    // build-progress / damage bar
+    if (!ghost && w.hp < S.C.WALL_HP) {
+      ctx.fillStyle = '#111827';
+      ctx.fillRect(x0, barY, size, 3);
+      ctx.fillStyle = building ? '#fbbf24' : '#f87171';
+      ctx.fillRect(x0, barY, size * Math.max(0, Math.min(1, w.hp / S.C.WALL_HP)), 3);
+      barY += 4;
+    }
+    // garrison rations meter (#187): a tiny fed-state bar, same palette
+    // as the blob fed rings — calm green when provisioned, amber when
+    // low, slow-blinking red when the garrison is starving on empty.
+    // Same s ≥ 8 threshold as the chips so it stays unobtrusive.
     if (!ghost && !building && gTot > 0 && s >= 8) {
       const meter = Math.max(0, Math.min(1, (w.garrFood || 0) / S.C.WALL_FOOD_CAP));
-      let ry = y0 + size + 1;
-      if (w.hp < S.C.WALL_HP) ry += 4; // stack under the damage bar
       const rx = x0 + size * 0.15, rw = size * 0.7;
       ctx.fillStyle = '#111827';
-      ctx.fillRect(rx, ry, rw, 2);
+      ctx.fillRect(rx, barY, rw, 2);
       if (meter <= 0.02) {
         const blink = 0.45 + 0.45 * Math.sin(game.tick * 0.35);
         ctx.fillStyle = `rgba(248,113,113,${blink.toFixed(2)})`;
-        ctx.fillRect(rx, ry, rw, 2);
+        ctx.fillRect(rx, barY, rw, 2);
       } else {
         ctx.fillStyle = meter >= 0.75 ? '#4ade80'
           : meter >= 0.5 ? '#a3e635'
             : meter >= 0.25 ? '#fbbf24' : '#f87171';
-        ctx.fillRect(rx, ry, rw * meter, 2);
+        ctx.fillRect(rx, barY, rw * meter, 2);
       }
+      barY += 3;
+    }
+    // garrison arm-up progress (own walls only) — the settlement convert
+    // bar treatment, stacked under the rations meter
+    if (own && !building && w.convert) {
+      const p = Math.max(0, Math.min(1, 1 - (w.convert.done - game.tick) / S.C.CONVERT_TICKS));
+      ctx.fillStyle = '#111827';
+      ctx.fillRect(x0, barY, size, 3);
+      ctx.fillStyle = '#f59e0b';
+      ctx.fillRect(x0, barY, size * p, 3);
+      barY += 4;
     }
     ctx.globalAlpha = 1;
   }
