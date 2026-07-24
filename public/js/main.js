@@ -1607,8 +1607,19 @@ function showUnitOptions(screen) {
 // aborts without splitting.
 let splitHoldConsumed = false; // eat the synthesized click after a hold
 
+// Hold-drag count mapping (#189): the count follows the finger's absolute
+// horizontal screen position — near the left edge = 1, near the right
+// edge = max, linear in between. The margin keeps both extremes reachable
+// without having to touch the outermost pixels.
+const HOLD_EDGE_PX = 24;
+function holdValueFromX(clientX, maxV) {
+  const span = Math.max(1, window.innerWidth - 2 * HOLD_EDGE_PX);
+  const t = Math.max(0, Math.min(1, (clientX - HOLD_EDGE_PX) / span));
+  return Math.max(1, Math.min(maxV, 1 + Math.round(t * (maxV - 1))));
+}
+
 function attachSplitHold(btn) {
-  let timer = null, sliding = false, holdX = 0, lastX = 0, value = 1, maxV = 1, totNow = 2, row = null, fill = null, pxPerUnit = 4;
+  let timer = null, sliding = false, lastX = 0, value = 1, maxV = 1, totNow = 2, row = null, fill = null;
 
   function cleanup() {
     clearTimeout(timer);
@@ -1639,17 +1650,14 @@ function attachSplitHold(btn) {
       if (!b2 || S.total(b2) < 2 || orderPopup.classList.contains('hidden')) return;
       sliding = true;
       splitHoldConsumed = true;
-      holdX = lastX;
       totNow = S.total(b2);
       maxV = totNow - 1;
-      value = Math.max(1, Math.min(maxV, Math.floor(totNow / 2)));
+      value = holdValueFromX(lastX, maxV);
       row = document.createElement('div');
       row.className = 'px-1 pb-1';
       row.innerHTML = '<div class="h-2 rounded bg-zinc-700 overflow-hidden"><div class="h-full bg-violet-500"></div></div>';
       btn.insertAdjacentElement('afterend', row);
       fill = row.firstElementChild.firstElementChild;
-      // px per unit from the track width, floored so huge groups stay controllable
-      pxPerUnit = Math.max(3, (orderPopup.offsetWidth - 12) / Math.max(1, maxV - 1));
       update();
     }, 350);
     e.preventDefault();
@@ -1659,8 +1667,7 @@ function attachSplitHold(btn) {
     lastX = e.clientX;
     if (!sliding) return;
     if (orderPopup.classList.contains('hidden')) { abort(); return; } // dismissed mid-hold
-    const start = Math.max(1, Math.min(maxV, Math.floor(totNow / 2)));
-    value = Math.max(1, Math.min(maxV, start + Math.round((e.clientX - holdX) / pxPerUnit)));
+    value = holdValueFromX(e.clientX, maxV);
     update();
   });
 
@@ -1704,7 +1711,7 @@ function recallFarmers(st, n) {
 let recallHoldConsumed = false; // eat the synthesized click after a hold
 
 function attachRecallHold(btn) {
-  let timer = null, sliding = false, holdX = 0, lastX = 0, value = 1, maxV = 1, startV = 1, row = null, fill = null, pxPerUnit = 4;
+  let timer = null, sliding = false, lastX = 0, value = 1, maxV = 1, row = null, fill = null;
 
   function cleanup() {
     clearTimeout(timer);
@@ -1731,15 +1738,12 @@ function attachRecallHold(btn) {
       if (maxV < 2) return;
       sliding = true;
       recallHoldConsumed = true;
-      holdX = lastX;
-      startV = Math.max(1, Math.min(maxV, ui.recallCount || maxV));
-      value = startV;
+      value = holdValueFromX(lastX, maxV);
       row = document.createElement('div');
       row.className = 'mt-1';
       row.innerHTML = '<div class="h-2 rounded bg-zinc-700 overflow-hidden"><div class="h-full bg-violet-500"></div></div>';
       btn.parentElement.insertAdjacentElement('afterend', row);
       fill = row.firstElementChild.firstElementChild;
-      pxPerUnit = Math.max(3, (panel.offsetWidth - 24) / Math.max(1, maxV - 1));
       update();
     }, 350);
     e.preventDefault();
@@ -1748,7 +1752,7 @@ function attachRecallHold(btn) {
   btn.addEventListener('pointermove', (e) => {
     lastX = e.clientX;
     if (!sliding) return;
-    value = Math.max(1, Math.min(maxV, startV + Math.round((e.clientX - holdX) / pxPerUnit)));
+    value = holdValueFromX(e.clientX, maxV);
     update();
   });
 
