@@ -10,7 +10,7 @@ import { createRenderer } from './render.js';
 import { createInput } from './input.js';
 import { startAttract, stopAttract } from './attract.js';
 import * as TUT from './tutorial.js';
-import { dist, fertTier, FERT_TIERS } from './mapgen.js';
+import { dist, fertTier, FERT_TIERS, nearestPassable } from './mapgen.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -1264,14 +1264,90 @@ function findEnemyTargetAt(world) {
   if (wl && wl.owner !== me && wallKnown(wl)) {
     return { kind: 'wall', id: wl.id };
   }
-  const hitR = Math.max(1.5, 24 / view.scale);
-  const eb = S.blobAt(game, world.x, world.y, hitR);
+  // tight grab (#201): blobAt measures EDGE distance, so the old
+  // max(1.5, 24/scale) slack reached ~4 tiles past a big stack's centre
+  // and quietly turned retreat / garrison clicks into fresh attacks. A
+  // move only becomes an attack when the click lands on (or right at the
+  // edge of) the enemy itself; the touch popup keeps its generous pick
+  // because it asks the player which order they meant.
+  const eb = S.blobAt(game, world.x, world.y, 0.9);
   if (eb && eb.owner !== me && S.isVisible(game, eb.x, eb.y)) return { kind: 'blob', id: eb.id };
-  const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+  const st = S.settlementAt(game, world.x, world.y, 1.9);
   if (st && st.owner !== me && (S.settVisible(game, st) || known[st.id])) {
     return { kind: 'settlement', id: st.id };
   }
   return null;
+}
+
+// An own-entity destination under a world point (#201): one of the
+// player's finished wall tiles, or their own completed settlement's
+// grounds. A click here is unambiguously "march there and garrison", so
+// the move dispatch must NEVER let a nearby enemy steal it — an attacker
+// standing beside a wall used to outrank the wall itself. Mirrors the
+// own-entity-first precedence the route flows already use (#142, #187).
+function ownGarrisonTargetAt(world) {
+  const wl = wallAtPoint(world);
+  if (wl && wl.owner === me && !wl.building) return { kind: 'wall', id: wl.id };
+  const fp = settlementAtFootprint(world);
+  if (fp && fp.owner === me && !fp.building) return { kind: 'settlement', id: fp.id };
+  const st = S.settlementAt(game, world.x, world.y, 1.9);
+  if (st && st.owner === me && !st.building) return { kind: 'settlement', id: st.id };
+  return null;
+}
+
+// Blobs that are in contact right now — drives the Withdraw affordance
+// and the panel's combat line (same 5-tick window the renderer uses).
+function inCombat(b) { return !!b && game.tick - b.engagedT < 5; }
+
+// Withdraw (#201): always-accepted disengagement that never depends on
+// click precision. Each blob pulls back to the nearest of the player's
+// own settlements / garrisoned-capable walls within 12 tiles, else
+// straight away from the enemies it is locked with. Rides the ordinary
+// move op, so PvP relay, prediction and the tutorial gate all apply.
+function withdrawSpot(b) {
+  let best = null, bd = 12;
+  for (const s of game.settlements) {
+    if (s.owner !== me || s.building) continue;
+    const d = dist(s.x + 1, s.y + 1, b.x, b.y);
+    if (d < bd) { bd = d; best = { x: s.x + 1, y: s.y + 1 }; }
+  }
+  for (const w of game.walls) {
+    if (w.owner !== me || w.building) continue;
+    if (S.wallGarrisonTotal(w) >= S.C.WALL_GARRISON_CAP) continue;
+    const d = dist(w.x + 0.5, w.y + 0.5, b.x, b.y);
+    if (d < bd) { bd = d; best = { x: w.x + 0.5, y: w.y + 0.5 }; }
+  }
+  if (best) return best;
+  // no shelter in reach — run directly away from the unit-weighted
+  // centroid of whatever is in contact with this group
+  let ex = 0, ey = 0, n = 0;
+  for (const e of game.blobs) {
+    if (e.dead || e.owner === me) continue;
+    if (dist(e.x, e.y, b.x, b.y) > S.C.MELEE_RANGE + 0.2) continue;
+    const wt = Math.max(1, S.total(e));
+    ex += e.x * wt; ey += e.y * wt; n += wt;
+  }
+  let ax = 0, ay = 0;
+  if (n > 0) { ax = b.x - ex / n; ay = b.y - ey / n; }
+  const len = Math.hypot(ax, ay);
+  if (len < 0.001) { ax = 0; ay = -1; } else { ax /= len; ay /= len; }
+  const tx = Math.max(0.5, Math.min(game.map.w - 0.5, b.x + ax * 5));
+  const ty = Math.max(0.5, Math.min(game.map.h - 0.5, b.y + ay * 5));
+  const spot = nearestPassable(game.map, Math.floor(tx), Math.floor(ty), 4);
+  return spot ? { x: spot.x + 0.5, y: spot.y + 0.5 } : { x: tx, y: ty };
+}
+
+function dispatchWithdraw(blobs) {
+  let ok = 0, err = null, last = null;
+  for (const b of blobs) {
+    const spot = withdrawSpot(b);
+    const r = doMove(b, spot.x, spot.y, null);
+    if (r.err) err = r.err; else { ok++; last = spot; }
+  }
+  if (ok) {
+    pingOrder(last, null);
+    toast('🏳️ Withdrawing from combat');
+  } else if (err) toast(err);
 }
 
 function onRightClick(world) {
@@ -1310,7 +1386,9 @@ function onRightClick(world) {
       return;
     }
   }
-  orderMove(blobs, world, findEnemyTargetAt(world));
+  // own wall / own settlement under the cursor is a garrison march, never
+  // an attack on whatever enemy happens to stand beside it (#201)
+  orderMove(blobs, world, ownGarrisonTargetAt(world) ? null : findEnemyTargetAt(world));
 }
 
 // Shared move dispatch: issue the order to every selected blob, ping the
@@ -1318,6 +1396,9 @@ function onRightClick(world) {
 // visibly reads as "go work that plot", not a plain move.
 function orderMove(blobs, world, target) {
   let err = null, ok = 0, fielded = 0;
+  // an auto-picked target overriding a move for a group already in
+  // contact used to look like "my army ignores me" (#201) — name it
+  const wasFighting = !!target && blobs.some(inCombat);
   for (const b of blobs) {
     const r = doMove(b, world.x, world.y, target);
     if (r.err) err = r.err;
@@ -1326,6 +1407,7 @@ function orderMove(blobs, world, target) {
   if (ok) pingOrder(world, target);
   if (fielded) toast(`🌱 ${fielded} farmer${fielded === 1 ? '' : 's'} heading to the fields`);
   else if (err) toast(err);
+  else if (ok && wasFighting) toast('⚔️ Attacking — use Withdraw to break off');
 }
 
 // Brief destination animation so a move/attack order visibly lands (#71).
@@ -1644,7 +1726,9 @@ function showUnitOptions(screen) {
   const pillaging = blobs.some(b => b.pillaging);
   const canSplit = blobs.length === 1 && tot >= 2;
   const canBuild = tot >= S.C.SETT_COST;
+  const fighting = blobs.some(inCombat);
   orderPopup.innerHTML = `
+    ${fighting ? '<button data-act="pwithdraw" class="btn px-3 rounded-lg text-left bg-amber-700 hover:bg-amber-600 text-white">🏳️ Withdraw</button>' : ''}
     <button data-act="pmovearm" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move…</button>
     <button data-act="ppillage" class="btn px-3 rounded-lg text-left ${pillaging ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 ${pillaging ? 'Stop pillaging' : 'Pillage'}</button>
     ${canSplit ? `<button data-act="psplit" style="touch-action:none" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">✂️ Split ${Math.floor(tot / 2)} / ${tot} <span class="text-xs text-zinc-500">(hold to adjust)</span></button>` : ''}
@@ -2085,6 +2169,7 @@ orderPopup.addEventListener('click', (e) => {
     return;
   }
   // unit-options popup actions (phone UI) — mirror the panel's cases
+  if (act === 'pwithdraw') { dispatchWithdraw(selectedBlobs()); renderPanel(true); return; }
   if (act === 'pmovearm') { ui.pending = 'move'; updateHint(); return; }
   if (act === 'proutearm') { ui.pending = 'route'; ui.routeSrc = null; updateHint(); return; }
   if (act === 'pbuildarm') {
@@ -2186,7 +2271,9 @@ function resolvePending(world, pointerType, screen) {
   const blobs = selectedBlobs();
   if (pending === 'move') {
     if (!blobs.length) return;
-    orderMove(blobs, world, findEnemyTargetAt(world)); // tapping an enemy targets it
+    // tapping an enemy targets it; an own wall/settlement is a garrison
+    // march that a neighbouring enemy can never steal (#201)
+    orderMove(blobs, world, ownGarrisonTargetAt(world) ? null : findEnemyTargetAt(world));
   } else if (pending === 'route') {
     // supply routes take two taps (#131): first the source settlement the
     // caravans load from, then the destination. All selected pure-supply
@@ -2338,6 +2425,7 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'move': ui.pending = 'move'; updateHint(); break;
+    case 'withdraw': dispatchWithdraw(blobs); break;
     case 'route': ui.pending = 'route'; ui.routeSrc = null; updateHint(); break;
     case 'split': {
       const b = blobs[0];
@@ -2690,8 +2778,9 @@ function renderPanelInner(force) {
             </div>
             ${w.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(w.convert)}s (fielding cancels)</div>` : ''}
             <button data-act="fieldwall" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>
-            <div class="text-xs text-zinc-600 mt-1">Fielding marches them out with their rations, topping up from the supplies; the rest stays on the wall.</div>`.replaceAll('data-act="role"', 'data-act="wrole"')
-          : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '). A garrisoned wall attacks enemies within 1 tile, and its units refeed from these supplies; a route keeps them stocked.</div>'}`}`);
+            <div class="text-xs text-zinc-600 mt-1">Fielding marches them out with their rations, topping up from the supplies; the rest stays on the wall.</div>
+            <div class="text-xs text-zinc-600 mt-1">Reinforcements can march in even while the wall is under attack, up to ${S.C.WALL_GARRISON_CAP} units per tile.</div>`.replaceAll('data-act="role"', 'data-act="wrole"')
+          : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '), which works even while the wall is under attack. A garrisoned wall attacks enemies within 1 tile, and its units refeed from these supplies; a route keeps them stocked.</div>'}`}`);
     } else {
       const vis = S.isVisible(game, w.x + 0.5, w.y + 0.5);
       if (vis) {
@@ -3017,6 +3106,10 @@ function renderPanelInner(force) {
   }
   // group build (#130): an under-strength founding party holding its site
   const waitingBuild = blobs.some(b => b.order && b.order.type === 'move' && b.order.build && b.order.waiting);
+  // combat state (#201): "why isn't my army moving" must be answerable
+  // from the panel, and Withdraw only shows while there's a fight to leave
+  const fighting = blobs.some(inCombat);
+  const withdrawing = blobs.some(b => b.order && b.order.type === 'move' && b.order.disengage);
   const hpSum = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + u.hp, 0), 0);
   const hpMax = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + S.unitMaxHP(u.role), 0), 0);
   const hpPct = Math.round(100 * hpSum / Math.max(1, hpMax));
@@ -3041,7 +3134,8 @@ function renderPanelInner(force) {
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
     <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
-
+    ${withdrawing ? '<div class="text-xs text-amber-300 mb-2">🏳️ Withdrawing — backs turned, so pursuers hit harder until it breaks contact</div>'
+      : fighting ? '<div class="text-xs text-red-400 mb-2">⚔️ In combat — Withdraw pulls it out of the fight</div>' : ''}
     `;
   const convertLine = blobs.some(b => b.convert) ? `<div class="text-xs text-amber-400 mb-2">⚔️ Arming… ready in ~${convertEta(blobs.filter(b => b.convert).reduce((a, b) => (a.convert.done >= b.convert.done ? a : b)).convert)}s — units fight as their old role until then; picking another role cancels</div>` : '';
 
@@ -3059,6 +3153,7 @@ function renderPanelInner(force) {
     </div>
     ${convertLine}
     <div class="grid grid-cols-2 gap-1 mb-2">
+      ${fighting ? '<button data-act="withdraw" class="btn rounded bg-amber-700 hover:bg-amber-600 text-white">🏳️ Withdraw</button>' : ''}
       <button data-act="move" class="btn rounded bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
       <button data-act="pillage" class="btn rounded ${blobs.some(b => b.pillaging) ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 Pillage</button>
       <button data-act="build" class="btn rounded bg-zinc-800 hover:bg-zinc-700 ${tot < S.C.SETT_COST ? 'opacity-40' : ''}" ${tot < S.C.SETT_COST ? 'disabled' : ''}>🏠 Build (${S.C.SETT_COST})</button>
@@ -3182,6 +3277,38 @@ function shotWallGarrison() {
   renderPanel(true);
 }
 
+// Withdraw / in-combat panel states (#201) exist only while a selected
+// group is actually in contact, which no plain URL can reach — so
+// `?shot=withdraw` boots a solo match on a FIXED seed, marches the
+// enemy's opening war party to within 1 tile of the player's, steps a few
+// ticks so the melee registers, selects the player's group and pauses.
+// `?shot=withdraw-active` additionally issues the Withdraw order, so the
+// "🏳️ Withdrawing" line is reachable too. Pure local UI state — no DB
+// writes — so both work in every environment.
+function shotWithdraw(active) {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot201', 'xsmall', 'normal');
+  const mine = g.blobs.find(b => b.owner === 0 && b.count.deploy > 0);
+  const foe = g.blobs.find(b => b.owner === 1 && b.count.deploy > 0);
+  if (!mine || !foe) return;
+  // one tile to the player's right — outside the home settlement's siege
+  // ring, so the shot reads as a clean field engagement
+  foe.x = mine.x + 1; foe.y = mine.y;
+  foe.prevX = foe.x; foe.prevY = foe.y;
+  foe.order = null; foe.path = null; foe.pathGoal = null;
+  startMatch(g);
+  for (let i = 0; i < 3; i++) S.step(g); // registers the melee (meleeT / engagedT)
+  ui.selected = { kind: 'blob', id: mine.id };
+  if (active) dispatchWithdraw([mine]);
+  view.cx = mine.x; view.cy = mine.y; view.scale = 26;
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+}
+
 // ---------------------------------------------------------------- boot
 
 refreshMenu();
@@ -3194,6 +3321,9 @@ startMenuPolling();
 if (!params.get('shot')) startAttract();
 if (SHOT === 'wall-garrison') {
   try { shotWallGarrison(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'withdraw' || SHOT === 'withdraw-active') {
+  try { shotWithdraw(SHOT === 'withdraw-active'); } catch (e) { console.warn('shot link failed', e); }
 }
 
 // Screenshot-state deep links (#200): the wall-garrison panel only exists
