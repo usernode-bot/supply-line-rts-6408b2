@@ -69,7 +69,9 @@ function selIsHome(g, sel) {
 // that reaches the goal counts). ops/acts may also be (game, ui) =>
 // array, for steps whose buttons only apply to one specific selection —
 // e.g. the wall step must not let a pulsing 🧱 arm for the supply
-// carriers left selected by the resupply step.
+// carriers left selected by the resupply step. snap(game, ui, world) —
+// optional tile the step forces an accepted armed tap onto (see
+// snapTarget), so guided placement can't drift off the marked tiles.
 const STEPS = [
   { // 1 — welcome
     next: true,
@@ -257,6 +259,13 @@ const STEPS = [
       if (ui.pending !== 'wall') return null;
       const p = ui.wallStart ? st.wallB : st.wallA;
       return { x: p.x, y: p.y, r: 1.4 };
+    },
+    // taps the ring accepts land on the exact marked tile — a floor of a
+    // ring-edge tap could drift a tile and open the gap back up
+    snap: (g, ui) => {
+      if (ui.pending !== 'wall') return null;
+      const p = ui.wallStart ? st.wallB : st.wallA;
+      return { x: Math.floor(p.x), y: Math.floor(p.y) };
     },
     marker: (g, ui) => {
       if (ui.pending === 'wall') {
@@ -534,6 +543,17 @@ export function allowsTarget(world) {
   const s = STEPS[st.idx];
   const c = s.target ? s.target(st.game, st.ui) : null;
   return !!c && dist(world.x, world.y, c.x, c.y) <= c.r;
+}
+
+// The tile an accepted armed tap should land on, or null when no
+// tutorial runs / the step doesn't pin one. Only answers for taps the
+// step's target ring accepts, so main.js can substitute it for the raw
+// Math.floor of the tapped point.
+export function snapTarget(world) {
+  if (!st) return null;
+  const s = STEPS[st.idx];
+  if (!s.snap || !allowsTarget(world)) return null;
+  return s.snap(st.game, st.ui, world) || null;
 }
 
 // Shake the card so a swallowed input visibly registered.

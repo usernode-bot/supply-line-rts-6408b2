@@ -2162,7 +2162,12 @@ function resolvePending(world, pointerType, screen) {
       updateHint();
       return;
     }
-    const tx = Math.floor(world.x), ty = Math.floor(world.y);
+    // tutorial: an accepted tap snaps to the step's suggested endpoint
+    // tile, so the guided wall lands exactly on the marked tiles — a raw
+    // floor of a ring-edge tap could drift a tile and skew the line
+    const snap = TUT.snapTarget(world);
+    const tx = snap ? snap.x : Math.floor(world.x);
+    const ty = snap ? snap.y : Math.floor(world.y);
     if (tx < 0 || ty < 0 || tx >= game.map.w || ty >= game.map.h) return; // off-map — keep state
     if (!ui.wallStart) {
       ui.wallStart = { x: tx, y: ty };
