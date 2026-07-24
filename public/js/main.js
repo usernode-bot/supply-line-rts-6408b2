@@ -23,7 +23,7 @@ let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1; // displayed speed step 1–4; the sim multiplier is speed × 0.5
 let paused = false;
-let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, fieldRole: null, flowOpen: false, flowFor: null, ping: null, buildSite: null, hover: null, touchMode: 'select' };
+let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, fieldRole: null, flowOpen: false, flowFor: null, modeOpen: false, ping: null, buildSite: null, hover: null, touchMode: 'select' };
 
 // Phone-sized UI (the sm breakpoint that turns the panel into a bottom
 // sheet): mode toggle, contextual tap popups, stats-only panel. Desktop
@@ -1683,6 +1683,93 @@ function attachSplitHold(btn) {
   btn.addEventListener('pointercancel', end);
 }
 
+// Recall the n farthest-out farmers of a settlement (#68) — the close
+// fields stay manned. n falsy means "all".
+function recallFarmers(st, n) {
+  const workers = game.blobs
+    .filter(b => !b.dead && b.owner === me && b.working === st.id)
+    .sort((a, b2) => dist(b2.x, b2.y, st.x + 1, st.y + 1) - dist(a.x, a.y, st.x + 1, st.y + 1));
+  const k = Math.max(1, Math.min(workers.length, n || workers.length));
+  let c = 0;
+  for (const b of workers.slice(0, k)) {
+    if (doMove(b, st.x + 1, st.y + 1).ok) c++;
+  }
+  toast(c ? `🏠 Recalling ${c} farmer${c === 1 ? '' : 's'}` : 'No farmers working the fields');
+}
+
+// Recall gesture (#189): the phone panel's Recall button mirrors the
+// split button's hold UX — a plain tap recalls the shown count,
+// press-and-hold (~350 ms) reveals a fill bar and horizontal drag picks
+// how many farmers come home; release commits, pointercancel aborts.
+let recallHoldConsumed = false; // eat the synthesized click after a hold
+
+function attachRecallHold(btn) {
+  let timer = null, sliding = false, holdX = 0, lastX = 0, value = 1, maxV = 1, startV = 1, row = null, fill = null, pxPerUnit = 4;
+
+  function cleanup() {
+    clearTimeout(timer);
+    timer = null;
+    sliding = false;
+    if (row) { row.remove(); row = null; fill = null; }
+  }
+
+  function update() {
+    if (fill) fill.style.width = (maxV <= 1 ? 100 : Math.round(100 * (value - 1) / (maxV - 1))) + '%';
+    btn.textContent = `Recall ${value}/${maxV}`;
+  }
+
+  btn.addEventListener('pointerdown', (e) => {
+    const st = selectedSettlement();
+    if (!st || S.workingCount(game, st) < 2) return; // nothing to adjust — plain tap covers it
+    try { btn.setPointerCapture(e.pointerId); } catch { }
+    lastX = e.clientX;
+    timer = setTimeout(() => {
+      timer = null;
+      const st2 = selectedSettlement();
+      if (!st2) return;
+      maxV = S.workingCount(game, st2);
+      if (maxV < 2) return;
+      sliding = true;
+      recallHoldConsumed = true;
+      holdX = lastX;
+      startV = Math.max(1, Math.min(maxV, ui.recallCount || maxV));
+      value = startV;
+      row = document.createElement('div');
+      row.className = 'mt-1';
+      row.innerHTML = '<div class="h-2 rounded bg-zinc-700 overflow-hidden"><div class="h-full bg-violet-500"></div></div>';
+      btn.parentElement.insertAdjacentElement('afterend', row);
+      fill = row.firstElementChild.firstElementChild;
+      pxPerUnit = Math.max(3, (panel.offsetWidth - 24) / Math.max(1, maxV - 1));
+      update();
+    }, 350);
+    e.preventDefault();
+  });
+
+  btn.addEventListener('pointermove', (e) => {
+    lastX = e.clientX;
+    if (!sliding) return;
+    value = Math.max(1, Math.min(maxV, startV + Math.round((e.clientX - holdX) / pxPerUnit)));
+    update();
+  });
+
+  function end(e) {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (!sliding) return; // plain tap — the click dispatcher recalls
+    const commit = e.type === 'pointerup';
+    cleanup();
+    if (commit) {
+      ui.recallCount = value;
+      const st = selectedSettlement();
+      // the sim kept ticking during the hold — recallFarmers re-clamps
+      if (st) recallFarmers(st, value);
+    }
+    lastPanelHTML = ''; // the hold mutated the button text — force a rebuild
+    renderPanel(true);
+  }
+  btn.addEventListener('pointerup', end);
+  btn.addEventListener('pointercancel', end);
+}
+
 // Touch build placement (#94): the armed outline sits at ui.buildSite;
 // this floating ✓/✕ pair beside it commits or abandons the site. Re-taps
 // on the map move the outline (resolvePending runs before the popup's
@@ -2034,7 +2121,10 @@ panel.addEventListener('click', (e) => {
       for (const b of blobs) doPillage(b, !b.pillaging);
       break;
     }
-    case 'mode': if (st) doSetMode(st, btn.dataset.mode); break;
+    case 'mode': if (st) { doSetMode(st, btn.dataset.mode); ui.modeOpen = false; } break;
+    // compact phone panel (#189): the production mode row folds behind a
+    // single dropdown button that doubles as the training progress bar
+    case 'modemenu': ui.modeOpen = !ui.modeOpen; break;
     case 'settroute': {
       // settlement-to-settlement supply line (#108): arm target pick
       if (st && st.garrison.supply > 0) {
@@ -2098,20 +2188,10 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'recall': {
-      if (st) {
-        // partial recall (#68): the slider picks how many field hands come
-        // home; the farthest-out farmers return first so the close fields
-        // stay manned
-        const workers = game.blobs
-          .filter(b => !b.dead && b.owner === me && b.working === st.id)
-          .sort((a, b2) => dist(b2.x, b2.y, st.x + 1, st.y + 1) - dist(a.x, a.y, st.x + 1, st.y + 1));
-        const n = Math.max(1, Math.min(workers.length, ui.recallCount || workers.length));
-        let c = 0;
-        for (const b of workers.slice(0, n)) {
-          if (doMove(b, st.x + 1, st.y + 1).ok) c++;
-        }
-        toast(c ? `🏠 Recalling ${c} farmer${c === 1 ? '' : 's'}` : 'No farmers working the fields');
-      }
+      // a hold-commit already recalled (and the browser still synthesizes
+      // a click on the captured button) — eat exactly one
+      if (recallHoldConsumed) { recallHoldConsumed = false; break; }
+      if (st) recallFarmers(st, ui.recallCount || 0);
       break;
     }
   }
@@ -2339,7 +2419,7 @@ function renderPanelInner(force) {
   if (st) {
     // compact phone layout (#189): the food breakdown starts collapsed on
     // each newly selected settlement
-    if (ui.flowFor !== st.id) { ui.flowFor = st.id; ui.flowOpen = false; }
+    if (ui.flowFor !== st.id) { ui.flowFor = st.id; ui.flowOpen = false; ui.modeOpen = false; }
     const mob = isMobile();
     const g = st.garrison;
     const gTot = S.garrisonTotal(st);
@@ -2459,24 +2539,76 @@ function renderPanelInner(force) {
     // garrison fed state (#180): the meter fielded units emerge at
     const gMeter = gTot > 0 ? Math.max(0, Math.min(1, (st.garrFood || 0) / (gTot * S.C.FOOD_PER_UNIT))) : 0;
     const gFedColor = gMeter >= 0.75 ? 'text-emerald-400' : gMeter >= 0.5 ? 'text-lime-400' : gMeter >= 0.25 ? 'text-amber-400' : 'text-red-400';
+    if (mob) {
+      // phone sheet (#189): garrison controls first (they're the reason to
+      // open the panel), production mode as a dropdown button whose
+      // background doubles as the training progress bar, and a
+      // hold-to-adjust Recall button inline with the farmers line
+      const MODES = [['farm', '🌾 Farm'], ['supply', '🚚 Supply'], ['deploy', '⚔️ Deploy'], ['off', '📦 Stockpile']];
+      const curMode = MODES.find(([m]) => m === st.mode) || MODES[0];
+      const training = st.mode === 'off' ? false
+        : st.mode === 'farm' ? wc < y.worthwhileCells
+          : !(gated && st.stockpile > 0);
+      const fillPct = training ? Math.max(0, Math.min(100, pct)) : 0;
+      const warn = (st.mode === 'supply' || st.mode === 'deploy') && gated && st.stockpile > 0
+        ? '<div class="text-xs text-amber-400 mb-1">⏸ Paused — food at break-even. More farmers or fewer mouths to resume.</div>'
+        : (st.mode === 'supply' || st.mode === 'deploy') && st.stockpile <= 0
+          ? '<div class="text-xs text-red-400 mb-1">Training needs food — stockpile empty.</div>' : '';
+      const modeOptions = ui.modeOpen ? `<div class="flex gap-1 mb-1">
+        ${MODES.map(([m, lbl]) => `<button data-act="mode" data-mode="${m}"
+          class="btn-sm flex-1 px-1 rounded ${st.mode === m ? (m === 'off' ? 'bg-zinc-600 text-white' : 'bg-emerald-700 text-white') : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}">${lbl}</button>`).join('')}
+      </div>` : '';
+      setPanelHTML(`
+        <div class="flex items-center justify-between mb-1">
+          <span class="font-semibold">🏠 ${st.name || 'Settlement'}</span>
+          <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
+        </div>
+        <div class="h-1 mb-1 rounded bg-zinc-800 overflow-hidden"><div class="h-full ${hpBarCol}" style="width:${hpBarPct}%"></div></div>
+        ${siegeBanner}
+        <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}${gTot > 0 ? ` · <span class="${gFedColor}">${S.fedLabel(gMeter)}</span>` : ''}</div>
+        ${gTot > 0 ? `
+          <div class="flex gap-1 mb-1">
+            ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
+          </div>
+          ${st.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(st.convert)}s (fielding cancels)</div>` : ''}
+          ${fieldControls}
+          ${garrisonActions}
+        `.replaceAll('data-act="role"', 'data-act="grole"') : ''}
+        <div class="mt-1 pt-1 border-t border-zinc-800">
+          <button data-act="flowdetail" class="block w-full text-left text-xs text-zinc-400 mb-1">${ui.flowOpen ? '▾' : '▸'} Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾 · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></button>
+          ${ui.flowOpen ? `<div class="mb-1 pl-2 border-l border-zinc-800">${flowRows}</div>` : ''}
+          <button data-act="modemenu" class="btn-sm w-full px-2 rounded relative overflow-hidden bg-zinc-800 text-left mb-1">
+            <span class="absolute inset-y-0 left-0 bg-emerald-700/60" style="width:${fillPct}%"></span>
+            <span class="relative flex items-center justify-between"><span>${curMode[1]}</span><span class="text-xs text-zinc-400">${training ? `${fillPct}% · ` : ''}mode ${ui.modeOpen ? '▴' : '▾'}</span></span>
+          </button>
+          ${modeOptions}
+          ${warn}
+        </div>
+        <div class="flex items-center gap-2 mt-1 pt-1 border-t border-zinc-800">
+          <div class="text-xs text-zinc-500 flex-1">🌱 ${wc} farmer${wc === 1 ? '' : 's'} · <b class="text-zinc-300">${y.workedCells}/${st.tilled.length} plots</b> · <b class="${y.workedCells > 0 ? 'text-emerald-400' : 'text-zinc-400'}">${fmtRate(farmContrib)}/s</b>${farmHint}</div>
+          ${wc >= 1 ? `<button data-act="recall" id="recall-hold" style="touch-action:none" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Recall ${rc}</button>` : ''}
+        </div>`);
+      const rb = panel.querySelector('#recall-hold');
+      if (rb && !rb.dataset.holdWired) { rb.dataset.holdWired = '1'; attachRecallHold(rb); }
+      return;
+    }
     setPanelHTML(`
       <div class="flex items-center justify-between mb-1">
         <span class="font-semibold">🏠 ${st.name || 'Settlement'}</span>
         <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
       </div>
-      <div class="${mob ? 'h-1 mb-1' : 'h-2 mb-2'} rounded bg-zinc-800 overflow-hidden"><div class="h-full ${hpBarCol}" style="width:${hpBarPct}%"></div></div>
+      <div class="h-2 mb-2 rounded bg-zinc-800 overflow-hidden"><div class="h-full ${hpBarCol}" style="width:${hpBarPct}%"></div></div>
       ${siegeBanner}
-      ${mob ? `<button data-act="flowdetail" class="block w-full text-left text-xs text-zinc-400 mb-1">${ui.flowOpen ? '▾' : '▸'} Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾 · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></button>
-      ${ui.flowOpen ? `<div class="mb-1 pl-2 border-l border-zinc-800">${flowRows}</div>` : ''}` : `<div class="text-xs text-zinc-400 mb-1">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾
+      <div class="text-xs text-zinc-400 mb-1">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾
         · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></div>
-      <div class="mb-2 pl-2 border-l border-zinc-800">${flowRows}</div>`}
-      ${mob ? '' : `<div class="text-xs text-zinc-500 mb-1">Production mode (sets new units' role)</div>`}
-      <div class="flex gap-1 ${mob ? 'mb-1' : 'mb-2'}">
+      <div class="mb-2 pl-2 border-l border-zinc-800">${flowRows}</div>
+      <div class="text-xs text-zinc-500 mb-1">Production mode (sets new units' role)</div>
+      <div class="flex gap-1 mb-2">
         ${[['farm', '🌾 Farm'], ['supply', '🚚 Supply'], ['deploy', '⚔️ Deploy'], ['off', '📦 Stockpile']].map(([m, lbl]) => `<button data-act="mode" data-mode="${m}"
           class="btn-sm flex-1 px-1 rounded ${st.mode === m ? (m === 'off' ? 'bg-zinc-600 text-white' : 'bg-emerald-700 text-white') : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}">${lbl}</button>`).join('')}
       </div>
       ${prog}
-      <div class="${mob ? 'mt-1 pt-1' : 'mt-2 pt-2'} border-t border-zinc-800">
+      <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500">🌱 ${wc} farmer${wc === 1 ? '' : 's'} · <b class="text-zinc-300">${y.workedCells} of ${st.tilled.length} plots worked</b> · <b class="${y.workedCells > 0 ? 'text-emerald-400' : 'text-zinc-400'}">${fmtRate(farmContrib)} food/s</b>${farmHint}</div>
         ${wc >= 2 ? `
         <div class="flex items-center gap-2 mt-1">
@@ -2484,11 +2616,11 @@ function renderPanelInner(force) {
           <button data-act="recall" id="recall-btn" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Recall ${rc}</button>
         </div>` : wc === 1 ? '<div class="mt-1 text-right"><button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall 1</button></div>' : ''}
       </div>
-      ${mob ? '' : '<div class="text-xs text-zinc-500 mt-1">Farmers claim the lushest free plots — plots poorer than Sparse aren\'t worth manning.</div>'}
-      <div class="${mob ? 'mt-1 pt-1' : 'mt-2 pt-2'} border-t border-zinc-800">
+      <div class="text-xs text-zinc-500 mt-1">Farmers claim the lushest free plots — plots poorer than Sparse aren\'t worth manning.</div>
+      <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}${gTot > 0 ? ` · <span class="${gFedColor}">${S.fedLabel(gMeter)}</span>` : ''}</div>
         ${gTot > 0 ? `
-          <div class="flex gap-1 ${mob ? 'mb-1' : 'mb-2'}">
+          <div class="flex gap-1 mb-2">
             ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
           </div>
           ${st.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(st.convert)}s (fielding cancels)</div>` : ''}

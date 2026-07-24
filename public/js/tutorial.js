@@ -101,7 +101,7 @@ const STEPS = [
   { // 5 — production modes
     text: () => 'A settlement trains one kind of unit at a time. Press the highlighted 🚚 Supply mode — this town will now grow supply units, the haulers of your war effort.',
     ops: ['setMode'],
-    acts: [{ act: 'mode', mode: 'supply' }, 'pselsett'],
+    acts: [{ act: 'mode', mode: 'supply' }, 'modemenu', 'pselsett'],
     select: (g, sel) => selIsHome(g, sel),
     marker: (g, ui) => {
       if (selIsHome(g, ui.selected)) return null; // the button pulses instead
