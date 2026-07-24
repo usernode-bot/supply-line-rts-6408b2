@@ -18,6 +18,7 @@ const token = params.get('token') || '';
 const apiHeaders = token ? { 'x-usernode-token': token } : {};
 const SAVE_KEY = 'supply-line-save-v1';
 const IS_DEMO = params.get('demo') === '1';
+const SHOT = params.get('shot') || ''; // screenshot-state deep link (#199)
 
 let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
@@ -2645,7 +2646,12 @@ function renderPanelInner(force) {
         ${w.building
           ? '<div class="text-xs text-zinc-400">Builders raise it while standing beside the tile — more hands build faster. It can be attacked the whole time.</div>'
           : `<div class="text-xs mb-1 ${prot ? 'text-emerald-400' : 'text-amber-400'}">${prot ? '🛡️ Protected — a garrison holds within 1 tile' : '⚠️ Unprotected — falls fast under attack'}</div>
-        <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${w.garrison.deploy} 🚚${w.garrison.supply} 🌱${w.garrison.farm} / ${S.C.WALL_GARRISON_CAP} · Stockpile <b class="${gFedColor}">🌾 ${Math.floor(w.garrFood || 0)}</b> / ${S.C.WALL_FOOD_CAP}</div>
+        <div class="text-xs text-zinc-500 mb-1">Garrison ${gTot}/${S.C.WALL_GARRISON_CAP}${gTot > 0 ? ' · ' + [
+          w.garrison.deploy ? `⚔️${w.garrison.deploy}` : '',
+          w.garrison.supply ? `🚚${w.garrison.supply}` : '',
+          w.garrison.farm ? `🌱${w.garrison.farm}` : '',
+        ].filter(Boolean).join(' ') : ''}</div>
+        <div class="text-xs text-zinc-500 mb-1">Stockpile <b class="${gFedColor}">🌾 ${Math.floor(w.garrFood || 0)}</b> / ${S.C.WALL_FOOD_CAP}</div>
         ${(() => {
           // inbound wall-garrison supply lines (#187)
           const inW = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'wall' && r2.targetId === w.id);
@@ -3108,6 +3114,44 @@ function frame(ts) {
 
 requestAnimationFrame(frame);
 
+// ---------------------------------------------------------------- screenshot-state deep links
+
+// The wall garrison panel only exists mid-match, so plain navigation
+// can't reach it — before/after screenshots and dapp.json tests would
+// only ever see the main menu. `?shot=wall-garrison` boots a solo match
+// on a FIXED seed, drops a finished wall beside the player's start with
+// a full 8-unit garrison, selects it and pauses, so the panel (and the
+// new cap) renders from a URL alone. Pure local UI state — no DB writes,
+// so it works in every environment.
+function shotWallGarrison() {
+  me = 0;
+  const g = S.newGame('shot199', 'small', 'normal');
+  const start = g.map.starts[0];
+  let spot = null;
+  for (let r = 2; r <= 6 && !spot; r++) {
+    for (let dy = -r; dy <= r && !spot; dy++) {
+      for (let dx = -r; dx <= r && !spot; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = start.x + 1 + dx, y = start.y + 1 + dy;
+        if (S.canPlaceWall(g, 0, x, y).ok) spot = { x, y };
+      }
+    }
+  }
+  if (!spot) return;
+  // a full garrison with all three roles represented — the widest the
+  // readout ever gets, which is exactly what the shot should prove
+  const w = S.spawnFinishedWall(g, 0, spot.x, spot.y, { deploy: 5, supply: 2, farm: 1 });
+  startMatch(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  ui.selected = { kind: 'wall', id: w.id };
+  view.cx = w.x + 0.5;
+  view.cy = w.y + 0.5;
+  view.scale = Math.min(48, view.scale * 1.8);
+  input.clampView();
+  renderPanel(true);
+}
+
 // ---------------------------------------------------------------- boot
 
 refreshMenu();
@@ -3116,3 +3160,6 @@ refreshServerSave();
 loadHistory();
 startMenuPolling();
 startAttract();
+if (SHOT === 'wall-garrison') {
+  try { shotWallGarrison(); } catch (e) { console.warn('shot link failed', e); }
+}
