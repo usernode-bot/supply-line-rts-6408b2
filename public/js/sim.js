@@ -2540,32 +2540,6 @@ function tickSettlement(game, s) {
   } else if (s.starving && s.stockpile >= 5) {
     s.starving = false;
   }
-  // reserve food for docked supply carriers loading here (#193): a
-  // caravan parked at the depot draws from the stockpile at the START of
-  // next tick (tickCarrier runs before tickSettlement), so without this
-  // hold-back everything below — territory feeding and, worst, training —
-  // drains income first and the caravan stalls with empty saddlebags.
-  // Set aside exactly what those docked carriers will take next tick,
-  // AFTER garrison rations (never starve the defenders) but BEFORE
-  // feeding field blobs and investing in production. Recomputed each
-  // tick, restored at the end of this function — no new serialized state.
-  let carrierReserve = 0;
-  {
-    let demand = 0;
-    for (const r of game.routes) {
-      if (r.settlementId !== s.id || r.owner !== s.owner) continue;
-      for (const id of r.carrierIds) {
-        const b = game.blobs.find(x => x.id === id && !x.dead);
-        if (!b || !b.order || b.order.type !== 'route' || b.order.routeId !== r.id || b.order.phase !== 'load') continue;
-        if (dist(b.x, b.y, s.x + 1, s.y + 1) > SUP.LOAD_RANGE) continue;
-        const cap = total(b) * SUP.CARRY_PER_UNIT;
-        demand += Math.min(cap - (b.order.cargo || 0), cap / 20);
-        demand += Math.min(foodCap(b) - b.food, total(b) * 0.1);
-      }
-    }
-    carrierReserve = Math.min(s.stockpile, Math.max(0, demand));
-    s.stockpile -= carrierReserve;
-  }
   // feed friendly blobs inside the territory — armies eat first, then
   // supply units, then farmers, hungriest first within a category (#99).
   // With a healthy stockpile everyone still gets their full share; the
@@ -2592,6 +2566,33 @@ function tickSettlement(game, s) {
       b.food += give;
       if (s.stockpile <= 0.01) break;
     }
+  }
+  // reserve food for docked supply carriers loading here (#193): a
+  // caravan parked at the depot draws from the stockpile at the START of
+  // next tick (tickCarrier runs before tickSettlement), so without this
+  // hold-back the production sink below — worst in a training mode,
+  // which takes max(surplus, drip) every tick — drains income first and
+  // the caravan stalls with empty saddlebags. Set aside exactly what
+  // those docked carriers will take next tick, AFTER garrison rations
+  // and territory feeding (units eating always come first) but BEFORE
+  // investing in training / farmer growth. Recomputed each tick,
+  // restored at the end of this function — no new serialized state.
+  let carrierReserve = 0;
+  {
+    let demand = 0;
+    for (const r of game.routes) {
+      if (r.settlementId !== s.id || r.owner !== s.owner) continue;
+      for (const id of r.carrierIds) {
+        const b = game.blobs.find(x => x.id === id && !x.dead);
+        if (!b || !b.order || b.order.type !== 'route' || b.order.routeId !== r.id || b.order.phase !== 'load') continue;
+        if (dist(b.x, b.y, s.x + 1, s.y + 1) > SUP.LOAD_RANGE) continue;
+        const cap = total(b) * SUP.CARRY_PER_UNIT;
+        demand += Math.min(cap - (b.order.cargo || 0), cap / 20);
+        demand += Math.min(foodCap(b) - b.food, total(b) * 0.1);
+      }
+    }
+    carrierReserve = Math.min(s.stockpile, Math.max(0, demand));
+    s.stockpile -= carrierReserve;
   }
   // production (after everyone has eaten, so it only takes true surplus):
   // in a training mode the tick's net surplus is invested into the unit
@@ -2621,8 +2622,8 @@ function tickSettlement(game, s) {
     }
   }
   // release the docked-carrier hold-back (#193): it survives past
-  // feeding and production untouched, so the caravan draws it first next
-  // tick. Not a flow — carrier loading is already ledgered in tickCarrier.
+  // production untouched, so the caravan draws it first next tick. Not
+  // a flow — carrier loading is already ledgered in tickCarrier.
   s.stockpile += carrierReserve;
   // fold this tick's flow into the EMA (~10 s half-life). One-time
   // transfers (production investment, garrison deposits, fielding
