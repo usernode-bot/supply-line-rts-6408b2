@@ -88,12 +88,13 @@ function randomSeed() { return Math.random().toString(36).slice(2, 10); }
 // -- acquisition: server snapshot first, invisible warm-up as fallback --
 
 async function acquire(sid) {
+  // hold the controller locally: stopAttract can null `fetchCtl` (and
+  // abort the fetch) before the timeout fires, and the timer outlives an
+  // aborted fetch because the throw skips the clearTimeout below
+  const ctl = new AbortController();
+  fetchCtl = ctl;
+  const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT);
   try {
-    // hold the controller locally: stopAttract() nulls the module-level
-    // one the moment a match starts, and the timeout can fire after that
-    const ctl = new AbortController();
-    fetchCtl = ctl;
-    const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT);
     const res = await fetch('/api/attract-snapshot', { signal: ctl.signal });
     clearTimeout(timer);
     if (sid !== session) return;
@@ -107,6 +108,7 @@ async function acquire(sid) {
       }
     }
   } catch { /* aborted, offline, 503, malformed — all fall back */ }
+  clearTimeout(timer);
   if (sid !== session) return;
   beginWarmup();
 }

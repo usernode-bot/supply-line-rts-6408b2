@@ -76,7 +76,7 @@ export const C = {
   WALL_HP: 100,            // per-tile wall structure HP (same scale as SETT_HP)
   WALL_BUILD_TICKS: 120,   // ticks per tile for a SINGLE builder unit (≈24 s at 1×)
   WALL_BUILD_MAX_SPEED: 4, // cap on the √crew-size build multiplier (fastest tile ≈6 s at 1×)
-  WALL_GARRISON_CAP: 4,    // units per wall tile
+  WALL_GARRISON_CAP: 8,    // units per wall tile (#199)
   WALL_FOOD_CAP: 100,      // flat supplies stash per wall tile (#200) — the garrison
                            // refeeds its own bellies from this, never eats it directly
   WALL_NEAR_PROT: 10,      // structure-damage divisor while a friendly garrison is within 1 tile
@@ -911,6 +911,24 @@ function nearGarrisonProtects(game, w) {
 // the drawn protected/unprotected look can never drift from the sim.
 export function wallProtected(game, w) {
   return !w.building && (wallGarrisonTotal(w) > 0 || nearGarrisonProtects(game, w));
+}
+
+// Drop a FINISHED wall tile with a ready garrison and a full larder.
+// Only the ?shot= screenshot deep link (#199) uses it — normal play
+// grows walls through tickWallOrder — so the wall-garrison panel is
+// reachable by navigation alone for screenshots and dapp.json tests.
+export function spawnFinishedWall(game, owner, x, y, garrison) {
+  const i = y * game.map.w + x;
+  if (game.wallAt[i]) return game.walls.find(w => w.id === game.wallAt[i]);
+  const w = {
+    id: game.nextId++, owner, x, y, hp: C.WALL_HP, building: false,
+    garrison: { deploy: 0, supply: 0, farm: 0, ...(garrison || {}) },
+    garrFood: C.WALL_FOOD_CAP,
+    garrLoss: 0, lastHitT: -999, starving: false, convert: null,
+  };
+  game.walls.push(w);
+  game.wallAt[i] = w.id;
+  return w;
 }
 
 function destroyWall(game, w, byCombat) {

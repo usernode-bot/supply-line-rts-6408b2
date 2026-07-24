@@ -36,6 +36,10 @@
     { "name": "Wall panel explains the garrison refeeds from the supplies", "path": "/?shot=wall-panel&demo=1", "expectText": "refills them from these supplies" },
     { "name": "Fed wall garrison shows a food runway in mouths", "path": "/?shot=wall-panel&demo=1", "expectText": "mouths" },
     { "name": "Wall garrison with both pools empty reads Famished", "path": "/?shot=wall-panel-starving&demo=1", "expectText": "Famished" },
-    { "name": "Starving wall garrison warns it fights at half strength", "path": "/?shot=wall-panel-starving&demo=1", "expectText": "fights at half strength" }
+    { "name": "Starving wall garrison warns it fights at half strength", "path": "/?shot=wall-panel-starving&demo=1", "expectText": "fights at half strength" },
+    { "name": "How to Play states the 8-unit wall garrison cap", "path": "/?demo=1", "expectText": "Garrison up to 8 units per tile" },
+    { "name": "Wall garrison panel deep link renders the panel", "path": "/?shot=wall-garrison&demo=1", "expectSelector": "#panel button[data-act=fieldwall]" },
+    { "name": "Wall garrison panel shows the new 8-unit cap when full", "path": "/?shot=wall-garrison&demo=1", "expectText": "Garrison 8/8" },
+    { "name": "Wall garrison panel fields all 8 garrisoned units", "path": "/?shot=wall-garrison&demo=1", "expectText": "Field garrison (8)" }
   ]
 }
