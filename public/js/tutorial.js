@@ -1,4 +1,4 @@
-// Click-through tutorial controller (#185): owns the 12-step script, the
+// Click-through tutorial controller (#185): owns the 13-step script, the
 // input-gating whitelist main.js consults at its dispatch choke points,
 // and the #tutorial-box card. Step state is session-local UI state —
 // never serialized (same policy as control groups).
@@ -8,8 +8,8 @@ import { dist, passable } from './mapgen.js';
 
 const $ = (id) => document.getElementById(id);
 
-let st = null;      // { game, ui, idx, flashUntil, movePoint } while active
-let deps = null;    // { ui, isMobile, onExit, onFinish, onKeepPlaying } from main.js
+let st = null;      // { game, ui, idx, flashUntil, movePoint, wallPoint, camStart } while active
+let deps = null;    // { ui, view, isMobile, onExit, onFinish, onKeepPlaying } from main.js
 let wired = false;
 let lastText = '';
 let lastNudge = 0;
@@ -66,9 +66,23 @@ function selIsHome(g, sel) {
 const STEPS = [
   { // 1 — welcome
     next: true,
-    text: () => 'Welcome to Supply Line! The goal: wipe out the enemy — but every army marches on its stomach. This quick tour covers the basics, then supply lines. You can pan and zoom freely the whole time.',
+    text: () => 'Welcome to Supply Line! The goal: wipe out the enemy — but every army marches on its stomach. This quick tour covers the basics, then supply lines.',
   },
-  { // 2 — select the army
+  { // 2 — move the camera (#198): interactive — completes once the view
+    // center has actually panned, by any modality (keys, drag, edge
+    // scroll, trackpad, minimap). Start position is captured lazily on
+    // the first poll, since the player may pan during the welcome card.
+    text: (m) => m
+      ? 'Look around: drag with one finger to pan and pinch to zoom — or tap the minimap to jump. Pan the camera a little to continue.'
+      : 'Look around: pan the map with WASD or the arrow keys — dragging with the middle mouse button or clicking the minimap works too, and the mouse wheel zooms. Pan the camera a little to continue.',
+    done: () => {
+      const v = deps && deps.view;
+      if (!v) return true; // no camera handle — never block the tour
+      if (!st.camStart) { st.camStart = { cx: v.cx, cy: v.cy }; return false; }
+      return dist(v.cx, v.cy, st.camStart.cx, st.camStart.cy) >= 3;
+    },
+  },
+  { // 3 — select the army
     text: (m) => `This is your army — 10 soldiers camped by your home settlement. ${m ? 'Tap' : 'Click'} the pulsing ring to select it.`,
     select: (g, sel) => selIsArmy(g, sel),
     marker: (g) => { const a = army(g); return a ? { x: a.x, y: a.y, r: 1.8 } : null; },
@@ -91,49 +105,14 @@ const STEPS = [
         && dist(a.order.x, a.order.y, st.movePoint.x, st.movePoint.y) <= 2.5);
     },
   },
-  { // 4 — build a wall (two-phase like step 7: arm the button, then the
-    // two-tap line placement + ✓ confirm, all inside the marked ring)
-    text: (m, g, ui) => {
-      if (ui.pending === 'wall') {
-        if (ui.wallEnd) return 'Press the ✓ Build wall button to confirm — or tap elsewhere in the ring to move the end.';
-        if (ui.wallStart) return `Now ${m ? 'tap' : 'click'} a second tile in the ring to set where the wall ends — the same tile makes a single wall.`;
-        return `${m ? 'Tap' : 'Click'} a tile inside the pulsing ring to set where the wall starts.`;
-      }
-      return m
-        ? 'Enemies can\'t cross finished walls. Tap your selected army and choose the highlighted 🧱 Wall… button.'
-        : 'Enemies can\'t cross finished walls. With your army selected, press the highlighted 🧱 Wall… button.';
-    },
-    ops: ['wallBuild'],
-    acts: ['wall', 'pwallarm', 'pwall', 'pwallx'],
-    select: (g, sel) => selIsArmy(g, sel),
-    target: (g, ui) => ui.pending === 'wall'
-      ? { x: st.wallPoint.x, y: st.wallPoint.y, r: 2.5 } : null,
-    marker: (g, ui) => {
-      if (ui.pending === 'wall') return { x: st.wallPoint.x, y: st.wallPoint.y, r: 2 };
-      if (selIsArmy(g, ui.selected)) return null; // the button pulses instead
-      const a = army(g);
-      return a ? { x: a.x, y: a.y, r: 1.8 } : null;
-    },
-    done: (g) => g.blobs.some(b => b.owner === 0 && !b.dead && b.order && b.order.type === 'wall')
-      || g.walls.some(w => w.owner === 0),
-  },
-  { // 5 — what walls do
-    next: true,
-    text: () => `Your soldiers will raise the wall on their own — any unit can build, and the only price is time. Finished walls stop enemy units while yours pass freely. March units onto a wall tile to garrison it (up to ${S.C.WALL_GARRISON_CAP} per tile): a garrisoned wall fires on enemies beside it and holds up far better, and a supply route can keep it fed.`,
-    marker: (g) => {
-      const w = g.walls.find(x => x.owner === 0);
-      if (w) return { x: w.x + 0.5, y: w.y + 0.5, r: 1.5 };
-      return st.wallPoint ? { x: st.wallPoint.x, y: st.wallPoint.y, r: 1.5 } : null;
-    },
-  },
-  { // 6 — inspect the home settlement
+  { // 5 — inspect the home settlement
     text: (m) => `${m ? 'Tap' : 'Click'} your marked home settlement. Its panel shows the food stockpile, the live income breakdown, and the garrison sheltering inside its walls.`,
     acts: ['pselsett'],
     select: (g, sel) => selIsHome(g, sel),
     marker: (g) => { const h = home(g); return h ? { x: h.x + 1, y: h.y + 1, r: 2.3 } : null; },
     done: (g, ui) => selIsHome(g, ui.selected),
   },
-  { // 7 — production modes
+  { // 6 — production modes
     text: () => 'A settlement trains one kind of unit at a time. Press the highlighted 🚚 Supply mode — this town will now grow supply units, the haulers of your war effort.',
     ops: ['setMode'],
     acts: [{ act: 'mode', mode: 'supply' }, 'modemenu', 'pselsett'],
@@ -145,11 +124,11 @@ const STEPS = [
     },
     done: (g) => { const h = home(g); return !!h && h.mode === 'supply'; },
   },
-  { // 8 — why supply lines matter
+  { // 7 — why supply lines matter
     next: true,
     text: () => 'Why supply? Every unit eats. Near your own settlements armies are fed automatically — but out in enemy land they starve unless they pillage the land or a supply route feeds them. Hungry armies fight badly, and starve at zero.',
   },
-  { // 9 — create the supply line (two-phase: arm the button, pick the destination)
+  { // 8 — create the supply line (two-phase: arm the button, pick the destination)
     text: (m, g, ui) => ui.pending === 'route-sett'
       ? `Now ${m ? 'tap' : 'click'} the marked outpost to set the destination.`
       : 'Time for a supply line. With your home settlement selected, press the highlighted "🚚 Supply route to another settlement…" button.',
@@ -174,7 +153,7 @@ const STEPS = [
         r.owner === 0 && r.settlementId === h.id && r.targetKind === 'settlement' && r.targetId === o.id));
     },
   },
-  { // 10 — watch it work
+  { // 9 — watch it work
     next: true,
     text: () => 'A caravan is loading up at home and hauling food to the outpost — that\'s the marked group on the road. It shuttles back and forth on its own. Raiders love caravans, so in a real match routes need guarding.',
     marker: (g) => {
@@ -184,7 +163,7 @@ const STEPS = [
       return c ? { x: c.x, y: c.y, r: 1.3 } : null;
     },
   },
-  { // 11 — attack
+  { // 10 — attack
     text: (m) => m
       ? 'An enemy war party is camped nearby. Tap your army to select it, then tap the marked enemy and choose ⚔️ Attack. Your troops are fed and rested — theirs won\'t save them.'
       : 'An enemy war party is camped nearby. Select your army, then right-click the marked enemy to attack. Your troops are fed and rested — theirs won\'t save them.',
@@ -195,7 +174,43 @@ const STEPS = [
     marker: (g) => { const e = enemy(g); return e ? { x: e.x, y: e.y, r: 2 } : null; },
     done: (g) => !enemy(g),
   },
-  { // 12 — done
+  { // 11 — build a wall (two-phase like step 8: arm the button, then the
+    // two-tap line placement + ✓ confirm, all inside the marked ring by
+    // the fallen enemy camp)
+    text: (m, g, ui) => {
+      if (ui.pending === 'wall') {
+        if (ui.wallEnd) return 'Press the ✓ Build wall button to confirm — or tap elsewhere in the ring to move the end.';
+        if (ui.wallStart) return `Now ${m ? 'tap' : 'click'} a second tile in the ring to set where the wall ends — the same tile makes a single wall.`;
+        return `${m ? 'Tap' : 'Click'} a tile inside the pulsing ring to set where the wall starts.`;
+      }
+      return m
+        ? 'The field is yours — now hold it. Enemies can\'t cross finished walls. Tap your selected army and choose the highlighted 🧱 Wall… button.'
+        : 'The field is yours — now hold it. Enemies can\'t cross finished walls. With your army selected, press the highlighted 🧱 Wall… button.';
+    },
+    ops: ['wallBuild'],
+    acts: ['wall', 'pwallarm', 'pwall', 'pwallx'],
+    select: (g, sel) => selIsArmy(g, sel),
+    target: (g, ui) => ui.pending === 'wall'
+      ? { x: st.wallPoint.x, y: st.wallPoint.y, r: 2.5 } : null,
+    marker: (g, ui) => {
+      if (ui.pending === 'wall') return { x: st.wallPoint.x, y: st.wallPoint.y, r: 2 };
+      if (selIsArmy(g, ui.selected)) return null; // the button pulses instead
+      const a = army(g);
+      return a ? { x: a.x, y: a.y, r: 1.8 } : null;
+    },
+    done: (g) => g.blobs.some(b => b.owner === 0 && !b.dead && b.order && b.order.type === 'wall')
+      || g.walls.some(w => w.owner === 0),
+  },
+  { // 12 — what walls do
+    next: true,
+    text: () => `Your soldiers will raise the wall on their own — any unit can build, and the only price is time. Finished walls stop enemy units while yours pass freely. March units onto a wall tile to garrison it (up to ${S.C.WALL_GARRISON_CAP} per tile): a garrisoned wall fires on enemies beside it and holds up far better, and a supply route can keep it fed.`,
+    marker: (g) => {
+      const w = g.walls.find(x => x.owner === 0);
+      if (w) return { x: w.x + 0.5, y: w.y + 0.5, r: 1.5 };
+      return st.wallPoint ? { x: st.wallPoint.x, y: st.wallPoint.y, r: 1.5 } : null;
+    },
+  },
+  { // 13 — done
     next: true,
     finish: true,
     text: () => 'Victory! You\'ve covered selecting, moving, wall-building, settlement modes, supply lines, and combat. Keep playing on this map — the enemy commander wakes up — or head back to the menu. Good luck, commander!',
@@ -279,7 +294,7 @@ function syncButtons() {
 
 export function begin(game, d) {
   deps = d;
-  st = { game, ui: d.ui, idx: 0, flashUntil: 0, movePoint: null, wallPoint: null };
+  st = { game, ui: d.ui, idx: 0, flashUntil: 0, movePoint: null, wallPoint: null, camStart: null };
   // Step 3's destination: a passable spot 4–5 tiles from home (just past
   // the fields, still inside home territory so the army stays fed),
   // leaning toward the outpost but kept ≥ 3.5 from both the army's camp
@@ -309,29 +324,32 @@ export function begin(game, d) {
     if (bestPt) break;
   }
   st.movePoint = bestPt || { x: hc.x + dir.x * 4.5, y: hc.y + dir.y * 4.5 };
-  // Step 4's wall site: a placeable tile 1.5–3.5 from the move point
-  // (widening once to 1–5) with at least one placeable 4-neighbor so a
-  // short line always fits, preferring ground away from home so the
-  // ring doesn't sit mostly on farmland. Fallback: the move-point tile
-  // itself — passable, un-tilled and outside settlement grounds by
-  // construction, so canPlaceWall accepts it.
+  // Steps 11–12's wall site: anchored on the enemy camp (coordinates
+  // captured now — the war party is dead by the time the step runs), a
+  // placeable tile 1.5–3.5 from the camp (widening once to 1–5) with at
+  // least one placeable 4-neighbor so a short line always fits,
+  // preferring ground away from the outpost so the ring stays off its
+  // farm ring. Fallback: the camp tile itself — passable, un-settled and
+  // un-tilled by scenario construction, so canPlaceWall accepts it.
+  const e0 = enemy(game);
+  const camp = e0 ? { x: e0.x, y: e0.y } : oc;
   let bestW = null;
   for (const [lo, hi] of [[1.5, 3.5], [1, 5]]) {
     for (let ty = 1; ty < game.map.h - 1; ty++) {
       for (let tx = 1; tx < game.map.w - 1; tx++) {
         const px = tx + 0.5, py = ty + 0.5;
-        const d = dist(px, py, st.movePoint.x, st.movePoint.y);
+        const d = dist(px, py, camp.x, camp.y);
         if (d < lo || d > hi) continue;
         if (S.canPlaceWall(game, 0, tx, ty).err) continue;
         if (![[1, 0], [-1, 0], [0, 1], [0, -1]]
           .some(([nx, ny]) => !S.canPlaceWall(game, 0, tx + nx, ty + ny).err)) continue;
-        const score = dist(px, py, hc.x, hc.y);
+        const score = dist(px, py, oc.x, oc.y);
         if (!bestW || score > bestW.score) bestW = { x: px, y: py, score };
       }
     }
     if (bestW) break;
   }
-  st.wallPoint = bestW || { x: Math.floor(st.movePoint.x) + 0.5, y: Math.floor(st.movePoint.y) + 0.5 };
+  st.wallPoint = bestW || { x: Math.floor(camp.x) + 0.5, y: Math.floor(camp.y) + 0.5 };
   wire();
   lastText = '';
   render(game, d.ui);

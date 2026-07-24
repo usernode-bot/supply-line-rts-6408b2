@@ -241,7 +241,7 @@ function startTutorial() {
     me = 0;
     const g = S.newTutorialGame();
     startMatch(g);
-    TUT.begin(g, { ui, isMobile, onExit: confirmExitTutorial, onFinish: finishTutorial, onKeepPlaying: keepPlayingTutorial });
+    TUT.begin(g, { ui, view, isMobile, onExit: confirmExitTutorial, onFinish: finishTutorial, onKeepPlaying: keepPlayingTutorial });
   } catch (e) {
     showMenuError('Could not start the tutorial: ' + (e && e.message || e));
   }
