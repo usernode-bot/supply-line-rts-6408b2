@@ -495,7 +495,7 @@ function makeBlob(game, owner, x, y, count, units) {
     pillaging: false, working: null,
     facing: 0,                    // radians; movement/combat facing (#108, serialized)
     convert: null,                // pending arm-up {role:'deploy', done:tick} (#108, serialized)
-    engagedT: -999, meleeT: -999, chaseId: null,
+    engagedT: -999, meleeT: -999, rearT: -999, chaseId: null,
     dead: false, mergedInto: null,
     noMerge: false,               // set on split; cleared when a move order completes
     lastYieldT: game.tick,        // last tick pillaging yielded food (transient)
@@ -2518,7 +2518,14 @@ function tickCombat(game) {
       if (amt > 0) {
         if (!hitBy.has(v)) hitBy.set(v, new Map());
         hitBy.get(v).set(e.attacker, (hitBy.get(v).get(e.attacker) || 0) + amt);
-        if (mult > 1) e.link.rear = true; // renderer highlights the bonus link
+        if (mult > 1) {
+          e.link.rear = true; // renderer highlights the bonus link
+          // per-victim mark for the panel's rear-attack line (#201):
+          // link.rear is shared by both directions of the pair, so it
+          // can't say WHO took the bonus hit — this can. Transient like
+          // engagedT/meleeT: never serialized, refreshed while it lasts.
+          v.rearT = game.tick;
+        }
       }
     }
   }
@@ -3811,7 +3818,7 @@ export function deserialize(data, prev) {
       path: null, pathGoal: null,
       pillaging: bd.pillaging, working: bd.working != null ? bd.working : null,
       facing: bd.facing || 0, convert: bd.convert || null,
-      engagedT: -999, meleeT: -999, chaseId: null, dead: false, mergedInto: null,
+      engagedT: -999, meleeT: -999, rearT: -999, chaseId: null, dead: false, mergedInto: null,
       noMerge: !!bd.noMerge, lastYieldT: data.tick, starving: false,
       lowFood: false, zeroSince: -1,
       foodWin: [],

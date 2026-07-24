@@ -67,7 +67,7 @@ function spawnBlob(game, owner, x, y, deploy, supply) {
     food: (deploy + (supply || 0)) * 10,
     order: null, path: null, pathGoal: null,
     pillaging: false, working: null, facing: 0, convert: null,
-    engagedT: -999, meleeT: -999, chaseId: null,
+    engagedT: -999, meleeT: -999, rearT: -999, chaseId: null,
     dead: false, mergedInto: null, noMerge: false,
     lastYieldT: game.tick, starving: false, lowFood: false, zeroSince: -1, foodWin: [],
   };
@@ -846,15 +846,23 @@ function hpOf(b) { return b.units.reduce((a, u) => a + u.hp, 0); }
     S.opMove(g, p, v.x, v.y, { kind: 'blob', id: v.id }); // pursue
     if (withdraw) S.opMove(g, v, area.x + 6.5, area.y + 0.5); // run, back to the foe
     const before = hpOf(v);
-    run(g, 40);
-    return before - hpOf(v);
+    // sample the panel's rear-hit window (#201) mid-pursuit: rearT is the
+    // per-victim mark of the same event that flags link.rear
+    let rearFresh = false;
+    for (let i = 0; i < 40; i++) {
+      S.step(g);
+      if (i === 20) rearFresh = g.tick - v.rearT < 5;
+    }
+    return { loss: before - hpOf(v), rearFresh };
   }
   const stood = trial(false);
   const ran = trial(true);
   check('both trials ran', stood != null && ran != null);
   if (stood != null && ran != null) {
-    check(`a withdrawing group takes more damage (${ran.toFixed(1)} vs ${stood.toFixed(1)} HP)`,
-      ran > stood * 1.1, `stand=${stood.toFixed(2)} withdraw=${ran.toFixed(2)}`);
+    check(`a withdrawing group takes more damage (${ran.loss.toFixed(1)} vs ${stood.loss.toFixed(1)} HP)`,
+      ran.loss > stood.loss * 1.1, `stand=${stood.loss.toFixed(2)} withdraw=${ran.loss.toFixed(2)}`);
+    check('the withdrawer is marked rear-hit (rearT fresh mid-pursuit)', ran.rearFresh);
+    check('the standing victim is never marked rear-hit (lone frontal attacker)', !stood.rearFresh);
   }
 }
 

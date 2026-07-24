@@ -1347,9 +1347,6 @@ function onRightClick(world) {
 // visibly reads as "go work that plot", not a plain move.
 function orderMove(blobs, world, target) {
   let err = null, ok = 0, fielded = 0;
-  // an auto-picked target overriding a move for a group already in
-  // contact used to look like "my army ignores me" (#201) — name it
-  const wasFighting = !!target && blobs.some(inCombat);
   for (const b of blobs) {
     const r = doMove(b, world.x, world.y, target);
     if (r.err) err = r.err;
@@ -1358,7 +1355,6 @@ function orderMove(blobs, world, target) {
   if (ok) pingOrder(world, target);
   if (fielded) toast(`🌱 ${fielded} farmer${fielded === 1 ? '' : 's'} heading to the fields`);
   else if (err) toast(err);
-  else if (ok && wasFighting) toast('⚔️ Attacking — order a plain move to break off');
 }
 
 // Brief destination animation so a move/attack order visibly lands (#71).
@@ -3053,10 +3049,11 @@ function renderPanelInner(force) {
   }
   // group build (#130): an under-strength founding party holding its site
   const waitingBuild = blobs.some(b => b.order && b.order.type === 'move' && b.order.build && b.order.waiting);
-  // combat state (#201): "why isn't my army moving" must be answerable
-  // from the panel — and it names the way out (a plain move order)
+  // combat state (#201): "is my army actually in a fight?" and "why is
+  // its HP draining so fast?" are both answerable from the panel. rearT
+  // marks the same event the map's thick orange attack link draws.
   const fighting = blobs.some(inCombat);
-  const withdrawing = blobs.some(b => b.order && b.order.type === 'move' && b.order.disengage);
+  const rearHit = blobs.some(b => game.tick - b.rearT < 5);
   const hpSum = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + u.hp, 0), 0);
   const hpMax = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + S.unitMaxHP(u.role), 0), 0);
   const hpPct = Math.round(100 * hpSum / Math.max(1, hpMax));
@@ -3081,8 +3078,8 @@ function renderPanelInner(force) {
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
     <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
-    ${fighting ? '<div class="text-xs text-red-400 mb-1">⚔️ In combat — a move order breaks it off</div>' : ''}
-    ${withdrawing ? '<div class="text-xs text-amber-300 mb-2">🏳️ Withdrawing — backs turned, so pursuers hit harder until it breaks contact</div>' : ''}
+    ${fighting ? `<div class="text-xs text-red-400 ${rearHit ? 'mb-1' : 'mb-2'}">⚔️ In combat</div>` : ''}
+    ${rearHit ? '<div class="text-xs text-orange-400 mb-2">⚠️ Rear attack — taking extra damage from behind</div>' : ''}
     `;
   const convertLine = blobs.some(b => b.convert) ? `<div class="text-xs text-amber-400 mb-2">⚔️ Arming… ready in ~${convertEta(blobs.filter(b => b.convert).reduce((a, b) => (a.convert.done >= b.convert.done ? a : b)).convert)}s — units fight as their old role until then; picking another role cancels</div>` : '';
 
@@ -3223,16 +3220,18 @@ function shotWallGarrison() {
   renderPanel(true);
 }
 
-// The in-combat / withdrawing panel lines (#201) exist only while a
-// selected group is actually in contact, which no plain URL can reach —
-// so `?shot=withdraw-active` boots a solo match on a FIXED seed, marches
-// the enemy's opening war party to within 1 tile of the player's, steps a
-// few ticks so the melee registers, then issues an ordinary move order
-// away from the fight (the withdrawal itself: opMove flags it because the
-// group is in melee). Both status lines render, the group is selected and
-// the sim is paused. Pure local UI state — no DB writes — so it works in
-// every environment.
-function shotWithdrawing() {
+// The in-combat / rear-attack panel lines (#201) exist only while a
+// selected group is actually under fire, which no plain URL can reach —
+// so `?shot=in-combat` boots a solo match on a FIXED seed and stages a
+// pursuit: the enemy's opening war party is placed 1 tile from the
+// player's, the melee registers, then the player's group is ordered away
+// (a plain move — opMove flags it as a disengagement because contact is
+// live) while the enemy holds an attack order on it. A few more ticks and
+// the pursuer is landing REAR_MULT hits from directly behind, so BOTH
+// status lines render off honest sim output. The group is selected and
+// the sim paused, freezing the < 5-tick windows. Pure local UI state —
+// no DB writes — so it works in every environment.
+function shotInCombat() {
   clearSaves();
   me = 0;
   const g = S.newGame('shot201', 'xsmall', 'normal');
@@ -3247,10 +3246,14 @@ function shotWithdrawing() {
   startMatch(g);
   for (let i = 0; i < 3; i++) S.step(g); // registers the melee (meleeT / engagedT)
   ui.selected = { kind: 'blob', id: mine.id };
-  // break off toward home — a plain move, exactly what a player right-click
-  // issues; the sim marks it as a disengagement because contact is live
+  // the pursuit: enemy locks onto the player's group (direct sim call —
+  // it's the AI's side), the player's group breaks off with a plain move
+  // exactly like a right-click; running with its back turned puts the
+  // pursuer in its rear arc, and pass 2 refreshes rearT every tick
+  S.opMove(g, foe, mine.x, mine.y, { kind: 'blob', id: mine.id });
   const home = g.settlements.find(s => s.owner === 0);
   if (home) doMove(mine, home.x + 1, home.y + 1, null);
+  for (let i = 0; i < 5; i++) S.step(g);
   view.cx = mine.x; view.cy = mine.y; view.scale = 26;
   paused = true;
   $('btn-pause').textContent = '▶';
@@ -3272,8 +3275,8 @@ if (!params.get('shot')) startAttract();
 if (SHOT === 'wall-garrison') {
   try { shotWallGarrison(); } catch (e) { console.warn('shot link failed', e); }
 }
-if (SHOT === 'withdraw-active') {
-  try { shotWithdrawing(); } catch (e) { console.warn('shot link failed', e); }
+if (SHOT === 'in-combat') {
+  try { shotInCombat(); } catch (e) { console.warn('shot link failed', e); }
 }
 
 // Screenshot-state deep links (#200): the wall-garrison panel only exists
