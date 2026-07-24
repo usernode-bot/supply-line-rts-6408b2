@@ -1,4 +1,4 @@
-// Click-through tutorial controller (#185): owns the 13-step script, the
+// Click-through tutorial controller (#185): owns the 14-step script, the
 // input-gating whitelist main.js consults at its dispatch choke points,
 // and the #tutorial-box card. Step state is session-local UI state —
 // never serialized (same policy as control groups).
@@ -8,7 +8,7 @@ import { dist, passable } from './mapgen.js';
 
 const $ = (id) => document.getElementById(id);
 
-let st = null;      // { game, ui, idx, flashUntil, movePoint, wallPoint, camStart } while active
+let st = null;      // { game, ui, idx, flashUntil, movePoint, wallA, wallB, camStart } while active
 let deps = null;    // { ui, view, isMobile, onExit, onFinish, onKeepPlaying } from main.js
 let wired = false;
 let lastText = '';
@@ -32,23 +32,27 @@ const home = (g) => g.settlements.find(s => s.id === g.tutorialIds.home) || null
 const outpost = (g) => g.settlements.find(s => s.id === g.tutorialIds.outpost) || null;
 const army = (g) => resolveBlob(g, g.tutorialIds.army);
 const enemy = (g) => resolveBlob(g, g.tutorialIds.enemy);
+const carriers = (g) => resolveBlob(g, g.tutorialIds.carriers);
 
-function selIsArmy(g, sel) {
-  if (!sel) return false;
-  const a = army(g);
-  if (!a) return false;
+// Whether the selection is exactly the tracked blob (alone or as every
+// member of a multi-select), following the merge log.
+function selIsTracked(g, sel, tracked) {
+  if (!sel || !tracked) return false;
   if (sel.kind === 'blob') {
     const b = resolveBlob(g, sel.id);
-    return !!b && b.id === a.id;
+    return !!b && b.id === tracked.id;
   }
   if (sel.kind === 'multi') {
     return sel.ids.length > 0 && sel.ids.every(id => {
       const b = resolveBlob(g, id);
-      return !!b && b.id === a.id;
+      return !!b && b.id === tracked.id;
     });
   }
   return false;
 }
+
+const selIsArmy = (g, sel) => selIsTracked(g, sel, army(g));
+const selIsCarriers = (g, sel) => selIsTracked(g, sel, carriers(g));
 
 function selIsHome(g, sel) {
   const h = home(g);
@@ -88,7 +92,7 @@ const STEPS = [
     marker: (g) => { const a = army(g); return a ? { x: a.x, y: a.y, r: 1.8 } : null; },
     done: (g, ui) => selIsArmy(g, ui.selected),
   },
-  { // 3 — move out
+  { // 4 — move out
     text: (m) => m
       ? 'March to the marked spot: tap your selected army, choose 📍 Move…, then tap the pulsing marker.'
       : 'March to the marked spot: right-click the marker — or press 📍 Move in the panel, then click the marker.',
@@ -174,26 +178,82 @@ const STEPS = [
     marker: (g) => { const e = enemy(g); return e ? { x: e.x, y: e.y, r: 2 } : null; },
     done: (g) => !enemy(g),
   },
-  { // 11 — build a wall (two-phase like step 8: arm the button, then the
-    // two-tap line placement + ✓ confirm, all inside the marked ring by
-    // the fallen enemy camp)
+  { // 11 — resupply the army in the field: put the supply band camped by
+    // the outpost onto a route feeding the army — the select-units-then-
+    // route flow, including the load-from tap that garrison sourcing
+    // (step 8) skips. Four phases, each with its own ring/pulse.
+    text: (m, g, ui) => {
+      const o = outpost(g);
+      const oName = (o && o.name) || 'the outpost';
+      if (ui.pending === 'route') {
+        return ui.routeSrc != null
+          ? `Now ${m ? 'tap' : 'click'} your army in the field to set the destination.`
+          : `First ${m ? 'tap' : 'click'} ${oName} — the settlement the caravan will load food from.`;
+      }
+      if (selIsCarriers(g, ui.selected)) {
+        return m
+          ? 'Tap the selected supply units again and choose the highlighted 🚚 Supply route… button.'
+          : 'Press the highlighted 🚚 Supply route… button.';
+      }
+      return `Your army won — but far from your territory, units go hungry: they must pillage or be resupplied. Supply units are camped outside ${oName} — ${m ? 'tap' : 'click'} the marked group to select them.`;
+    },
+    ops: ['route'],
+    acts: ['route', 'proutearm'],
+    select: (g, sel) => selIsCarriers(g, sel),
+    target: (g, ui) => {
+      if (ui.pending !== 'route') return null;
+      if (ui.routeSrc == null) {
+        const o = outpost(g);
+        return o ? { x: o.x + 1, y: o.y + 1, r: 2.4 } : null;
+      }
+      const a = army(g);
+      return a ? { x: a.x, y: a.y, r: 2.5 } : null;
+    },
+    marker: (g, ui) => {
+      if (ui.pending === 'route') {
+        if (ui.routeSrc == null) {
+          const o = outpost(g);
+          return o ? { x: o.x + 1, y: o.y + 1, r: 2.3 } : null;
+        }
+        const a = army(g);
+        return a ? { x: a.x, y: a.y, r: 2 } : null;
+      }
+      if (selIsCarriers(g, ui.selected)) return null; // the button pulses instead
+      const c = carriers(g);
+      return c ? { x: c.x, y: c.y, r: 1.8 } : null;
+    },
+    done: (g) => {
+      const o = outpost(g);
+      return !!o && g.routes.some(r => r.owner === 0 && r.settlementId === o.id && r.targetKind === 'blob');
+    },
+  },
+  { // 12 — build a wall: seal the mountain gap west of the fallen camp.
+    // Two rings guide the exact endpoints — A just below the mountain's
+    // southern tip, B diagonally down-left toward the far chain — so the
+    // confirmed line plugs the corridor the army just fought through.
     text: (m, g, ui) => {
       if (ui.pending === 'wall') {
-        if (ui.wallEnd) return 'Press the ✓ Build wall button to confirm — or tap elsewhere in the ring to move the end.';
-        if (ui.wallStart) return `Now ${m ? 'tap' : 'click'} a second tile in the ring to set where the wall ends — the same tile makes a single wall.`;
-        return `${m ? 'Tap' : 'Click'} a tile inside the pulsing ring to set where the wall starts.`;
+        if (ui.wallEnd) return 'Press the ✓ Build wall button to confirm — or tap elsewhere to move the end.';
+        if (ui.wallStart) return `Now ${m ? 'tap' : 'click'} the second marked tile to close the gap between the mountains.`;
+        return `${m ? 'Tap' : 'Click'} the marked tile just below the mountain to start the wall.`;
       }
       return m
-        ? 'The field is yours — now hold it. Enemies can\'t cross finished walls. Tap your selected army and choose the highlighted 🧱 Wall… button.'
-        : 'The field is yours — now hold it. Enemies can\'t cross finished walls. With your army selected, press the highlighted 🧱 Wall… button.';
+        ? 'Now hold what you took: enemies can\'t cross finished walls. Tap your army, then tap it again and choose the highlighted 🧱 Wall… button.'
+        : 'Now hold what you took: enemies can\'t cross finished walls. Select your army, then press the highlighted 🧱 Wall… button.';
     },
     ops: ['wallBuild'],
     acts: ['wall', 'pwallarm', 'pwall', 'pwallx'],
     select: (g, sel) => selIsArmy(g, sel),
-    target: (g, ui) => ui.pending === 'wall'
-      ? { x: st.wallPoint.x, y: st.wallPoint.y, r: 2.5 } : null,
+    target: (g, ui) => {
+      if (ui.pending !== 'wall') return null;
+      const p = ui.wallStart ? st.wallB : st.wallA;
+      return { x: p.x, y: p.y, r: 1.4 };
+    },
     marker: (g, ui) => {
-      if (ui.pending === 'wall') return { x: st.wallPoint.x, y: st.wallPoint.y, r: 2 };
+      if (ui.pending === 'wall') {
+        const p = ui.wallStart ? st.wallB : st.wallA;
+        return { x: p.x, y: p.y, r: 1.2 };
+      }
       if (selIsArmy(g, ui.selected)) return null; // the button pulses instead
       const a = army(g);
       return a ? { x: a.x, y: a.y, r: 1.8 } : null;
@@ -201,16 +261,17 @@ const STEPS = [
     done: (g) => g.blobs.some(b => b.owner === 0 && !b.dead && b.order && b.order.type === 'wall')
       || g.walls.some(w => w.owner === 0),
   },
-  { // 12 — what walls do
+  { // 13 — what walls do
     next: true,
     text: () => `Your soldiers will raise the wall on their own — any unit can build, and the only price is time. Finished walls stop enemy units while yours pass freely. March units onto a wall tile to garrison it (up to ${S.C.WALL_GARRISON_CAP} per tile): a garrisoned wall fires on enemies beside it and holds up far better, and a supply route can keep it fed.`,
     marker: (g) => {
       const w = g.walls.find(x => x.owner === 0);
       if (w) return { x: w.x + 0.5, y: w.y + 0.5, r: 1.5 };
-      return st.wallPoint ? { x: st.wallPoint.x, y: st.wallPoint.y, r: 1.5 } : null;
+      if (!st.wallA) return null;
+      return { x: (st.wallA.x + st.wallB.x) / 2, y: (st.wallA.y + st.wallB.y) / 2, r: 1.5 };
     },
   },
-  { // 13 — done
+  { // 14 — done
     next: true,
     finish: true,
     text: () => 'Victory! You\'ve covered selecting, moving, wall-building, settlement modes, supply lines, and combat. Keep playing on this map — the enemy commander wakes up — or head back to the menu. Good luck, commander!',
@@ -294,7 +355,7 @@ function syncButtons() {
 
 export function begin(game, d) {
   deps = d;
-  st = { game, ui: d.ui, idx: 0, flashUntil: 0, movePoint: null, wallPoint: null, camStart: null };
+  st = { game, ui: d.ui, idx: 0, flashUntil: 0, movePoint: null, wallA: null, wallB: null, camStart: null };
   // Step 3's destination: a passable spot 4–5 tiles from home (just past
   // the fields, still inside home territory so the army stays fed),
   // leaning toward the outpost but kept ≥ 3.5 from both the army's camp
@@ -324,32 +385,53 @@ export function begin(game, d) {
     if (bestPt) break;
   }
   st.movePoint = bestPt || { x: hc.x + dir.x * 4.5, y: hc.y + dir.y * 4.5 };
-  // Steps 11–12's wall site: anchored on the enemy camp (coordinates
-  // captured now — the war party is dead by the time the step runs), a
-  // placeable tile 1.5–3.5 from the camp (widening once to 1–5) with at
-  // least one placeable 4-neighbor so a short line always fits,
-  // preferring ground away from the outpost so the ring stays off its
-  // farm ring. Fallback: the camp tile itself — passable, un-settled and
-  // un-tilled by scenario construction, so canPlaceWall accepts it.
+  // Step 12's wall line: seal the mountain gap west of the enemy camp
+  // (coordinates captured now — the war party is dead by the time the
+  // step runs). Walk: first mountain tile west of the camp row, down its
+  // column to the southern tip, A = the tile just below it, then B =
+  // extend diagonally down-left while tiles stay placeable — on the
+  // tutorial seed that plugs the corridor between the two chains.
+  // Fallbacks: no gap found → the widest clear tile near the camp; no
+  // such tile → the camp tile itself (passable, un-settled and un-tilled
+  // by scenario construction, so canPlaceWall accepts it).
   const e0 = enemy(game);
-  const camp = e0 ? { x: e0.x, y: e0.y } : oc;
-  let bestW = null;
-  for (const [lo, hi] of [[1.5, 3.5], [1, 5]]) {
-    for (let ty = 1; ty < game.map.h - 1; ty++) {
-      for (let tx = 1; tx < game.map.w - 1; tx++) {
-        const px = tx + 0.5, py = ty + 0.5;
-        const d = dist(px, py, camp.x, camp.y);
-        if (d < lo || d > hi) continue;
-        if (S.canPlaceWall(game, 0, tx, ty).err) continue;
-        if (![[1, 0], [-1, 0], [0, 1], [0, -1]]
-          .some(([nx, ny]) => !S.canPlaceWall(game, 0, tx + nx, ty + ny).err)) continue;
-        const score = dist(px, py, oc.x, oc.y);
-        if (!bestW || score > bestW.score) bestW = { x: px, y: py, score };
-      }
+  const camp = e0 ? { x: Math.floor(e0.x), y: Math.floor(e0.y) } : { x: o.x, y: o.y };
+  const mtn = (x, y) => x >= 0 && y >= 0 && x < game.map.w && y < game.map.h
+    && !!game.map.mountain[y * game.map.w + x];
+  const placeable = (x, y) => x >= 0 && y >= 0 && x < game.map.w && y < game.map.h
+    && !S.canPlaceWall(game, 0, x, y).err;
+  let A = null;
+  for (const dy of [0, -1, 1]) {
+    const ry = camp.y + dy;
+    for (let x = camp.x - 1; x >= Math.max(0, camp.x - 8); x--) {
+      if (!mtn(x, ry)) continue;
+      let tipY = ry;
+      while (mtn(x, tipY + 1)) tipY++;
+      if (placeable(x, tipY + 1)) A = { x, y: tipY + 1 };
+      break; // the first mountain west on this row decides; else try the next row
     }
-    if (bestW) break;
+    if (A) break;
   }
-  st.wallPoint = bestW || { x: Math.floor(camp.x) + 0.5, y: Math.floor(camp.y) + 0.5 };
+  if (!A) {
+    let bestW = null;
+    for (const [lo, hi] of [[1.5, 3.5], [1, 5]]) {
+      for (let ty = 1; ty < game.map.h - 1; ty++) {
+        for (let tx = 1; tx < game.map.w - 1; tx++) {
+          const d = dist(tx + 0.5, ty + 0.5, camp.x + 0.5, camp.y + 0.5);
+          if (d < lo || d > hi) continue;
+          if (!placeable(tx, ty)) continue;
+          const score = dist(tx + 0.5, ty + 0.5, oc.x, oc.y);
+          if (!bestW || score > bestW.score) bestW = { x: tx, y: ty, score };
+        }
+      }
+      if (bestW) break;
+    }
+    A = bestW ? { x: bestW.x, y: bestW.y } : { x: camp.x, y: camp.y };
+  }
+  let B = { x: A.x, y: A.y };
+  for (let k = 0; k < 3 && placeable(B.x - 1, B.y + 1); k++) B = { x: B.x - 1, y: B.y + 1 };
+  st.wallA = { x: A.x + 0.5, y: A.y + 0.5 };
+  st.wallB = { x: B.x + 0.5, y: B.y + 0.5 };
   wire();
   lastText = '';
   render(game, d.ui);
