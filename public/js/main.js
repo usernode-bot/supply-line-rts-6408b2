@@ -23,7 +23,7 @@ let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1; // displayed speed step 1–4; the sim multiplier is speed × 0.5
 let paused = false;
-let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, fieldRole: null, flowOpen: false, flowFor: null, modeOpen: false, ping: null, buildSite: null, hover: null, touchMode: 'select' };
+let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, fieldRole: null, flowOpen: false, flowFor: null, modeOpen: false, ping: null, buildSite: null, wallStart: null, wallEnd: null, hover: null, touchMode: 'select' };
 
 // Phone-sized UI (the sm breakpoint that turns the panel into a bottom
 // sheet): mode toggle, contextual tap popups, stats-only panel. Desktop
@@ -811,6 +811,21 @@ function doSiegeRun(routeId, on) {
   if (inPvp()) sendCmd({ op: 'siegeRun', routeId, on: !!on });
   return S.opSiegeRun(game, routeId, !!on);
 }
+function doBuildWalls(b, tiles) {
+  if (tutBlocked('wallBuild')) return TUT_BLOCKED;
+  if (inPvp()) sendCmd({ op: 'wallBuild', blobId: b.id, tiles });
+  return S.opBuildWalls(game, b, tiles);
+}
+function doFieldWall(w) {
+  if (tutBlocked('fieldWall')) return TUT_BLOCKED;
+  if (inPvp()) sendCmd({ op: 'fieldWall', wallId: w.id });
+  return S.opFieldWall(game, w.id);
+}
+function doWallRole(w, role) {
+  if (tutBlocked('wallRole')) return TUT_BLOCKED;
+  if (inPvp()) sendCmd({ op: 'wallRole', wallId: w.id, role });
+  return S.opWallGarrisonRole(game, w.id, role);
+}
 
 // ---------------------------------------------------------------- match lifecycle
 
@@ -818,7 +833,7 @@ function startMatch(g) {
   stopAttract(); // the menu backdrop must cost nothing while playing
   game = g;
   resultPosted = false;
-  ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, hover: null, touchMode: 'select' };
+  ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, wallStart: null, wallEnd: null, hover: null, touchMode: 'select' };
   groups = {};
   hideOrderPopup();
   acc = 0; speed = 1; paused = false; lastSaveTick = g.tick;
@@ -1045,6 +1060,23 @@ function settlementAtFootprint(world) {
   return id ? game.settlements.find(s => s.id === id) || null : null;
 }
 
+// Exact per-tile wall hit test (#187), the wall analogue of the
+// footprint-first settlement lookup.
+function wallAtPoint(world) {
+  const tx = Math.floor(world.x), ty = Math.floor(world.y);
+  if (tx < 0 || ty < 0 || tx >= game.map.w || ty >= game.map.h) return null;
+  const id = game.wallAt[ty * game.map.w + tx];
+  return id ? game.walls.find(w => w.id === id) || null : null;
+}
+
+// Whether the viewer may see/target this enemy wall: currently visible
+// or remembered in the viewer's wall memory.
+function wallKnown(w) {
+  return w.owner === me
+    || S.isVisible(game, w.x + 0.5, w.y + 0.5)
+    || !!(game.wallMemo && game.wallMemo[w.id]);
+}
+
 // Tutorial gate (#185): decide whether a map tap serves the current step
 // BEFORE onTap's dispatch runs — disallowed taps are swallowed + nudged,
 // so nothing off-script can be selected or ordered.
@@ -1109,6 +1141,16 @@ function onTap(world, pointerType, screen) {
     renderPanel(true);
     return;
   }
+  // own wall (#187): exact-tile hit, like the settlement footprint. With
+  // units in hand on mobile, the tap is ambiguous — the order popup's
+  // Move onto the tile garrisons on arrival.
+  const wl = wallAtPoint(world);
+  if (wl && wl.owner === me) {
+    if (mobile && sel.length > 0) { showOrderPopup(world, screen, null); return; }
+    ui.selected = { kind: 'wall', id: wl.id };
+    renderPanel(true);
+    return;
+  }
   const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
   if (st && st.owner === me) {
     if (mobile && sel.length) {
@@ -1146,6 +1188,11 @@ function onTap(world, pointerType, screen) {
     renderPanel(true);
     return;
   }
+  if (wl && wl.owner !== me && wallKnown(wl)) {
+    ui.selected = { kind: 'enemy-wall', id: wl.id };
+    renderPanel(true);
+    return;
+  }
   if (st && st.owner !== me && (S.settVisible(game, st) || known[st.id])) {
     ui.selected = { kind: 'enemy-settlement', id: st.id };
     renderPanel(true);
@@ -1180,6 +1227,8 @@ function onBox(rect, additive) {
   if (ui.pending) {
     ui.pending = null;
     ui.buildSite = null;
+    ui.wallStart = null;
+    ui.wallEnd = null;
     ui.routeSrc = null;
     updateHint();
   }
@@ -1209,6 +1258,11 @@ function findEnemyTargetAt(world) {
   if (fp && fp.owner !== me && (S.settVisible(game, fp) || known[fp.id])) {
     return { kind: 'settlement', id: fp.id };
   }
+  // enemy wall (#187): exact-tile target, footprint-style precedence
+  const wl = wallAtPoint(world);
+  if (wl && wl.owner !== me && wallKnown(wl)) {
+    return { kind: 'wall', id: wl.id };
+  }
   const hitR = Math.max(1.5, 24 / view.scale);
   const eb = S.blobAt(game, world.x, world.y, hitR);
   if (eb && eb.owner !== me && S.isVisible(game, eb.x, eb.y)) return { kind: 'blob', id: eb.id };
@@ -1228,6 +1282,11 @@ function onRightClick(world) {
   hideOrderPopup();
   // armed route mode: a right-click resolves it exactly like a tap (#178)
   if (ui.pending === 'route' || ui.pending === 'route-sett') {
+    resolvePending(world, 'mouse');
+    return;
+  }
+  // armed wall placement (#187): right-clicks place the two endpoints too
+  if (ui.pending === 'wall') {
     resolvePending(world, 'mouse');
     return;
   }
@@ -1432,6 +1491,7 @@ $('groups-bar').addEventListener('click', (e) => {
 // still confirm (#94). It's screen-anchored, so it simply stays put.
 function onGesture() {
   if (ui.pending === 'build' && ui.buildSite) return;
+  if (ui.pending === 'wall' && ui.wallEnd) return; // wall ✓/✕ survives panning too
   hideOrderPopup();
 }
 
@@ -1439,6 +1499,8 @@ function onCancel() {
   if (ui.pending) {
     ui.pending = null;
     ui.buildSite = null;
+    ui.wallStart = null;
+    ui.wallEnd = null;
     ui.routeSrc = null;
     hideOrderPopup(); // the build-confirm popup rides on the pending state
     updateHint();
@@ -1482,6 +1544,8 @@ $('mode-toggle').addEventListener('click', (e) => {
     if (ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'multi')) ui.selected = null;
     ui.pending = null;
     ui.buildSite = null;
+    ui.wallStart = null;
+    ui.wallEnd = null;
     ui.routeSrc = null;
     hideOrderPopup();
     updateHint();
@@ -1505,7 +1569,8 @@ function showOrderPopup(world, screen, target) {
   ui.orderTarget = world;
   ui.orderTargetEnt = target || null;
   const hasDeploy = selectedBlobs().some(b => b.count.deploy > 0);
-  const atkLabel = target && target.kind === 'blob' ? '⚔️ Attack blob' : '⚔️ Attack settlement';
+  const atkLabel = target && target.kind === 'blob' ? '⚔️ Attack blob'
+    : target && target.kind === 'wall' ? '⚔️ Attack wall' : '⚔️ Attack settlement';
   orderPopup.innerHTML = `
     ${target && hasDeploy ? `<button data-act="pattack" class="btn px-3 rounded-lg text-left bg-red-900/80 hover:bg-red-800 text-red-100">${atkLabel}</button>` : ''}
     <button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
@@ -1583,6 +1648,7 @@ function showUnitOptions(screen) {
     <button data-act="ppillage" class="btn px-3 rounded-lg text-left ${pillaging ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 ${pillaging ? 'Stop pillaging' : 'Pillage'}</button>
     ${canSplit ? `<button data-act="psplit" style="touch-action:none" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">✂️ Split ${Math.floor(tot / 2)} / ${tot} <span class="text-xs text-zinc-500">(hold to adjust)</span></button>` : ''}
     <button data-act="pbuildarm" ${canBuild ? '' : 'disabled'} class="btn px-3 rounded-lg text-left ${canBuild ? 'bg-zinc-800 hover:bg-zinc-700' : 'bg-zinc-800 text-zinc-500 opacity-40'}">🏠 Build (${S.C.SETT_COST})</button>
+    <button data-act="pwallarm" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">🧱 Wall…</button>
     ${pureSupply ? '<button data-act="proutearm" class="btn px-3 rounded-lg text-left bg-sky-800 hover:bg-sky-700">🚚 Supply route…</button>' : ''}
     <div class="flex gap-1">
       ${roleBtn('deploy', '⚔️', cnt.deploy === tot, false)}${roleBtn('supply', '🚚', pureSupply, false)}${roleBtn('farm', '🌱', cnt.farm === tot, !atHome)}
@@ -1842,6 +1908,84 @@ function showBuildConfirm(screen) {
   orderPopup.style.top = top + 'px';
 }
 
+// Wall placement confirm (#187): after the second click sets the line's
+// end, this floating ✓/✕ pair beside the line commits or abandons it —
+// the same two-step confirm settlement founding uses, on mouse AND
+// touch. Re-taps move the end point and the popup follows.
+function showWallConfirm(screen) {
+  ui.orderTarget = null;
+  ui.orderTargetEnt = null;
+  let okCount = 0;
+  if (ui.wallStart && ui.wallEnd) {
+    for (const t of S.wallLineTiles(ui.wallStart.x, ui.wallStart.y, ui.wallEnd.x, ui.wallEnd.y)) {
+      if (!S.canPlaceWall(game, me, t.x, t.y).err) okCount++;
+    }
+  }
+  const ok = okCount > 0;
+  orderPopup.innerHTML = `
+    <button data-act="pwall" class="btn px-3 rounded-lg text-left ${ok ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-500 opacity-40'}" ${ok ? '' : 'disabled'}>✓ Build wall (${okCount})</button>
+    <button data-act="pwallx" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Cancel</button>`;
+  orderPopup.classList.remove('hidden');
+  const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  // anchor beside the line's END tile, kept clear of the tile itself
+  let cx = screen ? screen.x : vw / 2, cy = screen ? screen.y : vh / 2;
+  if (ui.wallEnd) {
+    cx = (ui.wallEnd.x + 0.5 - view.cx) * view.scale + vw / 2;
+    cy = (ui.wallEnd.y + 0.5 - view.cy) * view.scale + vh / 2;
+  }
+  const r = 1.4 * view.scale + 12;
+  const clampX = (x) => Math.max(4, Math.min(vw - w - 4, x));
+  const clampY = (y) => Math.max(4, Math.min(vh - h - 4, y));
+  const fitsRight = cx + r + w + 4 <= vw;
+  const fitsLeft = cx - r - w >= 4;
+  let left, top;
+  if (fitsRight || fitsLeft) {
+    left = (fitsRight && (cx <= vw / 2 || !fitsLeft)) ? cx + r : cx - r - w;
+    top = clampY(cy - h / 2);
+  } else {
+    left = clampX(cx - w / 2);
+    top = cy - r - h >= 4 ? cy - r - h : clampY(cy + r);
+  }
+  orderPopup.style.left = left + 'px';
+  orderPopup.style.top = top + 'px';
+}
+
+// Dispatch the confirmed wall line: rasterize start→end, drop invalid
+// tiles (toasting the skipped count), and split the survivors into
+// contiguous chunks among the selected blobs so crews build in parallel.
+function confirmWall() {
+  const start = ui.wallStart, end = ui.wallEnd;
+  const blobs = selectedBlobs();
+  ui.pending = null;
+  ui.wallStart = null;
+  ui.wallEnd = null;
+  updateHint();
+  if (!start || !end || !blobs.length) { renderPanel(true); return; }
+  const tiles = S.wallLineTiles(start.x, start.y, end.x, end.y);
+  const valid = tiles.filter(t => !S.canPlaceWall(game, me, t.x, t.y).err);
+  const skipped = tiles.length - valid.length;
+  if (!valid.length) { toast('🧱 No buildable tiles there'); renderPanel(true); return; }
+  // deterministic founder ordering, like dispatchBuild (#130)
+  const sorted = [...blobs].sort((a, b) =>
+    dist(a.x, a.y, start.x + 0.5, start.y + 0.5) - dist(b.x, b.y, start.x + 0.5, start.y + 0.5)
+    || S.total(b) - S.total(a) || a.id - b.id);
+  const per = Math.ceil(valid.length / sorted.length);
+  let ok = 0, err = null, at = 0;
+  for (const b of sorted) {
+    const chunk = valid.slice(at, at + per);
+    at += per;
+    if (!chunk.length) break;
+    const r = doBuildWalls(b, chunk);
+    if (r.err) err = r.err; else ok += r.queued;
+  }
+  if (ok) {
+    pingOrder({ x: start.x + 0.5, y: start.y + 0.5 }, null);
+    toast(`🧱 Building ${ok} wall tile${ok === 1 ? '' : 's'}${skipped ? ` — ${skipped} skipped` : ''}`);
+  } else if (err) toast(err);
+  renderPanel(true);
+}
+
 // Group build (#130): the selected blob nearest the site is the founder
 // (carries the build order); every other selected blob marches to the
 // site as an escort and merges into the waiting founder on arrival.
@@ -1872,6 +2016,10 @@ function dispatchRoutes(carriers, target, sourceId) {
       const st = game.settlements.find(s => s.id === target.id);
       dest = (st && st.name) || 'settlement';
       if (st) pingRoute(st.x + 1, st.y + 1);
+    } else if (target.kind === 'wall') {
+      const w = game.walls.find(x => x.id === target.id);
+      dest = 'wall garrison';
+      if (w) pingRoute(w.x + 0.5, w.y + 0.5);
     } else {
       const tb = findBlob(target.id);
       if (tb) pingRoute(tb.x, tb.y);
@@ -1906,6 +2054,17 @@ orderPopup.addEventListener('click', (e) => {
   hideOrderPopup();
   if (act === 'pbuild') { confirmBuild(); return; }
   if (act === 'pbuildx') { onCancel(); renderPanel(true); return; }
+  if (act === 'pwall') { confirmWall(); return; }
+  if (act === 'pwallx') { onCancel(); renderPanel(true); return; }
+  if (act === 'pwallarm') {
+    if (selectedBlobs().length) {
+      ui.pending = 'wall';
+      ui.wallStart = null;
+      ui.wallEnd = null;
+      updateHint();
+    }
+    return;
+  }
   if (act === 'pclose') { ui.selected = null; renderPanel(true); return; }
   // Select/Deselect popup: commit the tapped blob as the selection
   if (act === 'pselect') {
@@ -1992,6 +2151,29 @@ function resolvePending(world, pointerType, screen) {
     updateHint();
     return;
   }
+  // wall placement (#187): a two-click state machine, identical on mouse
+  // and touch — first click sets the line's start, second sets its end
+  // (same tile ⇒ single wall) and shows the ✓/✕ confirm; further clicks
+  // move the end so the line can be fine-tuned before committing.
+  if (ui.pending === 'wall') {
+    const wblobs = selectedBlobs();
+    if (!wblobs.length) {
+      ui.pending = null; ui.wallStart = null; ui.wallEnd = null;
+      updateHint();
+      return;
+    }
+    const tx = Math.floor(world.x), ty = Math.floor(world.y);
+    if (tx < 0 || ty < 0 || tx >= game.map.w || ty >= game.map.h) return; // off-map — keep state
+    if (!ui.wallStart) {
+      ui.wallStart = { x: tx, y: ty };
+    } else {
+      ui.wallEnd = { x: tx, y: ty };
+      showWallConfirm(screen);
+    }
+    updateHint();
+    renderPanel(true);
+    return;
+  }
   const pending = ui.pending;
   ui.pending = null;
   updateHint();
@@ -2027,8 +2209,15 @@ function resolvePending(world, pointerType, screen) {
     // route targets, so they're excluded from the blob hit test too.
     let st = S.settlementAt(game, world.x, world.y, 1.9);
     if (st && st.owner !== me) st = null;
-    let tgt = null;
+    // wall-garrison line (#187): a tap on an own finished wall tile
+    // targets the wall — exact-tile, like the settlement-first rule
+    let wl = null;
     if (!st) {
+      const w2 = wallAtPoint(world);
+      if (w2 && w2.owner === me && !w2.building) wl = w2;
+    }
+    let tgt = null;
+    if (!st && !wl) {
       tgt = S.blobAt(game, world.x, world.y, hitR);
       if (tgt && (tgt.owner !== me || tgt.working != null || carriers.some(c => c.id === tgt.id))) tgt = null;
       if (!tgt) {
@@ -2036,14 +2225,16 @@ function resolvePending(world, pointerType, screen) {
         if (st && st.owner !== me) st = null;
       }
     }
-    if (tgt) {
+    if (wl) {
+      dispatchRoutes(carriers, { kind: 'wall', id: wl.id }, srcId);
+    } else if (tgt) {
       dispatchRoutes(carriers, { kind: 'blob', id: tgt.id }, srcId);
     } else if (st && st.id === srcId) {
       toast('Route must lead away from its source');
     } else if (st) {
       dispatchRoutes(carriers, { kind: 'settlement', id: st.id }, srcId);
     } else {
-      toast('Tap a friendly army or settlement to supply');
+      toast('Tap a friendly army, wall or settlement to supply');
     }
   } else if (pending === 'route-sett') {
     // settlement-to-settlement supply line (#108): source is the
@@ -2053,9 +2244,15 @@ function resolvePending(world, pointerType, screen) {
     if (!src) return;
     const hitR = Math.max(1.5, 24 / view.scale);
     const stT = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+    const wlT = wallAtPoint(world);
     if (stT && stT.owner === me && stT.id !== src.id && !stT.building) {
       const r = doSupplyRoute(src, { kind: 'settlement', id: stT.id });
       if (!r.err) pingRoute(stT.x + 1, stT.y + 1);
+      toast(r.err ? r.err : '🚚 Supply route established');
+    } else if (wlT && wlT.owner === me && !wlT.building) {
+      // wall-garrison line (#187)
+      const r = doSupplyRoute(src, { kind: 'wall', id: wlT.id });
+      if (!r.err) pingRoute(wlT.x + 0.5, wlT.y + 0.5);
       toast(r.err ? r.err : '🚚 Supply route established');
     } else {
       const tgt = S.blobAt(game, world.x, world.y, hitR);
@@ -2064,7 +2261,7 @@ function resolvePending(world, pointerType, screen) {
         if (!r.err) pingRoute(tgt.x, tgt.y);
         toast(r.err ? r.err : '🚚 Supply route established');
       } else {
-        toast('Tap a friendly settlement or army to supply');
+        toast('Tap a friendly settlement, wall or army to supply');
       }
     }
   }
@@ -2076,13 +2273,16 @@ function updateHint() {
   // the tutorial card owns the instruction slot for its whole session
   if (!ui.pending || (game && game.tutorial)) { el.classList.add('hidden'); return; }
   const text = ui.pending === 'move' ? 'Tap a destination — or an enemy to attack…'
+    : ui.pending === 'wall'
+      ? (ui.wallEnd ? 'Tap ✓ to build — or tap elsewhere to move the end'
+        : ui.wallStart ? 'Tap where the wall ends…' : 'Tap where the wall starts…')
     : ui.pending === 'build'
       ? (ui.buildSite ? 'Tap ✓ to found here — or tap elsewhere to move the site'
         : 'Tap where to found the settlement…')
       : ui.pending === 'route-sett'
-        ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination settlement (or army) to supply…`
+        ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination settlement, wall or army to supply…`
         : ui.routeSrc != null
-          ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination — a friendly settlement or army…`
+          ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination — a friendly settlement, wall or army…`
           : `${isMobile() ? 'Tap' : 'Tap or right-click'} the source settlement to load from…`;
   $('hint-text').textContent = text;
   el.classList.remove('hidden');
@@ -2146,6 +2346,36 @@ panel.addEventListener('click', (e) => {
       // arms map placement (#94): pick the site by tap (touch confirms
       // with ✓) or hover+click (mouse) — see resolvePending
       if (blobs[0]) { ui.pending = 'build'; ui.buildSite = null; updateHint(); }
+      break;
+    }
+    case 'wall': {
+      // arms two-click wall placement (#187) — see resolvePending
+      if (blobs.length) {
+        ui.pending = 'wall';
+        ui.wallStart = null;
+        ui.wallEnd = null;
+        updateHint();
+      }
+      break;
+    }
+    case 'fieldwall': {
+      const w = ui.selected && ui.selected.kind === 'wall'
+        ? game.walls.find(x => x.id === ui.selected.id) : null;
+      if (w) {
+        r = doFieldWall(w);
+        if (r.err) toast(r.err);
+        else ui.selected = { kind: 'blob', id: r.blob.id };
+      }
+      break;
+    }
+    case 'wrole': {
+      // wall-garrison role switch (#187) — mirrors the settlement 'grole'
+      const w = ui.selected && ui.selected.kind === 'wall'
+        ? game.walls.find(x => x.id === ui.selected.id) : null;
+      if (w) {
+        r = doWallRole(w, btn.dataset.role);
+        if (r.err) toast(r.err);
+      }
       break;
     }
     case 'pillage': {
@@ -2384,6 +2614,60 @@ function renderPanelInner(force) {
       setPanelHTML(`
         <div class="font-semibold text-red-300 mb-1">🏠 ${est.name || 'Enemy settlement'} <span class="text-zinc-500 font-normal">(last seen)</span></div>
         <div class="text-xs text-zinc-400">Hidden in the fog — condition unknown. Send a scout to see its health.</div>`);
+    }
+    return;
+  }
+  // walls (#187): own wall = control card; enemy wall = inspection card
+  if (ui.selected && (ui.selected.kind === 'wall' || ui.selected.kind === 'enemy-wall')) {
+    const w = game.walls.find(x => x.id === ui.selected.id);
+    if (!w || (ui.selected.kind === 'enemy-wall' && !wallKnown(w))) {
+      ui.selected = null; panel.classList.add('hidden'); lastPanelHTML = ''; return;
+    }
+    panel.classList.remove('hidden');
+    const gTot = S.wallGarrisonTotal(w);
+    const pct = Math.max(0, Math.min(100, Math.round(100 * w.hp / S.C.WALL_HP)));
+    const barCol = w.building ? 'bg-amber-500' : pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
+    const prot = S.wallProtected(game, w);
+    if (w.owner === me) {
+      const gMeter = Math.max(0, Math.min(1, (w.garrFood || 0) / S.C.WALL_FOOD_CAP));
+      const gFedColor = gMeter >= 0.75 ? 'text-emerald-400' : gMeter >= 0.5 ? 'text-lime-400' : gMeter >= 0.25 ? 'text-amber-400' : 'text-red-400';
+      setPanelHTML(`
+        <div class="flex items-center justify-between mb-1">
+          <span class="font-semibold">🧱 Wall${w.building ? ' — under construction' : ''}</span>
+          <span class="text-xs ${!w.building && w.hp < S.C.WALL_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(w.hp)}/${S.C.WALL_HP}</span>
+        </div>
+        <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full ${barCol}" style="width:${pct}%"></div></div>
+        ${w.building
+          ? '<div class="text-xs text-zinc-400">Builders raise it while standing beside the tile — more hands build faster. It can be attacked the whole time.</div>'
+          : `<div class="text-xs mb-1 ${prot ? 'text-emerald-400' : 'text-amber-400'}">${prot ? '🛡️ Protected — a garrison holds within 1 tile' : '⚠️ Unprotected — falls fast under attack'}</div>
+        <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${w.garrison.deploy} 🚚${w.garrison.supply} 🌱${w.garrison.farm} / ${S.C.WALL_GARRISON_CAP} · Stockpile <b class="${gFedColor}">🌾 ${Math.floor(w.garrFood || 0)}</b> / ${S.C.WALL_FOOD_CAP}</div>
+        ${(() => {
+          // inbound wall-garrison supply lines (#187)
+          const inW = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'wall' && r2.targetId === w.id);
+          return inW.length ? '<div class="text-xs text-sky-300 mb-1">🚚 Supplied by ' + (inW.length === 1 ? 'a supply route' : inW.length + ' supply routes') + '</div>' : '';
+        })()}
+        ${gTot > 0
+          ? `<div class="flex gap-1 mb-1">
+              ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
+            </div>
+            ${w.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(w.convert)}s (fielding cancels)</div>` : ''}
+            <button data-act="fieldwall" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>`.replaceAll('data-act="role"', 'data-act="wrole"')
+          : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '). A garrisoned wall attacks enemies within 1 tile; a supply route can keep it fed.</div>'}`}`);
+    } else {
+      const vis = S.isVisible(game, w.x + 0.5, w.y + 0.5);
+      if (vis) {
+        setPanelHTML(`
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-semibold text-red-300">🧱 Enemy wall${w.building ? ' <span class="text-zinc-500 font-normal">(under construction)</span>' : ''}</span>
+            <span class="text-xs ${!w.building && w.hp < S.C.WALL_HP ? 'text-red-400' : 'text-zinc-400'}">HP ${Math.ceil(w.hp)}/${S.C.WALL_HP}</span>
+          </div>
+          <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full ${w.building ? 'bg-amber-500' : 'bg-red-500'}" style="width:${pct}%"></div></div>
+          <div class="text-xs text-zinc-400">${prot ? 'Manned or covered by a nearby garrison — it will hold for a while.' : 'Unprotected — a determined attack breaks through in seconds.'} Order deploy units onto it to attack.</div>`);
+      } else {
+        setPanelHTML(`
+          <div class="font-semibold text-red-300 mb-1">🧱 Enemy wall <span class="text-zinc-500 font-normal">(last seen)</span></div>
+          <div class="text-xs text-zinc-400">Hidden in the fog — condition unknown.</div>`);
+      }
     }
     return;
   }
@@ -2715,7 +2999,8 @@ function renderPanelInner(force) {
       <span class="font-semibold">${multi ? `${blobs.length} blobs` : 'Blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
-    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
+    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
+
     `;
   const convertLine = blobs.some(b => b.convert) ? `<div class="text-xs text-amber-400 mb-2">⚔️ Arming… ready in ~${convertEta(blobs.filter(b => b.convert).reduce((a, b) => (a.convert.done >= b.convert.done ? a : b)).convert)}s — units fight as their old role until then; picking another role cancels</div>` : '';
 
@@ -2736,6 +3021,7 @@ function renderPanelInner(force) {
       <button data-act="move" class="btn rounded bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
       <button data-act="pillage" class="btn rounded ${blobs.some(b => b.pillaging) ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 Pillage</button>
       <button data-act="build" class="btn rounded bg-zinc-800 hover:bg-zinc-700 ${tot < S.C.SETT_COST ? 'opacity-40' : ''}" ${tot < S.C.SETT_COST ? 'disabled' : ''}>🏠 Build (${S.C.SETT_COST})</button>
+      <button data-act="wall" class="btn rounded bg-zinc-800 hover:bg-zinc-700">🧱 Wall…</button>
       <button data-act="route" class="btn rounded ${pureSupply ? 'bg-sky-800 hover:bg-sky-700' : 'bg-zinc-800 opacity-40'}" ${pureSupply ? '' : 'disabled'}>🚚 Supply route…</button>
     </div>
     ${carrierSiege ? `<button data-act="siegerun" class="btn w-full rounded mb-2 ${carrierRoute.runSiege ? 'bg-amber-600 text-white hover:bg-amber-500' : 'bg-zinc-800 hover:bg-zinc-700'}">🚚 Run the siege: ${carrierRoute.runSiege ? 'ON' : 'OFF'}</button>` : ''}
@@ -2796,8 +3082,8 @@ function frame(ts) {
 
   input.update(dt);
   if (game.tutorial) TUT.tick(game, ui); // markers/card before this frame draws
-  // desktop build-placement preview follows the mouse (#94)
-  ui.hover = ui.pending === 'build' ? input.mouseWorld : null;
+  // desktop build/wall-placement preview follows the mouse (#94, #187)
+  ui.hover = (ui.pending === 'build' || ui.pending === 'wall') ? input.mouseWorld : null;
   renderer.draw(game, view, ui, Math.max(0, Math.min(1, acc / 100)));
 
   if (ts - lastPanel > 400) {

@@ -12,7 +12,7 @@ export const UNLOAD_SLACK = 0.6;  // hysteresis past the dock range before re-ap
 export const TOUCH_SLACK = 0.15;  // tolerance past touching radii for blob deliveries (#147)
 
 export function createRoute(game, blob, target, initialCargo, sourceId) {
-  // target: { kind: 'blob'|'settlement', id }
+  // target: { kind: 'blob'|'settlement'|'wall', id }
   // initialCargo: food carried over from a previous route (#103).
   // Source settlement = explicit sourceId when given (#108 —
   // settlement-to-settlement lines stay pinned to their chosen source),
@@ -30,6 +30,14 @@ export function createRoute(game, blob, target, initialCargo, sourceId) {
   if (target.kind === 'settlement') {
     const tgt = game.settlements.find(s => s.id === target.id);
     if (tgt && tgt.building) return { err: 'Still under construction' };
+  }
+  if (target.kind === 'wall') {
+    // wall-garrison lines (#187): friendly finished walls only —
+    // deliveries top up the garrison's rations meter
+    const w = (game.walls || []).find(x => x.id === target.id);
+    if (!w) return { err: 'No wall there' };
+    if (w.owner !== blob.owner) return { err: 'Destination must be friendly' };
+    if (w.building) return { err: 'Still under construction' };
   }
   if (target.kind === 'blob') {
     // resolve through the merge log (#141) so the duplicate-line match
@@ -103,6 +111,9 @@ export function routeTarget(game, route) {
     if (b) route.targetId = b.id; // follow merges (#141)
     return b;
   }
+  if (route.targetKind === 'wall') {
+    return (game.walls || []).find(w => w.id === route.targetId) || null;
+  }
   return game.settlements.find(s => s.id === route.targetId) || null;
 }
 
@@ -125,12 +136,14 @@ export function routeHealth(game, route) {
   // a topped-off destination means the line is keeping up (#143):
   // parked carriers deliver nothing while it stays full, which must
   // not read as a failing line
-  const full = route.targetKind === 'blob'
-    ? target.food >= 0.95 * foodCap(target)
-    : target.stockpile >= 0.95 * C.STOCK_CAP;
   const units = route.targetKind === 'blob'
     ? target.count.deploy + target.count.supply + target.count.farm
     : target.garrison.deploy + target.garrison.supply + target.garrison.farm;
+  const full = route.targetKind === 'blob'
+    ? target.food >= 0.95 * foodCap(target)
+    : route.targetKind === 'wall'
+      ? (target.garrFood || 0) >= 0.95 * C.WALL_FOOD_CAP
+      : target.stockpile >= 0.95 * C.STOCK_CAP;
   if (full || units <= 0) return 1;
   // consumption: units × (1/12) food/s over the window span
   const span = Math.min(game.tick, HEALTH_WINDOW_TICKS) / 10; // seconds

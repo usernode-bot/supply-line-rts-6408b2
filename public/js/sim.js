@@ -72,6 +72,14 @@ export const C = {
                            // supply: behind walls everyone able-bodied fights
   FARM_FLEE_RADIUS: 4,     // a hit farmer group pulls friendly farmers within this radius home
   CONVERT_TICKS: 100,      // 10 native seconds to arm units into the deploy role
+  // -- walls (#187) --
+  WALL_HP: 100,            // per-tile wall structure HP (same scale as SETT_HP)
+  WALL_BUILD_TICKS: 120,   // ticks per tile for a SINGLE builder unit (≈24 s at 1×)
+  WALL_BUILD_MAX_SPEED: 4, // cap on the √crew-size build multiplier (fastest tile ≈6 s at 1×)
+  WALL_GARRISON_CAP: 4,    // units per wall tile
+  WALL_FOOD_CAP: 100,      // flat food stockpile per wall tile — the garrison's larder
+  WALL_NEAR_PROT: 10,      // structure-damage divisor while a friendly garrison is within 1 tile
+  WALL_VISION: 4,          // fog reveal radius per GARRISONED wall tile
 };
 
 // Difficulty is AI *skill*, not an economy cheat: every level earns food
@@ -289,6 +297,9 @@ function blockedTiles(game, owner) {
     }
     if (knows) for (const i of tiles) set.add(i);
   }
+  // known enemy wall tiles block movement the same way (#187); friendly
+  // walls are never in the set, so own units cross their walls freely
+  for (const i of knownEnemyWallTiles(game, owner)) set.add(i);
   return set;
 }
 
@@ -311,6 +322,9 @@ export function newGame(seedStr, sizeKey, difficulty, pvp) {
     blobs: [],
     settlements: [],
     routes: [],
+    walls: [],                             // per-tile wall structures (#187)
+    wallAt: new Int32Array(map.w * map.h), // tile -> wall id (derived, like settAt)
+    wallMemo: {},                          // player memory of enemy walls {id:{x,y,owner,building}}
     tilledBy: new Int32Array(map.w * map.h),
     settAt: new Int32Array(map.w * map.h),
     pillaged: new Set(),
@@ -326,14 +340,16 @@ export function newGame(seedStr, sizeKey, difficulty, pvp) {
     pillageAlarmT: -999,                   // last "land stripped bare" toast (transient)
     supplyAlarmT: [-999, -999],            // last "low supplies" toast per owner (transient, #105)
     ruins: [],                             // destroyed settlements' footprints {id,x,y,owner,t} — cosmetic (#106)
-    ai: { known: {}, threats: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
+    ai: { known: {}, knownWalls: {}, threats: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
   };
   if (pvp) {
     game.pvp = true;
     game.me = 0;
     game.fogs = [new Uint8Array(map.w * map.h), new Uint8Array(map.w * map.h)];
     game.knowns = [{}, {}];
+    game.wallMemos = [{}, {}];
     game.fog = game.fogs[0];
+    game.wallMemo = game.wallMemos[0];
     game.resultReason = null;
   }
   for (let side = 0; side < 2; side++) {
@@ -437,7 +453,10 @@ export function newTutorialGame() {
 // viewer's own fog array so all render/UI fog reads are viewer-relative.
 export function setViewer(game, me) {
   game.me = me;
-  if (game.pvp) game.fog = game.fogs[me];
+  if (game.pvp) {
+    game.fog = game.fogs[me];
+    game.wallMemo = game.wallMemos[me];
+  }
 }
 
 function makeBlob(game, owner, x, y, count, units) {
@@ -535,7 +554,7 @@ export function previewFields(game, ax, ay, owner) {
       if (onFoot(tx, ty)) continue; // the footprint itself is never tilled
       if (dist(tx + 0.5, ty + 0.5, c.x, c.y) > FARM_RING) continue;
       const i = ty * w + tx;
-      if (game.map.mountain[i] || game.settAt[i]) continue;
+      if (game.map.mountain[i] || game.settAt[i] || (game.wallAt && game.wallAt[i])) continue;
       if (game.tilledBy[i]) {
         if (owner == null) continue; // legacy callers: never contest
         const o = game.settlements.find(x => x.id === game.tilledBy[i]);
@@ -718,6 +737,305 @@ function destroySettlement(game, s, why) {
   if (game.pvp) { delete game.knowns[0][s.id]; delete game.knowns[1][s.id]; }
   game.events.push({ owner: s.owner, msg: `💥 ${s.name} was destroyed!`, x: s.x + 1, y: s.y + 1 });
   game.events.push({ owner: 1 - s.owner, msg: `🔥 Enemy settlement ${s.name} destroyed!`, x: s.x + 1, y: s.y + 1 });
+}
+
+// ---------------------------------------------------------------- walls (#187)
+
+export function wallGarrisonTotal(w) { return w.garrison.deploy + w.garrison.supply + w.garrison.farm; }
+
+// Straight tile line from (x0,y0) to (x1,y1) inclusive — Bresenham.
+// Shared by the placement preview and the dispatch path so they can
+// never disagree on which tiles a two-click line covers.
+export function wallLineTiles(x0, y0, x1, y1) {
+  const tiles = [];
+  let x = x0 | 0, y = y0 | 0;
+  const tx = x1 | 0, ty = y1 | 0;
+  const dx = Math.abs(tx - x), dy = Math.abs(ty - y);
+  const sx = x < tx ? 1 : -1, sy = y < ty ? 1 : -1;
+  let err = dx - dy;
+  for (let guard = 0; guard < 4096; guard++) {
+    tiles.push({ x, y });
+    if (x === tx && y === ty) break;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x += sx; }
+    if (e2 < dx) { err += dx; y += sy; }
+  }
+  return tiles;
+}
+
+// Whether `owner` may start (or resume) a wall on tile (tx, ty): clear
+// passable ground — never mountains, settlement grounds, farmland,
+// another wall (except resuming an own construction site), or a tile
+// inside an ENEMY settlement's territory.
+export function canPlaceWall(game, owner, tx, ty) {
+  const { w, h } = game.map;
+  if (tx < 0 || ty < 0 || tx >= w || ty >= h) return { err: 'Off the map' };
+  const i = ty * w + tx;
+  if (game.map.mountain[i]) return { err: 'Mountains' };
+  if (game.settAt[i]) return { err: 'Settlement grounds' };
+  if (game.tilledBy[i]) return { err: 'Farmland' };
+  if (game.wallAt[i]) {
+    const ex = game.walls.find(x => x.id === game.wallAt[i]);
+    if (ex && ex.owner === owner && ex.building) return { ok: true, resume: ex.id };
+    return { err: 'A wall is already here' };
+  }
+  if (!game.terr) rebuildTerritory(game);
+  const tid = game.terr[i];
+  if (tid) {
+    const ts = game.settlements.find(x => x.id === tid);
+    if (ts && ts.owner !== owner) return { err: 'Enemy territory' };
+  }
+  return { ok: true };
+}
+
+// A friendly garrison within Chebyshev 1 of the wall tile — an adjacent
+// garrisoned wall, or an adjacent completed settlement with a garrison.
+// Deliberately 1 layer deep: protection requires an ACTUAL garrison
+// nearby, never a merely-protected neighbor.
+function nearGarrisonProtects(game, w) {
+  for (const o of game.walls) {
+    if (o.id === w.id || o.owner !== w.owner || o.building) continue;
+    if (Math.max(Math.abs(o.x - w.x), Math.abs(o.y - w.y)) <= 1 && wallGarrisonTotal(o) > 0) return true;
+  }
+  for (const s of game.settlements) {
+    if (s.owner !== w.owner || s.building || garrisonTotal(s) <= 0) continue;
+    // any of the 2×2 footprint tiles within Chebyshev 1 of the wall tile
+    if (w.x >= s.x - 1 && w.x <= s.x + 2 && w.y >= s.y - 1 && w.y <= s.y + 2) return true;
+  }
+  return false;
+}
+
+// Manned-or-covered state, shared by the combat pass and the renderer so
+// the drawn protected/unprotected look can never drift from the sim.
+export function wallProtected(game, w) {
+  return !w.building && (wallGarrisonTotal(w) > 0 || nearGarrisonProtects(game, w));
+}
+
+function destroyWall(game, w, byCombat) {
+  const i = w.y * game.map.w + w.x;
+  if (game.wallAt[i] === w.id) game.wallAt[i] = 0;
+  game.walls = game.walls.filter(x => x.id !== w.id);
+  delete game.wallMemo[w.id];
+  if (game.pvp) { delete game.wallMemos[0][w.id]; delete game.wallMemos[1][w.id]; }
+  if (game.ai && game.ai.knownWalls) delete game.ai.knownWalls[w.id];
+  if (!w.building && byCombat) {
+    game.events.push({ owner: w.owner, msg: '🧱 Your wall was destroyed!', x: w.x + 0.5, y: w.y + 0.5 });
+    game.events.push({ owner: 1 - w.owner, msg: '🧱 Enemy wall breached!', x: w.x + 0.5, y: w.y + 0.5 });
+  }
+}
+
+// Known enemy FINISHED wall tiles for `owner` — fog-fair, mirroring the
+// settlement rules in blockedTiles: the player blocks on visible +
+// remembered walls, the solo AI on the ones it has scouted, each PvP
+// side on its own memory. Construction scaffolds are passable to all.
+function knownEnemyWallTiles(game, owner) {
+  const set = new Set();
+  if (!game.walls || !game.walls.length) return set;
+  const wmap = game.map.w;
+  for (const w of game.walls) {
+    if (w.owner === owner || w.building) continue;
+    const i = w.y * wmap + w.x;
+    let knows = false;
+    if (game.pvp) {
+      knows = !!game.wallMemos[owner][w.id] || game.fogs[owner][i] === 2;
+    } else if (owner === 0) {
+      knows = !!game.wallMemo[w.id] || game.fog[i] === 2;
+    } else {
+      knows = !!(game.ai && game.ai.knownWalls && game.ai.knownWalls[w.id]);
+    }
+    if (knows) set.add(i);
+  }
+  return set;
+}
+
+// Queue a straight run of wall tiles on a builder blob. Any unit can
+// build; the price is time and hands (no food or unit cost). Invalid
+// tiles are dropped here — callers toast the skipped count.
+export function opBuildWalls(game, b, tiles) {
+  if (b.dead || total(b) <= 0) return { err: 'Gone' };
+  if (!Array.isArray(tiles) || !tiles.length) return { err: 'No tiles' };
+  const valid = [];
+  const seen = new Set();
+  for (const t of tiles.slice(0, 64)) {
+    const tx = Math.floor(t.x), ty = Math.floor(t.y);
+    const key = ty * game.map.w + tx;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!canPlaceWall(game, b.owner, tx, ty).err) valid.push({ x: tx, y: ty });
+  }
+  if (!valid.length) return { err: 'Nowhere to build a wall there' };
+  leaveRoute(game, b);
+  b.working = null;
+  b.chaseId = null;
+  b.order = { type: 'wall', tiles: valid, k: 0 };
+  b.path = null; b.pathGoal = null;
+  return { ok: true, queued: valid.length, skipped: tiles.length - valid.length };
+}
+
+// Field a wall's whole garrison as one blob beside the tile. The units
+// march out with what they can carry from the tile's stockpile; the
+// rest stays in the larder for the next garrison.
+export function opFieldWall(game, wallId) {
+  const w = game.walls.find(x => x.id === wallId);
+  if (!w) return { err: 'No such wall' };
+  if (wallGarrisonTotal(w) === 0) return { err: 'No garrison' };
+  w.convert = null; // fielding cancels a pending garrison arm-up
+  const i = w.y * game.map.w + w.x;
+  const spot = nearestPassable(game.map, w.x, w.y, 4, null, new Set([i])) || { x: w.x, y: w.y };
+  const b = makeBlob(game, w.owner, spot.x + 0.5, spot.y + 0.5, w.garrison);
+  const take = Math.min(foodCap(b), Math.max(0, w.garrFood || 0));
+  b.food = take;
+  w.garrFood = Math.max(0, (w.garrFood || 0) - take);
+  w.garrison = { deploy: 0, supply: 0, farm: 0 };
+  return { ok: true, blob: b };
+}
+
+// Switch a wall garrison's role, mirroring opGarrisonRole for
+// settlements: disarming to supply/farm is instant; arming to deploy
+// takes CONVERT_TICKS and completes in tickWalls. Fielding cancels.
+export function opWallGarrisonRole(game, wallId, role) {
+  const w = game.walls.find(x => x.id === wallId);
+  if (!w) return { err: 'No such wall' };
+  if (w.building) return { err: 'Still under construction' };
+  if (!['deploy', 'supply', 'farm'].includes(role)) return { err: 'Bad role' };
+  const g = wallGarrisonTotal(w);
+  if (g === 0) return { err: 'No garrison' };
+  if (role === 'deploy') {
+    if (w.garrison.deploy === g) { w.convert = null; return { ok: true }; }
+    if (w.convert && w.convert.role === 'deploy') return { ok: true };
+    w.convert = { role: 'deploy', done: game.tick + C.CONVERT_TICKS };
+    return { ok: true };
+  }
+  w.convert = null;
+  w.garrison = { deploy: 0, supply: 0, farm: 0 };
+  w.garrison[role] = g;
+  return { ok: true };
+}
+
+// Builder order tick: march to the current tile, start the site on
+// arrival, then stand in reach while tickWallBuild accrues progress.
+function tickWallOrder(game, b, o) {
+  const wmap = game.map.w;
+  // skip tiles that finished or became unbuildable while marching
+  while (o.k < o.tiles.length) {
+    const t = o.tiles[o.k];
+    const wid = game.wallAt[t.y * wmap + t.x];
+    if (wid) {
+      const w = game.walls.find(x => x.id === wid);
+      if (w && w.owner === b.owner && w.building) break; // our site — work it
+      o.k++;
+      continue;
+    }
+    if (canPlaceWall(game, b.owner, t.x, t.y).err) { o.k++; continue; }
+    break;
+  }
+  if (o.k >= o.tiles.length) { b.order = null; b.path = null; b.pathGoal = null; return; }
+  const t = o.tiles[o.k];
+  const cheb = Math.max(Math.abs(Math.floor(b.x) - t.x), Math.abs(Math.floor(b.y) - t.y));
+  if (cheb > 1) {
+    const cx = t.x + 0.5, cy = t.y + 0.5;
+    const stale = !b.pathGoal || dist(b.pathGoal.x, b.pathGoal.y, cx, cy) > 0.6;
+    if (!b.path || !b.path.length || stale || pathBlocked(game, b)) {
+      if (!ensurePath(game, b, cx, cy)) {
+        b.order = null; b.pathGoal = null;
+        game.events.push({ owner: b.owner, msg: "⛰️ Can't reach the wall site — order cancelled", x: b.x, y: b.y });
+        return;
+      }
+    }
+    moveBlob(game, b);
+    return;
+  }
+  // in reach (Chebyshev ≤ 1): stand and build — progress in tickWallBuild
+  b.path = null; b.pathGoal = null;
+  const i = t.y * wmap + t.x;
+  if (!game.wallAt[i]) {
+    const w = {
+      id: game.nextId++, owner: b.owner, x: t.x, y: t.y, hp: 0, building: true,
+      garrison: { deploy: 0, supply: 0, farm: 0 }, garrFood: 0,
+      garrLoss: 0, lastHitT: -999, starving: false, convert: null,
+    };
+    game.walls.push(w);
+    game.wallAt[i] = w.id;
+  }
+}
+
+// Per-site build progress, ONCE per site per tick so co-located crews
+// can't double-count: every same-owner blob working this tile from
+// within Chebyshev 1 pools its unit count into one n, and the rate is
+// base × min(WALL_BUILD_MAX_SPEED, √n) — diminishing returns with clean
+// anchors (1 unit → 1× ≈24 s/tile at 1×, 4 → 2× ≈12 s, 9 → 3× ≈8 s,
+// 16+ → capped 4× ≈6 s).
+function tickWallBuild(game) {
+  if (!game.walls.length) return;
+  let crews = null; // wallId -> pooled builder unit count
+  for (const b of game.blobs) {
+    if (b.dead || !b.order || b.order.type !== 'wall') continue;
+    const o = b.order;
+    if (o.k >= o.tiles.length) continue;
+    const t = o.tiles[o.k];
+    const wid = game.wallAt[t.y * game.map.w + t.x];
+    if (!wid) continue;
+    const w = game.walls.find(x => x.id === wid);
+    if (!w || w.owner !== b.owner || !w.building) continue;
+    if (Math.max(Math.abs(Math.floor(b.x) - t.x), Math.abs(Math.floor(b.y) - t.y)) > 1) continue;
+    if (!crews) crews = new Map();
+    crews.set(wid, (crews.get(wid) || 0) + total(b));
+  }
+  if (!crews) return;
+  for (const [wid, n] of crews) {
+    const w = game.walls.find(x => x.id === wid);
+    if (!w || !w.building) continue;
+    const mult = Math.min(C.WALL_BUILD_MAX_SPEED, Math.sqrt(n));
+    w.hp = Math.min(C.WALL_HP, w.hp + (C.WALL_HP / C.WALL_BUILD_TICKS) * mult);
+    if (w.hp >= C.WALL_HP) {
+      w.building = false;
+      // the tile just became impassable to enemies — nudge any off it
+      const i = w.y * game.map.w + w.x;
+      for (const b of game.blobs) {
+        if (b.dead || b.owner === w.owner) continue;
+        if (tileIdx(game, b.x, b.y) !== i) continue;
+        const spot = nearestPassable(game.map, w.x, w.y, 4, null, new Set([i]));
+        if (spot) { b.x = spot.x + 0.5; b.y = spot.y + 0.5; b.path = null; b.pathGoal = null; }
+      }
+      game.events.push({ owner: w.owner, msg: '🧱 Wall raised', x: w.x + 0.5, y: w.y + 0.5 });
+    }
+  }
+}
+
+// Per-wall upkeep: slow self-repair out of combat (same rate as
+// settlements), pending garrison arm-ups, and the tile's food
+// stockpile — a flat WALL_FOOD_CAP larder the garrison eats from.
+function tickWalls(game) {
+  for (const w of [...game.walls]) {
+    if (w.building) continue;
+    if (w.hp < C.WALL_HP && game.tick - (w.lastHitT != null ? w.lastHitT : -999) > 100) {
+      w.hp = Math.min(C.WALL_HP, w.hp + C.SETT_REGEN);
+    }
+    // pending garrison arm-up (#108 pattern): converts the whole
+    // garrison to the ordered role once the countdown completes
+    if (w.convert && game.tick >= w.convert.done) {
+      const gAll = wallGarrisonTotal(w);
+      if (gAll > 0) {
+        w.garrison = { deploy: 0, supply: 0, farm: 0 };
+        w.garrison[w.convert.role] = gAll;
+      }
+      w.convert = null;
+    }
+    const g = wallGarrisonTotal(w);
+    w.garrFood = Math.min(w.garrFood || 0, C.WALL_FOOD_CAP);
+    if (g > 0) {
+      w.garrFood = Math.max(0, w.garrFood - g * C.EAT_PER_SEC * C.DT);
+      if (w.garrFood <= 0.0001) {
+        if (!w.starving) {
+          w.starving = true;
+          game.events.push({ owner: w.owner, msg: '💀 Your wall garrison is starving!', x: w.x + 0.5, y: w.y + 0.5 });
+        }
+        applyGarrisonLosses(game, w, g * C.STARVE_FRAC, true, w.x + 0.5, w.y + 0.5);
+      } else if (w.starving && w.garrFood >= 0.25 * g * C.FOOD_PER_UNIT) {
+        w.starving = false;
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------- ops (player + AI share these)
@@ -935,7 +1253,7 @@ export function footprintFits(game, ax, ay) {
       const cx = ax + dx, cy = ay + dy;
       if (cx < 0 || cy < 0 || cx >= w || cy >= h) return false;
       const i = cy * w + cx;
-      if (game.map.mountain[i] || game.tilledBy[i] || game.settAt[i]) return false;
+      if (game.map.mountain[i] || game.tilledBy[i] || game.settAt[i] || (game.wallAt && game.wallAt[i])) return false;
     }
   }
   return true;
@@ -1043,6 +1361,10 @@ export function opSupplyRoute(game, s, target) {
     if (!tgt) return { err: 'No destination there' };
     if (tgt.building) return { err: 'Still under construction' };
     if (tgt.owner !== s.owner) return { err: 'Destination must be friendly' };
+  } else if (target.kind === 'wall') {
+    const tw = game.walls.find(x => x.id === target.id);
+    if (!tw || tw.owner !== s.owner) return { err: 'No friendly wall there' };
+    if (tw.building) return { err: 'Still under construction' };
   } else {
     const tb = game.blobs.find(x => x.id === target.id && !x.dead);
     if (!tb || tb.owner !== s.owner) return { err: 'No friendly target there' };
@@ -1293,6 +1615,7 @@ export function unitCounts(game, owner) {
   let units = 0, setts = 0;
   for (const b of game.blobs) if (!b.dead && b.owner === owner) units += total(b);
   for (const s of game.settlements) if (s.owner === owner) { setts++; units += garrisonTotal(s); }
+  for (const w of game.walls) if (w.owner === owner) units += wallGarrisonTotal(w);
   return { units, setts };
 }
 
@@ -1320,6 +1643,8 @@ export function step(game) {
   for (const b of game.blobs) if (!b.dead) tickFood(game, b);
   for (const b of game.blobs) if (!b.dead) tickHeal(game, b);
   for (const s of [...game.settlements]) tickSettlement(game, s);
+  tickWallBuild(game);
+  tickWalls(game);
 
   // fed trend: rolling 1 s window of each blob's net food change per
   // tick, once all transfers have landed — shown live as ▲/▼ in the
@@ -1356,12 +1681,26 @@ function ensurePath(game, b, x, y, avoid) {
     for (const i of avoid) merged.add(i);
     merged.delete(tileIdx(game, b.x, b.y));
     const pa = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), merged);
-    if (pa) { b.path = pa; b.pathGoal = { x, y }; return true; }
+    if (pa) { b.path = pa; b.pathGoal = { x, y }; if (b.order) delete b.order.breach; return true; }
   }
   const p = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), blocked);
-  b.path = p;
-  b.pathGoal = p ? { x, y } : null;
-  return !!p;
+  if (p) { b.path = p; b.pathGoal = { x, y }; if (b.order) delete b.order.breach; return true; }
+  // breach fallback (#187): fighters denied a path re-plan THROUGH known
+  // enemy walls. Movement stalls at the wall tile (moveBlob's hard stop)
+  // with the group standing adjacent, combat's wall pass grinds the wall
+  // down, and the normal replan continues the march once it falls.
+  if (b.count.deploy > 0 && b.order) {
+    const wallTiles = knownEnemyWallTiles(game, b.owner);
+    if (wallTiles.size) {
+      const open = new Set(blocked);
+      for (const i of wallTiles) open.delete(i);
+      const bp = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), open);
+      if (bp) { b.path = bp; b.pathGoal = { x, y }; b.order.breach = true; return true; }
+    }
+  }
+  b.path = null;
+  b.pathGoal = null;
+  return false;
 }
 
 // Tiles a targeted mover plans around: the footprint (+1 tile) of every
@@ -1414,6 +1753,10 @@ function ownerSees(game, owner, x, y) {
 function pathBlocked(game, b) {
   if (!b.path) return false;
   const blocked = blockedTiles(game, b.owner);
+  // a breach plan (#187) deliberately runs through known enemy walls —
+  // those tiles must not count as "blocked" or the order would cancel
+  // instead of stalling at the wall to batter it down
+  const breachWalls = b.order && b.order.breach ? knownEnemyWallTiles(game, b.owner) : null;
   const w = game.map.w;
   const fog = pathFog(game, b.owner);
   // a mountain the mover knows about: the player (or pvp side) sees explored
@@ -1425,7 +1768,7 @@ function pathBlocked(game, b) {
     const wp = b.path[i];
     const x = Math.floor(wp.x), y = Math.floor(wp.y);
     const ti = y * w + x;
-    if (blocked.has(ti)) return true;
+    if (blocked.has(ti) && !(breachWalls && breachWalls.has(ti))) return true;
     if (knownMountain(ti)) return true;
     // diagonal step that would cut past a revealed mountain corner
     if (x !== px && y !== py && (knownMountain(py * w + x) || knownMountain(y * w + px))) return true;
@@ -1462,6 +1805,7 @@ function moveBlob(game, b) {
 function tickOrder(game, b) {
   if (!b.order) return;
   const o = b.order;
+  if (o.type === 'wall') { tickWallOrder(game, b, o); return; }
   if (o.type !== 'move' && o.type !== 'attack') return;
   if (o.tkind) { tickTargetedMove(game, b, o); return; }
   // plain tile move: never diverts to attack (#74) — attacking takes an
@@ -1536,6 +1880,31 @@ function tickOrder(game, b) {
     b.noMerge = false; // completed a deliberate move — mergeable again
     // working farmers walking to a new field cell stay in the fields
     if (b.working == null) {
+      // wall garrison (#187): a move that ENDS on a friendly finished wall
+      // folds the arrivals into its garrison, up to the per-tile cap —
+      // any overflow stays outside as the remainder blob
+      const wallId = game.wallAt[tileIdx(game, b.x, b.y)];
+      if (wallId) {
+        const w = game.walls.find(x => x.id === wallId);
+        if (w && w.owner === b.owner && !w.building) {
+          const room = C.WALL_GARRISON_CAP - wallGarrisonTotal(w);
+          if (room > 0) {
+            const take = Math.min(room, total(b));
+            const foodShare = total(b) > 0 ? b.food * take / total(b) : 0;
+            for (let k = 0; k < take; k++) {
+              const u = b.units.shift();
+              w.garrison[u.role]++;
+            }
+            recount(b);
+            b.food = Math.max(0, b.food - foodShare);
+            w.garrFood = Math.min(C.WALL_FOOD_CAP, (w.garrFood || 0) + foodShare);
+            if (b.units.length === 0) b.dead = true;
+            else b.food = Math.min(b.food, foodCap(b));
+            game.events.push({ owner: b.owner, msg: `🧱 +${take} garrisoned on the wall`, x: w.x + 0.5, y: w.y + 0.5 });
+          }
+          return; // the wall was the destination — never fall through to a settlement absorb
+        }
+      }
       const s = game.settlements.find(s2 => s2.owner === b.owner && !s2.building && dist(s2.x + 1, s2.y + 1, b.x, b.y) < 1.9);
       if (s) { // garrison
         const n = total(b);
@@ -1590,6 +1959,26 @@ function tickTargetedMove(game, b, o) {
     }
     return;
   }
+  // wall target (#187): close to Chebyshev 1 of the tile and stand —
+  // the combat wall pass batters it from there
+  if (o.tkind === 'wall') {
+    const w = game.walls.find(x => x.id === o.tid);
+    if (!w) { b.order = null; b.pathGoal = null; b.noMerge = false; return; }
+    o.x = w.x + 0.5; o.y = w.y + 0.5;
+    if (Math.max(Math.abs(Math.floor(b.x) - w.x), Math.abs(Math.floor(b.y) - w.y)) <= 1) {
+      b.path = null; b.pathGoal = null;
+      return;
+    }
+    if (!b.path || !b.path.length || pathBlocked(game, b) || game.tick % 20 === 0) {
+      if (!ensurePath(game, b, o.x, o.y, avoidTiles(game, b, null))) {
+        b.order = null; b.pathGoal = null;
+        game.events.push({ owner: b.owner, msg: '⛰️ No way through — order cancelled', x: b.x, y: b.y });
+        return;
+      }
+    }
+    moveBlob(game, b);
+    return;
+  }
   // settlement target: besiege until it falls
   const s = game.settlements.find(x => x.id === o.tid);
   if (!s) { b.order = null; b.pathGoal = null; b.noMerge = false; return; }
@@ -1612,16 +2001,21 @@ function tickTargetedMove(game, b, o) {
 // -- supply carriers
 
 function targetPos(tgt, kind) {
-  return kind === 'blob' ? { x: tgt.x, y: tgt.y } : settCenter(tgt);
+  if (kind === 'blob') return { x: tgt.x, y: tgt.y };
+  if (kind === 'wall') return { x: tgt.x + 0.5, y: tgt.y + 0.5 }; // single-tile center (#187)
+  return settCenter(tgt);
 }
 
 // Delivery dock distance: to an army it's the touching-radii distance
 // (carrier edge meets target edge, #147); to a settlement it's the fixed
-// unload range around the 2×2 footprint center.
+// unload range around the 2×2 footprint center. A wall is a single tile
+// (#187): the carrier must be ON it or directly adjacent — 1.5 from the
+// tile center covers every Chebyshev-≤1 neighbor's center (diagonal
+// √2 ≈ 1.41) while a tile 2 away (≥ 2.0) stays out of range.
 function dockRange(b, tgt, kind) {
-  return kind === 'blob'
-    ? blobRadius(b) + blobRadius(tgt) + SUP.TOUCH_SLACK
-    : SUP.UNLOAD_RANGE;
+  if (kind === 'blob') return blobRadius(b) + blobRadius(tgt) + SUP.TOUCH_SLACK;
+  if (kind === 'wall') return 1.5;
+  return SUP.UNLOAD_RANGE;
 }
 
 // No way through to this leg's destination (revealed mountains walled it
@@ -1704,6 +2098,11 @@ function tickCarrier(game, b) {
       const room = foodCap(tgt) - tgt.food;
       taken = Math.min(give, room);
       tgt.food += taken;
+    } else if (route.targetKind === 'wall') {
+      // deliveries fill the wall tile's flat food stockpile (#187)
+      const room = Math.max(0, C.WALL_FOOD_CAP - (tgt.garrFood || 0));
+      taken = Math.min(give, room);
+      tgt.garrFood = (tgt.garrFood || 0) + taken;
     } else {
       const room = C.STOCK_CAP - tgt.stockpile;
       taken = Math.min(give, room);
@@ -1714,10 +2113,11 @@ function tickCarrier(game, b) {
     o.cargo -= taken;
     if (taken > 0) SUP.recordDelivery(game, route, taken);
     if (o.cargo <= 0.01) { o.phase = 'return'; o.running = false; b.path = null; }
-    else if (taken <= 0.001 && b.food < 0.25 * foodCap(b)) {
-      // destination is topped off (#143): park at the dock and keep it
-      // fed as it eats instead of hauling the leftover cargo home. The
-      // parked carrier nibbles its own cargo so it never starves here.
+    else if (taken < 0.1 && b.food < 0.25 * foodCap(b)) {
+      // destination is topped off — or only sips a trickle, like a wall
+      // garrison's small rations meter (#187) — park at the dock and keep
+      // it fed as it eats instead of hauling the leftover cargo home. The
+      // parked carrier nibbles its own cargo so it never starves here (#143).
       const bite = Math.min(o.cargo, foodCap(b) - b.food);
       o.cargo -= bite; b.food += bite;
     }
@@ -1812,6 +2212,13 @@ function lockedFacing(game, b) {
     const t = game.blobs.find(x => x.id === o.tid && !x.dead);
     if (t && dist(b.x, b.y, t.x, t.y) <= C.MELEE_RANGE + 0.2) {
       return { dir: Math.atan2(t.y - b.y, t.x - b.x), excludeId: t.id };
+    }
+    return null;
+  }
+  if (o.tkind === 'wall') {
+    const w = game.walls.find(x => x.id === o.tid);
+    if (w && Math.max(Math.abs(Math.floor(b.x) - w.x), Math.abs(Math.floor(b.y) - w.y)) <= 1) {
+      return { dir: Math.atan2(w.y + 0.5 - b.y, w.x + 0.5 - b.x), excludeId: null };
     }
     return null;
   }
@@ -1949,6 +2356,44 @@ function tickCombat(game) {
         }
       }
       if (s.hp <= 0) { destroySettlement(game, s); break; }
+    }
+  }
+  // walls (#187): garrisoned walls trade fire with any enemy war party
+  // within Chebyshev 1 of their tile, behind the same protection numbers
+  // settlements use. Empty walls take structure damage — divided by
+  // WALL_NEAR_PROT while a friendly garrison holds within one tile,
+  // full K_SIEGE when isolated (crumbles in seconds).
+  for (const w of [...game.walls]) {
+    let nearProt = null; // lazy per wall — only needed when structure is hit
+    for (const b of alive) {
+      if (b.dead || b.owner === w.owner || b.count.deploy === 0) continue;
+      if (Math.max(Math.abs(Math.floor(b.x) - w.x), Math.abs(Math.floor(b.y) - w.y)) > 1) continue;
+      b.engagedT = game.tick;
+      w.lastHitT = game.tick;
+      // an attacker not brawling with a blob faces the wall it batters
+      if (!engagements.has(b)) b.facing = Math.atan2(w.y + 0.5 - b.y, w.x + 0.5 - b.x);
+      game.combat.push({ kind: 'bw', b: b.id, w: w.id });
+      const attack = b.count.deploy * fedMult(fedMeter(b));
+      if (!w.building && wallGarrisonTotal(w) > 0) {
+        // manned wall: attackers fight the garrison; structure untouched
+        const gEff = w.garrison.deploy
+          + C.MILITIA_SUPPLY * w.garrison.supply
+          + C.MILITIA_FARM * w.garrison.farm;
+        const gMult = (w.garrFood || 0) > 0 ? 1.25 : 0.5;
+        dmg.set(b, (dmg.get(b) || 0) + gEff * gMult * C.WALL_DEF * C.K_COMBAT);
+        applyGarrisonLosses(game, w, attack * C.K_COMBAT / C.WALL_PROT, false, w.x + 0.5, w.y + 0.5);
+      } else {
+        if (nearProt === null) nearProt = !w.building && nearGarrisonProtects(game, w);
+        const hpDmg = attack * C.K_SIEGE / (nearProt ? C.WALL_NEAR_PROT : 1);
+        w.hp -= hpDmg;
+        w.hpFxAcc = (w.hpFxAcc || 0) + hpDmg;
+        if (w.hpFxAcc >= 1) {
+          const n = Math.floor(w.hpFxAcc);
+          w.hpFxAcc -= n;
+          pushFx(game, { kind: 'hp', x: w.x + 0.5, y: w.y + 0.5, n, t: game.tick });
+        }
+      }
+      if (w.hp <= 0) { destroyWall(game, w, true); break; }
     }
   }
   for (const [b, d] of dmg) {
@@ -2166,20 +2611,30 @@ function applyLosses(game, b, casualties) {
 
 // `starve` marks deaths from an empty stockpile: the fx swaps the plain
 // damage number for a skull so hunger reads differently from combat.
-function applyGarrisonLosses(game, s, casualties, starve) {
+// Works on anything with a {garrison, garrLoss} shape — settlements and
+// walls alike; walls pass their own fx center (cx, cy) since their tile
+// center is at +0.5, not the settlement's +1.
+function applyGarrisonLosses(game, s, casualties, starve, cx, cy) {
   s.garrLoss += casualties;
   let whole = Math.floor(s.garrLoss);
   if (whole <= 0) return;
   s.garrLoss -= whole;
   let removed = 0;
-  while (whole > 0 && garrisonTotal(s) > 0) {
+  const gTot = () => s.garrison.deploy + s.garrison.supply + s.garrison.farm;
+  while (whole > 0 && gTot() > 0) {
     let role = 'deploy';
     if (s.garrison.supply > s.garrison[role]) role = 'supply';
     if (s.garrison.farm > s.garrison[role]) role = 'farm';
     s.garrison[role]--;
     whole--; removed++;
   }
-  if (removed > 0) pushFx(game, { kind: starve ? 'starve' : 'loss', x: s.x + 1, y: s.y + 1, n: removed, t: game.tick });
+  if (removed > 0) {
+    pushFx(game, {
+      kind: starve ? 'starve' : 'loss',
+      x: cx != null ? cx : s.x + 1, y: cy != null ? cy : s.y + 1,
+      n: removed, t: game.tick,
+    });
+  }
 }
 
 // -- food / pillage / starvation
@@ -2200,6 +2655,42 @@ export function pillageCells(game, b) {
   // shielded by an overlapping friendly ring, is pillageable)
   const friendlyIds = new Set(
     game.settlements.filter(st => st.owner === b.owner).map(st => st.id));
+  // walls fence pillage out (#187): only tiles actually REACHABLE from
+  // the army's own tile — flooding through the disc's window without
+  // crossing mountains, enemy keeps or finished enemy walls — can be
+  // stripped. Land behind an intact wall line stays safe until the wall
+  // is breached. 4-connected, like previewFields' flood, so a diagonal
+  // gap between wall tiles doesn't leak pillage through (matching the
+  // corner-cut rule in movement).
+  const x0 = Math.max(0, cx - span), x1 = Math.min(w - 1, cx + span);
+  const y0 = Math.max(0, cy - span), y1 = Math.min(h - 1, cy + span);
+  const open = (tx, ty) => {
+    if (tx < x0 || ty < y0 || tx > x1 || ty > y1) return false;
+    const i = ty * w + tx;
+    if (game.map.mountain[i]) return false;
+    if (game.settAt[i]) {
+      const so = game.settlements.find(st => st.id === game.settAt[i]);
+      if (so && so.owner !== b.owner) return false; // enemy keep — impassable
+    }
+    const wid = game.wallAt ? game.wallAt[i] : 0;
+    if (wid) {
+      const wl = game.walls.find(x => x.id === wid);
+      if (wl && !wl.building && wl.owner !== b.owner) return false; // sealed
+    }
+    return true;
+  };
+  const reached = new Set([cy * w + cx]);
+  const stack = [cy * w + cx];
+  const DIRS4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  while (stack.length) {
+    const i = stack.pop();
+    const tx = i % w, ty = (i / w) | 0;
+    for (const [dx, dy] of DIRS4) {
+      if (!open(tx + dx, ty + dy)) continue;
+      const ni = (ty + dy) * w + (tx + dx);
+      if (!reached.has(ni)) { reached.add(ni); stack.push(ni); }
+    }
+  }
   const cells = [];
   for (let dy = -span; dy <= span; dy++) {
     for (let dx = -span; dx <= span; dx++) {
@@ -2207,7 +2698,8 @@ export function pillageCells(game, b) {
       if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
       if (dist(tx + 0.5, ty + 0.5, b.x, b.y) > reach) continue;
       const i = ty * w + tx;
-      if (game.map.mountain[i] || game.settAt[i]) continue;
+      if (!reached.has(i)) continue;
+      if (game.map.mountain[i] || game.settAt[i] || (game.wallAt && game.wallAt[i])) continue;
       if (friendlyIds.has(game.tilledBy[i])) continue;
       if (friendlyIds.has(game.terr[i])) continue;
       cells.push(i);
@@ -2567,6 +3059,21 @@ function tickSettlement(game, s) {
       if (s.stockpile <= 0.01) break;
     }
   }
+  // wall garrisons inside the territory top up from the stockpile too
+  // (#187) — same drip rate as the settlement's own garrison meter
+  if (s.stockpile > 0.01) {
+    for (const w of game.walls) {
+      if (w.owner !== s.owner || w.building) continue;
+      const gw = wallGarrisonTotal(w);
+      if (gw <= 0 || !inTerritory(game, s, w.x + 0.5, w.y + 0.5)) continue;
+      const give = Math.min(C.WALL_FOOD_CAP - (w.garrFood || 0), s.stockpile, gw * 0.1);
+      if (give <= 0) continue;
+      s.stockpile -= give;
+      s.flowAcc -= give;
+      s.parts.upkeep -= give;
+      w.garrFood = (w.garrFood || 0) + give;
+    }
+  }
   // reserve food for docked supply carriers loading here (#193): a
   // caravan parked at the depot draws from the stockpile at the START of
   // next tick (tickCarrier runs before tickSettlement), so without this
@@ -2790,14 +3297,21 @@ function markCircle(fog, map, cx, cy, r) {
   }
 }
 
-// Recompute vision + settlement memory for one side into (fog, known).
-function updateVisionFor(game, owner, fog, known) {
+// Recompute vision + settlement/wall memory for one side into
+// (fog, known, wallMemo).
+function updateVisionFor(game, owner, fog, known, wallMemo) {
   for (let i = 0; i < fog.length; i++) if (fog[i] === 2) fog[i] = 1;
   for (const b of game.blobs) {
     if (!b.dead && b.owner === owner) markCircle(fog, game.map, b.x, b.y, C.VISION_BLOB);
   }
   for (const s of game.settlements) {
     if (s.owner === owner) markCircle(fog, game.map, s.x + 1, s.y + 1, C.VISION_SETT);
+  }
+  // garrisoned wall tiles keep a small watch (#187)
+  for (const w of game.walls) {
+    if (w.owner === owner && !w.building && wallGarrisonTotal(w) > 0) {
+      markCircle(fog, game.map, w.x + 0.5, w.y + 0.5, C.WALL_VISION);
+    }
   }
   // remember enemy settlements we can currently see; forget destroyed ones
   for (const s of game.settlements) {
@@ -2817,15 +3331,31 @@ function updateVisionFor(game, owner, fog, known) {
       delete known[id];
     }
   }
+  // remember enemy walls we can currently see; forget destroyed ones
+  // whose tile we're looking at (#187)
+  if (wallMemo) {
+    const wmap = game.map.w;
+    for (const w of game.walls) {
+      if (w.owner !== owner && fog[w.y * wmap + w.x] === 2) {
+        wallMemo[w.id] = { x: w.x, y: w.y, owner: w.owner, building: !!w.building };
+      }
+    }
+    for (const id of Object.keys(wallMemo)) {
+      const k = wallMemo[id];
+      if (fog[k.y * wmap + k.x] === 2 && !game.walls.some(w => w.id === +id)) {
+        delete wallMemo[id];
+      }
+    }
+  }
 }
 
 function updateVision(game) {
   if (game.pvp) {
-    updateVisionFor(game, 0, game.fogs[0], game.knowns[0]);
-    updateVisionFor(game, 1, game.fogs[1], game.knowns[1]);
+    updateVisionFor(game, 0, game.fogs[0], game.knowns[0], game.wallMemos[0]);
+    updateVisionFor(game, 1, game.fogs[1], game.knowns[1], game.wallMemos[1]);
     return;
   }
-  updateVisionFor(game, 0, game.fog, game.known);
+  updateVisionFor(game, 0, game.fog, game.known, game.wallMemo);
 }
 
 export function isVisible(game, x, y) {
@@ -2892,6 +3422,12 @@ export function serialize(game) {
       targetKind: r.targetKind, targetId: r.targetId, carrierIds: r.carrierIds,
       runSiege: !!r.runSiege,
     })),
+    // walls (#187) — serialized in id order; wallAt is derived on load
+    walls: game.walls.map(w => ({
+      id: w.id, owner: w.owner, x: w.x, y: w.y, hp: w.hp,
+      building: !!w.building, garrison: w.garrison, garrFood: w.garrFood || 0,
+      convert: w.convert || null,
+    })),
     ruins: game.ruins,
     fertDelta,
   };
@@ -2902,11 +3438,13 @@ export function serialize(game) {
     data.pvp = true;
     data.fogs = [u8ToB64(game.fogs[0]), u8ToB64(game.fogs[1])];
     data.knowns = game.knowns;
+    data.wallMemos = game.wallMemos;
     data.mergeLog = game.mergeLog;
     data.resultReason = game.resultReason || null;
   } else {
     data.fog = u8ToB64(game.fog);
     data.known = game.known;
+    data.wallMemo = game.wallMemo;
     data.ai = game.ai;
   }
   return data;
@@ -2930,6 +3468,9 @@ export function deserialize(data, prev) {
     map,
     tick: data.tick, nextId: data.nextId,
     blobs: [], settlements: [], routes: [],
+    walls: [],
+    wallAt: new Int32Array(map.w * map.h),
+    wallMemo: data.wallMemo || {},
     tilledBy: new Int32Array(map.w * map.h),
     settAt: new Int32Array(map.w * map.h),
     pillaged: new Set(),
@@ -2951,10 +3492,27 @@ export function deserialize(data, prev) {
     game.pvp = true;
     game.fogs = [b64ToU8(data.fogs[0]), b64ToU8(data.fogs[1])];
     game.knowns = data.knowns || [{}, {}];
+    game.wallMemos = data.wallMemos || [{}, {}];
     game.mergeLog = data.mergeLog || {};
     game.resultReason = data.resultReason || null;
     game.me = prev && prev.me != null ? prev.me : 0;
     game.fog = game.fogs[game.me];
+    game.wallMemo = game.wallMemos[game.me];
+  }
+  if (game.ai && !game.ai.knownWalls) game.ai.knownWalls = {}; // pre-#187 saves
+  // walls load BEFORE the settlements re-till below, so previewFields
+  // sees wallAt and reproduces the live land division exactly (#187)
+  for (const wd of data.walls || []) {
+    const w = {
+      id: wd.id, owner: wd.owner, x: wd.x, y: wd.y, hp: wd.hp,
+      building: !!wd.building,
+      garrison: wd.garrison || { deploy: 0, supply: 0, farm: 0 },
+      garrFood: wd.garrFood || 0,
+      garrLoss: 0, lastHitT: -999, starving: false,
+      convert: wd.convert || null,
+    };
+    game.walls.push(w);
+    game.wallAt[w.y * map.w + w.x] = w.id;
   }
   for (const [i, f] of Object.entries(data.fertDelta || {})) {
     map.fert[+i] = f;

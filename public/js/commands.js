@@ -44,6 +44,9 @@ export function applyCommand(g, owner, c) {
       } else if (c.target && c.target.kind === 'settlement') {
         const t = g.settlements.find(s => s.id === c.target.id && s.owner === enemy);
         if (t) target = { kind: 'settlement', id: t.id };
+      } else if (c.target && c.target.kind === 'wall') {
+        const t = g.walls.find(w => w.id === c.target.id && w.owner === enemy);
+        if (t) target = { kind: 'wall', id: t.id };
       }
       S.opMove(g, b, +c.x || 0, +c.y || 0, target);
       break;
@@ -69,6 +72,10 @@ export function applyCommand(g, owner, c) {
         } else if (c.target.kind === 'settlement') {
           const t = g.settlements.find(s => s.id === c.target.id && s.owner === owner);
           if (t) S.opRoute(g, b, { kind: 'settlement', id: t.id }, srcId);
+        } else if (c.target.kind === 'wall') {
+          // wall-garrison supply line (#187): own finished walls only
+          const t = g.walls.find(w => w.id === c.target.id && w.owner === owner && !w.building);
+          if (t) S.opRoute(g, b, { kind: 'wall', id: t.id }, srcId);
         }
       }
       break;
@@ -76,6 +83,25 @@ export function applyCommand(g, owner, c) {
       // run-the-siege toggle (#181): only the acting player's own route
       const r = g.routes.find(x => x.id === c.routeId && x.owner === owner);
       if (r) S.opSiegeRun(g, r.id, !!c.on);
+      break;
+    }
+    case 'wallBuild':
+      // walls (#187): tiles are re-validated inside opBuildWalls against
+      // the authoritative state — malformed entries just get skipped
+      if (b && Array.isArray(c.tiles)) {
+        S.opBuildWalls(g, b, c.tiles.slice(0, 64).map(t => ({ x: (t && t.x) | 0, y: (t && t.y) | 0 })));
+      }
+      break;
+    case 'fieldWall': {
+      const w = g.walls.find(x => x.id === c.wallId && x.owner === owner);
+      if (w) S.opFieldWall(g, w.id);
+      break;
+    }
+    case 'wallRole': {
+      // wall-garrison role switch (#187): own walls only; the op
+      // whitelists the role string itself
+      const w = g.walls.find(x => x.id === c.wallId && x.owner === owner);
+      if (w) S.opWallGarrisonRole(g, w.id, c.role);
       break;
     }
     case 'setMode': if (st) S.opSetMode(g, st, c.mode); break;
@@ -93,6 +119,9 @@ export function applyCommand(g, owner, c) {
         } else if (c.target.kind === 'blob') {
           const t = resolveBlobIn(g, owner, c.target.id);
           if (t) S.opSupplyRoute(g, st, { kind: 'blob', id: t.id });
+        } else if (c.target.kind === 'wall') {
+          const t = g.walls.find(w => w.id === c.target.id && w.owner === owner && !w.building);
+          if (t) S.opSupplyRoute(g, st, { kind: 'wall', id: t.id });
         }
       }
       break;
