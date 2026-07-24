@@ -23,7 +23,7 @@ let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1; // displayed speed step 1–4; the sim multiplier is speed × 0.5
 let paused = false;
-let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, wallStart: null, wallEnd: null, hover: null, touchMode: 'select' };
+let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, fieldRole: null, flowOpen: false, flowFor: null, modeOpen: false, ping: null, buildSite: null, wallStart: null, wallEnd: null, hover: null, touchMode: 'select' };
 
 // Phone-sized UI (the sm breakpoint that turns the panel into a bottom
 // sheet): mode toggle, contextual tap popups, stats-only panel. Desktop
@@ -1673,8 +1673,19 @@ function showUnitOptions(screen) {
 // aborts without splitting.
 let splitHoldConsumed = false; // eat the synthesized click after a hold
 
+// Hold-drag count mapping (#189): the count follows the finger's absolute
+// horizontal screen position — near the left edge = 1, near the right
+// edge = max, linear in between. The margin keeps both extremes reachable
+// without having to touch the outermost pixels.
+const HOLD_EDGE_PX = 24;
+function holdValueFromX(clientX, maxV) {
+  const span = Math.max(1, window.innerWidth - 2 * HOLD_EDGE_PX);
+  const t = Math.max(0, Math.min(1, (clientX - HOLD_EDGE_PX) / span));
+  return Math.max(1, Math.min(maxV, 1 + Math.round(t * (maxV - 1))));
+}
+
 function attachSplitHold(btn) {
-  let timer = null, sliding = false, holdX = 0, lastX = 0, value = 1, maxV = 1, totNow = 2, row = null, fill = null, pxPerUnit = 4;
+  let timer = null, sliding = false, lastX = 0, value = 1, maxV = 1, totNow = 2, row = null, fill = null;
 
   function cleanup() {
     clearTimeout(timer);
@@ -1705,17 +1716,14 @@ function attachSplitHold(btn) {
       if (!b2 || S.total(b2) < 2 || orderPopup.classList.contains('hidden')) return;
       sliding = true;
       splitHoldConsumed = true;
-      holdX = lastX;
       totNow = S.total(b2);
       maxV = totNow - 1;
-      value = Math.max(1, Math.min(maxV, Math.floor(totNow / 2)));
+      value = holdValueFromX(lastX, maxV);
       row = document.createElement('div');
       row.className = 'px-1 pb-1';
       row.innerHTML = '<div class="h-2 rounded bg-zinc-700 overflow-hidden"><div class="h-full bg-violet-500"></div></div>';
       btn.insertAdjacentElement('afterend', row);
       fill = row.firstElementChild.firstElementChild;
-      // px per unit from the track width, floored so huge groups stay controllable
-      pxPerUnit = Math.max(3, (orderPopup.offsetWidth - 12) / Math.max(1, maxV - 1));
       update();
     }, 350);
     e.preventDefault();
@@ -1725,8 +1733,7 @@ function attachSplitHold(btn) {
     lastX = e.clientX;
     if (!sliding) return;
     if (orderPopup.classList.contains('hidden')) { abort(); return; } // dismissed mid-hold
-    const start = Math.max(1, Math.min(maxV, Math.floor(totNow / 2)));
-    value = Math.max(1, Math.min(maxV, start + Math.round((e.clientX - holdX) / pxPerUnit)));
+    value = holdValueFromX(e.clientX, maxV);
     update();
   });
 
@@ -1747,6 +1754,117 @@ function attachSplitHold(btn) {
   }
   btn.addEventListener('pointerup', end);
   btn.addEventListener('pointercancel', end);
+}
+
+// Recall the n farthest-out farmers of a settlement (#68) — the close
+// fields stay manned. n falsy means "all".
+function recallFarmers(st, n) {
+  const workers = game.blobs
+    .filter(b => !b.dead && b.owner === me && b.working === st.id)
+    .sort((a, b2) => dist(b2.x, b2.y, st.x + 1, st.y + 1) - dist(a.x, a.y, st.x + 1, st.y + 1));
+  const k = Math.max(1, Math.min(workers.length, n || workers.length));
+  let c = 0;
+  for (const b of workers.slice(0, k)) {
+    if (doMove(b, st.x + 1, st.y + 1).ok) c++;
+  }
+  toast(c ? `🏠 Recalling ${c} farmer${c === 1 ? '' : 's'}` : 'No farmers working the fields');
+}
+
+// Hold-drag count buttons (#189): the phone panel's Recall and Field
+// buttons mirror the split button's hold UX — a plain tap acts on the
+// shown count (via the click dispatcher), press-and-hold (~350 ms)
+// reveals a fill bar and the count follows the finger's absolute
+// horizontal screen position (holdValueFromX); release commits,
+// pointercancel aborts. cfg: { max(), label(v, max), onArm(), commit(v) }.
+let recallHoldConsumed = false; // eat the synthesized click after a hold
+let fieldHoldConsumed = false;
+
+function attachHoldCount(btn, cfg) {
+  let timer = null, sliding = false, lastX = 0, value = 1, maxV = 1, row = null, fill = null;
+
+  function cleanup() {
+    clearTimeout(timer);
+    timer = null;
+    sliding = false;
+    if (row) { row.remove(); row = null; fill = null; }
+  }
+
+  function update() {
+    if (fill) fill.style.width = (maxV <= 1 ? 100 : Math.round(100 * (value - 1) / (maxV - 1))) + '%';
+    btn.textContent = cfg.label(value, maxV);
+  }
+
+  btn.addEventListener('pointerdown', (e) => {
+    if (cfg.max() < 2) return; // nothing to adjust — plain tap covers it
+    try { btn.setPointerCapture(e.pointerId); } catch { }
+    lastX = e.clientX;
+    timer = setTimeout(() => {
+      timer = null;
+      maxV = cfg.max(); // the sim kept ticking — re-resolve
+      if (maxV < 2) return;
+      sliding = true;
+      cfg.onArm();
+      value = holdValueFromX(lastX, maxV);
+      row = document.createElement('div');
+      row.className = 'mt-1';
+      row.innerHTML = '<div class="h-2 rounded bg-zinc-700 overflow-hidden"><div class="h-full bg-violet-500"></div></div>';
+      btn.parentElement.insertAdjacentElement('afterend', row);
+      fill = row.firstElementChild.firstElementChild;
+      update();
+    }, 350);
+    e.preventDefault();
+  });
+
+  btn.addEventListener('pointermove', (e) => {
+    lastX = e.clientX;
+    if (!sliding) return;
+    value = holdValueFromX(e.clientX, maxV);
+    update();
+  });
+
+  function end(e) {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (!sliding) return; // plain tap — the click dispatcher acts
+    const commit = e.type === 'pointerup';
+    cleanup();
+    if (commit) cfg.commit(value);
+    lastPanelHTML = ''; // the hold mutated the button text — force a rebuild
+    renderPanel(true);
+  }
+  btn.addEventListener('pointerup', end);
+  btn.addEventListener('pointercancel', end);
+}
+
+function attachRecallHold(btn) {
+  attachHoldCount(btn, {
+    max: () => { const st = selectedSettlement(); return st ? S.workingCount(game, st) : 0; },
+    label: (v, m) => `Recall ${v}/${m}`,
+    onArm: () => { recallHoldConsumed = true; },
+    commit: (v) => {
+      ui.recallCount = v;
+      const st = selectedSettlement();
+      if (st) recallFarmers(st, v); // recallFarmers re-clamps
+    },
+  });
+}
+
+function attachFieldHold(btn) {
+  attachHoldCount(btn, {
+    max: () => {
+      const st = selectedSettlement();
+      return st && ui.fieldRole ? st.garrison[ui.fieldRole] : 0;
+    },
+    label: (v, m) => `Field ${v}/${m}`,
+    onArm: () => { fieldHoldConsumed = true; },
+    commit: (v) => {
+      const st = selectedSettlement();
+      const role = ui.fieldRole;
+      if (!st || !role) return;
+      ui.fieldCounts[role] = v;
+      const r = doFieldRole(st, role, Math.max(1, Math.min(st.garrison[role], v)));
+      if (r.err) toast(r.err);
+    },
+  });
 }
 
 // Touch build placement (#94): the armed outline sits at ui.buildSite;
@@ -2264,7 +2382,10 @@ panel.addEventListener('click', (e) => {
       for (const b of blobs) doPillage(b, !b.pillaging);
       break;
     }
-    case 'mode': if (st) doSetMode(st, btn.dataset.mode); break;
+    case 'mode': if (st) { doSetMode(st, btn.dataset.mode); ui.modeOpen = false; } break;
+    // compact phone panel (#189): the production mode row folds behind a
+    // single dropdown button that doubles as the training progress bar
+    case 'modemenu': ui.modeOpen = !ui.modeOpen; break;
     case 'settroute': {
       // settlement-to-settlement supply line (#108): arm target pick
       if (st && st.garrison.supply > 0) {
@@ -2301,6 +2422,10 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'grole': if (st) { r = doGarrisonRole(st, btn.dataset.role); if (r.err) toast(r.err); } break;
+    // compact phone panel (#189): fold the food breakdown / pick the role
+    // the unified field slider acts on
+    case 'flowdetail': ui.flowOpen = !ui.flowOpen; break;
+    case 'fieldrole': ui.fieldRole = btn.dataset.role; break;
     case 'fieldgroup': {
       // surplus farmers (#171): field the garrisoned farmers as one
       // grouped blob at the gate and hand it to the player, selected
@@ -2315,6 +2440,8 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'fieldn': {
+      // a hold-commit already fielded — eat exactly one synthesized click
+      if (fieldHoldConsumed) { fieldHoldConsumed = false; break; }
       if (st) {
         const role = btn.dataset.role;
         const n = Math.max(1, Math.min(st.garrison[role], ui.fieldCounts[role] || 1));
@@ -2324,20 +2451,10 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'recall': {
-      if (st) {
-        // partial recall (#68): the slider picks how many field hands come
-        // home; the farthest-out farmers return first so the close fields
-        // stay manned
-        const workers = game.blobs
-          .filter(b => !b.dead && b.owner === me && b.working === st.id)
-          .sort((a, b2) => dist(b2.x, b2.y, st.x + 1, st.y + 1) - dist(a.x, a.y, st.x + 1, st.y + 1));
-        const n = Math.max(1, Math.min(workers.length, ui.recallCount || workers.length));
-        let c = 0;
-        for (const b of workers.slice(0, n)) {
-          if (doMove(b, st.x + 1, st.y + 1).ok) c++;
-        }
-        toast(c ? `🏠 Recalling ${c} farmer${c === 1 ? '' : 's'}` : 'No farmers working the fields');
-      }
+      // a hold-commit already recalled (and the browser still synthesizes
+      // a click on the captured button) — eat exactly one
+      if (recallHoldConsumed) { recallHoldConsumed = false; break; }
+      if (st) recallFarmers(st, ui.recallCount || 0);
       break;
     }
   }
@@ -2617,6 +2734,10 @@ function renderPanelInner(force) {
   }
 
   if (st) {
+    // compact phone layout (#189): the food breakdown starts collapsed on
+    // each newly selected settlement
+    if (ui.flowFor !== st.id) { ui.flowFor = st.id; ui.flowOpen = false; ui.modeOpen = false; }
+    const mob = isMobile();
     const g = st.garrison;
     const gTot = S.garrisonTotal(st);
     const wc = S.workingCount(game, st);
@@ -2683,6 +2804,39 @@ function renderPanelInner(force) {
         <button data-act="fieldn" data-role="${role}" id="field-btn-${role}" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Field ${cur}</button>
       </div>`;
     }).join('');
+    // phone (#189): role chips pick which garrisoned role the compact
+    // hold-drag Field button (bottom controls row) acts on
+    const fieldControls = fieldRows; // desktop only; the phone template omits it
+    let fieldChips = '', fieldAr = null, fieldCur = 1;
+    if (mob) {
+      const present = ['deploy', 'supply', 'farm'].filter(role => g[role] >= 1);
+      const ar = present.includes(ui.fieldRole) ? ui.fieldRole : present[0];
+      ui.fieldRole = ar || null;
+      if (ar) {
+        fieldAr = ar;
+        fieldCur = Math.max(1, Math.min(g[ar], ui.fieldCounts[ar] || Math.max(1, Math.floor(g[ar] / 2))));
+        ui.fieldCounts[ar] = fieldCur;
+        fieldChips = present.map(role => {
+          const icon = role === 'deploy' ? '⚔️' : role === 'supply' ? '🚚' : '🌱';
+          return `<button data-act="fieldrole" data-role="${role}" class="btn-sm px-1.5 rounded whitespace-nowrap text-xs ${role === ar ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-300'}">${icon}${g[role]}</button>`;
+        }).join('');
+      }
+    }
+    // phone (#189): garrison action buttons share a two-column grid; a lone
+    // odd button spans the full width
+    let garrisonActions;
+    if (mob) {
+      const actBtns = [];
+      if (g.farm > 0 && wc >= y.worthwhileCells) actBtns.push(`<button data-act="fieldgroup" class="btn rounded bg-emerald-800 hover:bg-emerald-700">🌱 Field ${g.farm} surplus</button>`);
+      if (g.supply >= 1) actBtns.push('<button data-act="settroute" class="btn rounded bg-sky-800 hover:bg-sky-700">🚚 Supply route…</button>');
+      actBtns.push(`<button data-act="field" class="btn rounded bg-zinc-700 hover:bg-zinc-600">Field garrison (${gTot})</button>`);
+      if (actBtns.length % 2 === 1) actBtns[actBtns.length - 1] = actBtns[actBtns.length - 1].replace('class="btn', 'class="col-span-2 btn');
+      garrisonActions = `<div class="grid grid-cols-2 gap-1 mt-1">${actBtns.join('')}</div>`;
+    } else {
+      garrisonActions = `${g.farm > 0 && wc >= y.worthwhileCells ? `<button data-act="fieldgroup" class="btn w-full rounded bg-emerald-800 hover:bg-emerald-700 mt-1">🌱 Field ${g.farm} surplus farmer${g.farm === 1 ? '' : 's'}</button>` : ''}
+          ${g.supply >= 1 ? '<button data-act="settroute" class="btn w-full rounded bg-sky-800 hover:bg-sky-700 mt-1">🚚 Supply route to another settlement…</button>' : ''}
+          <button data-act="field" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>`;
+    }
     const hpBarPct = Math.max(0, Math.min(100, Math.round(100 * st.hp / S.C.SETT_HP)));
     const hpBarCol = hpBarPct >= 75 ? 'bg-emerald-500' : hpBarPct >= 40 ? 'bg-amber-500' : 'bg-red-500';
     // run-the-siege toggle (#181): shown while besieged if any of the
@@ -2696,17 +2850,74 @@ function renderPanelInner(force) {
     // garrison fed state (#180): the meter fielded units emerge at
     const gMeter = gTot > 0 ? Math.max(0, Math.min(1, (st.garrFood || 0) / (gTot * S.C.FOOD_PER_UNIT))) : 0;
     const gFedColor = gMeter >= 0.75 ? 'text-emerald-400' : gMeter >= 0.5 ? 'text-lime-400' : gMeter >= 0.25 ? 'text-amber-400' : 'text-red-400';
+    if (mob) {
+      // phone sheet (#189): garrison controls first (they're the reason to
+      // open the panel), production mode as a dropdown button whose
+      // background doubles as the training progress bar, and a
+      // hold-to-adjust Recall button inline with the farmers line
+      const MODES = [['farm', '🌾 Farm'], ['supply', '🚚 Supply'], ['deploy', '⚔️ Deploy'], ['off', '📦 Stockpile']];
+      const curMode = MODES.find(([m]) => m === st.mode) || MODES[0];
+      const training = st.mode === 'off' ? false
+        : st.mode === 'farm' ? wc < y.worthwhileCells
+          : !(gated && st.stockpile > 0);
+      const fillPct = training ? Math.max(0, Math.min(100, pct)) : 0;
+      const warn = (st.mode === 'supply' || st.mode === 'deploy') && gated && st.stockpile > 0
+        ? '<div class="text-xs text-amber-400 mb-1">⏸ Paused — food at break-even. More farmers or fewer mouths to resume.</div>'
+        : (st.mode === 'supply' || st.mode === 'deploy') && st.stockpile <= 0
+          ? '<div class="text-xs text-red-400 mb-1">Training needs food — stockpile empty.</div>' : '';
+      const modeOptions = ui.modeOpen ? `<div class="flex gap-1 mb-1">
+        ${MODES.map(([m, lbl]) => `<button data-act="mode" data-mode="${m}"
+          class="btn-sm flex-1 px-1 rounded ${st.mode === m ? (m === 'off' ? 'bg-zinc-600 text-white' : 'bg-emerald-700 text-white') : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}">${lbl}</button>`).join('')}
+      </div>` : '';
+      setPanelHTML(`
+        <div class="flex items-center justify-between mb-1">
+          <span class="font-semibold">🏠 ${st.name || 'Settlement'}</span>
+          <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
+        </div>
+        <div class="h-1 mb-1 rounded bg-zinc-800 overflow-hidden"><div class="h-full ${hpBarCol}" style="width:${hpBarPct}%"></div></div>
+        ${siegeBanner}
+        <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}${gTot > 0 ? ` · <span class="${gFedColor}">${S.fedLabel(gMeter)}</span>` : ''}</div>
+        ${gTot > 0 ? `
+          <div class="flex gap-1 mb-1">
+            ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
+          </div>
+          ${st.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(st.convert)}s (fielding cancels)</div>` : ''}
+          ${garrisonActions}
+        `.replaceAll('data-act="role"', 'data-act="grole"') : ''}
+        <div class="mt-1 pt-1 border-t border-zinc-800">
+          <button data-act="flowdetail" class="block w-full text-left text-xs text-zinc-400 mb-1">${ui.flowOpen ? '▾' : '▸'} Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾 · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></button>
+          ${ui.flowOpen ? `<div class="mb-1 pl-2 border-l border-zinc-800">${flowRows}</div>` : ''}
+          <button data-act="modemenu" class="btn-sm w-full px-2 rounded relative overflow-hidden bg-zinc-800 text-left mb-1">
+            <span class="absolute inset-y-0 left-0 bg-emerald-700/60" style="width:${fillPct}%"></span>
+            <span class="relative flex items-center justify-between"><span>${curMode[1]}</span><span class="text-xs text-zinc-400">${training ? `${fillPct}% · ` : ''}mode ${ui.modeOpen ? '▴' : '▾'}</span></span>
+          </button>
+          ${modeOptions}
+          ${warn}
+        </div>
+        ${fieldAr || wc >= 1 ? `
+        <div class="flex items-center gap-1 mt-1 pt-1 border-t border-zinc-800">
+          ${fieldChips}
+          ${fieldAr ? `<button data-act="fieldn" data-role="${fieldAr}" id="field-hold" style="touch-action:none" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Field ${fieldCur}</button>` : ''}
+          <span class="flex-1"></span>
+          ${wc >= 1 ? `<button data-act="recall" id="recall-hold" style="touch-action:none" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Recall ${rc}</button>` : ''}
+        </div>` : ''}`);
+      const rb = panel.querySelector('#recall-hold');
+      if (rb && !rb.dataset.holdWired) { rb.dataset.holdWired = '1'; attachRecallHold(rb); }
+      const fb = panel.querySelector('#field-hold');
+      if (fb && !fb.dataset.holdWired) { fb.dataset.holdWired = '1'; attachFieldHold(fb); }
+      return;
+    }
     setPanelHTML(`
       <div class="flex items-center justify-between mb-1">
         <span class="font-semibold">🏠 ${st.name || 'Settlement'}</span>
         <span class="text-xs ${st.hp < S.C.SETT_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(st.hp)}/${S.C.SETT_HP}</span>
       </div>
-      <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full ${hpBarCol}" style="width:${hpBarPct}%"></div></div>
+      <div class="h-2 mb-2 rounded bg-zinc-800 overflow-hidden"><div class="h-full ${hpBarCol}" style="width:${hpBarPct}%"></div></div>
       ${siegeBanner}
       <div class="text-xs text-zinc-400 mb-1">Stockpile <b class="text-amber-300">${Math.floor(st.stockpile)}</b> / ${S.C.STOCK_CAP} 🌾
         · ${fmtRate(gross)}/s · net <b class="${Math.round(net * 10) / 10 >= 0 ? 'text-emerald-400' : 'text-red-400'}">${fmtRate(net)}/s</b></div>
       <div class="mb-2 pl-2 border-l border-zinc-800">${flowRows}</div>
-      <div class="text-xs text-zinc-500 mb-1">Production mode${isMobile() ? '' : " (sets new units' role)"}</div>
+      <div class="text-xs text-zinc-500 mb-1">Production mode (sets new units' role)</div>
       <div class="flex gap-1 mb-2">
         ${[['farm', '🌾 Farm'], ['supply', '🚚 Supply'], ['deploy', '⚔️ Deploy'], ['off', '📦 Stockpile']].map(([m, lbl]) => `<button data-act="mode" data-mode="${m}"
           class="btn-sm flex-1 px-1 rounded ${st.mode === m ? (m === 'off' ? 'bg-zinc-600 text-white' : 'bg-emerald-700 text-white') : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}">${lbl}</button>`).join('')}
@@ -2720,7 +2931,7 @@ function renderPanelInner(force) {
           <button data-act="recall" id="recall-btn" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Recall ${rc}</button>
         </div>` : wc === 1 ? '<div class="mt-1 text-right"><button data-act="recall" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600">Recall 1</button></div>' : ''}
       </div>
-      ${isMobile() ? '' : '<div class="text-xs text-zinc-500 mt-1">Farmers claim the lushest free plots — plots poorer than Sparse aren\'t worth manning.</div>'}
+      <div class="text-xs text-zinc-500 mt-1">Farmers claim the lushest free plots — plots poorer than Sparse aren\'t worth manning.</div>
       <div class="mt-2 pt-2 border-t border-zinc-800">
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${g.deploy} 🚚${g.supply} 🌱${g.farm}${gTot > 0 ? ` · <span class="${gFedColor}">${S.fedLabel(gMeter)}</span>` : ''}</div>
         ${gTot > 0 ? `
@@ -2728,10 +2939,8 @@ function renderPanelInner(force) {
             ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
           </div>
           ${st.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(st.convert)}s (fielding cancels)</div>` : ''}
-          ${fieldRows}
-          ${g.farm > 0 && wc >= y.worthwhileCells ? `<button data-act="fieldgroup" class="btn w-full rounded bg-emerald-800 hover:bg-emerald-700 mt-1">🌱 Field ${g.farm} surplus farmer${g.farm === 1 ? '' : 's'}</button>` : ''}
-          ${g.supply >= 1 ? '<button data-act="settroute" class="btn w-full rounded bg-sky-800 hover:bg-sky-700 mt-1">🚚 Supply route to another settlement…</button>' : ''}
-          <button data-act="field" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>
+          ${fieldControls}
+          ${garrisonActions}
         `.replaceAll('data-act="role"', 'data-act="grole"') : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the settlement.</div>'}
       </div>`);
     return;
@@ -2757,6 +2966,14 @@ function renderPanelInner(force) {
     const tgt2 = game.settlements.find(s2 => s2.id === carrierRoute.targetId);
     return (tgt2 && S.besieged(game, tgt2)) || b0.order.holding;
   })());
+  // route endpoints for the panel (#193): "Source → Dest" so the panel
+  // and the map's highlighted line agree on which route this unit serves
+  let routeLegend = '';
+  if (carrierRoute) {
+    const rs = SUP.routeSource(game, carrierRoute);
+    const rt = SUP.routeTarget(game, carrierRoute);
+    if (rs && rt) routeLegend = ` · ${rs.name} → ${carrierRoute.targetKind === 'blob' ? 'army' : rt.name}`;
+  }
   // group build (#130): an under-strength founding party holding its site
   const waitingBuild = blobs.some(b => b.order && b.order.type === 'move' && b.order.build && b.order.waiting);
   const hpSum = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + u.hp, 0), 0);
@@ -2782,7 +2999,8 @@ function renderPanelInner(force) {
       <span class="font-semibold">${multi ? `${blobs.length} blobs` : 'Blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
-    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
+    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
+
     `;
   const convertLine = blobs.some(b => b.convert) ? `<div class="text-xs text-amber-400 mb-2">⚔️ Arming… ready in ~${convertEta(blobs.filter(b => b.convert).reduce((a, b) => (a.convert.done >= b.convert.done ? a : b)).convert)}s — units fight as their old role until then; picking another role cancels</div>` : '';
 

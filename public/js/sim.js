@@ -3074,6 +3074,33 @@ function tickSettlement(game, s) {
       w.garrFood = (w.garrFood || 0) + give;
     }
   }
+  // reserve food for docked supply carriers loading here (#193): a
+  // caravan parked at the depot draws from the stockpile at the START of
+  // next tick (tickCarrier runs before tickSettlement), so without this
+  // hold-back the production sink below — worst in a training mode,
+  // which takes max(surplus, drip) every tick — drains income first and
+  // the caravan stalls with empty saddlebags. Set aside exactly what
+  // those docked carriers will take next tick, AFTER garrison rations
+  // and territory feeding (units eating always come first) but BEFORE
+  // investing in training / farmer growth. Recomputed each tick,
+  // restored at the end of this function — no new serialized state.
+  let carrierReserve = 0;
+  {
+    let demand = 0;
+    for (const r of game.routes) {
+      if (r.settlementId !== s.id || r.owner !== s.owner) continue;
+      for (const id of r.carrierIds) {
+        const b = game.blobs.find(x => x.id === id && !x.dead);
+        if (!b || !b.order || b.order.type !== 'route' || b.order.routeId !== r.id || b.order.phase !== 'load') continue;
+        if (dist(b.x, b.y, s.x + 1, s.y + 1) > SUP.LOAD_RANGE) continue;
+        const cap = total(b) * SUP.CARRY_PER_UNIT;
+        demand += Math.min(cap - (b.order.cargo || 0), cap / 20);
+        demand += Math.min(foodCap(b) - b.food, total(b) * 0.1);
+      }
+    }
+    carrierReserve = Math.min(s.stockpile, Math.max(0, demand));
+    s.stockpile -= carrierReserve;
+  }
   // production (after everyone has eaten, so it only takes true surplus):
   // in a training mode the tick's net surplus is invested into the unit
   // under construction instead of banking in the stockpile (#65) — the
@@ -3101,6 +3128,10 @@ function tickSettlement(game, s) {
       s.garrison[s.mode === 'supply' ? 'supply' : 'deploy']++;
     }
   }
+  // release the docked-carrier hold-back (#193): it survives past
+  // production untouched, so the caravan draws it first next tick. Not
+  // a flow — carrier loading is already ledgered in tickCarrier.
+  s.stockpile += carrierReserve;
   // fold this tick's flow into the EMA (~10 s half-life). One-time
   // transfers (production investment, garrison deposits, fielding
   // grants) are deliberately excluded from flowAcc so the gate doesn't
