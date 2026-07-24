@@ -97,6 +97,13 @@ export function applyCommand(g, owner, c) {
       if (w) S.opFieldWall(g, w.id);
       break;
     }
+    case 'wallRole': {
+      // wall-garrison role switch (#187): own walls only; the op
+      // whitelists the role string itself
+      const w = g.walls.find(x => x.id === c.wallId && x.owner === owner);
+      if (w) S.opWallGarrisonRole(g, w.id, c.role);
+      break;
+    }
     case 'setMode': if (st) S.opSetMode(g, st, c.mode); break;
     case 'fieldGarrison': if (st) S.opFieldGarrison(g, st); break;
     case 'fieldRole': if (st) S.opFieldRole(g, st, c.role, Math.max(1, c.n | 0)); break;

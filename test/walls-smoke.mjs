@@ -70,7 +70,7 @@ function injectWall(game, owner, x, y, garrison) {
     id: game.nextId++, owner, x, y, hp: S.C.WALL_HP, building: false,
     garrison: garrison || { deploy: 0, supply: 0, farm: 0 },
     garrFood: garrison ? (garrison.deploy + garrison.supply + garrison.farm) * S.C.FOOD_PER_UNIT : 0,
-    garrLoss: 0, lastHitT: -999, starving: false,
+    garrLoss: 0, lastHitT: -999, starving: false, convert: null,
   };
   game.walls.push(w);
   game.wallAt[y * game.map.w + x] = w.id;
@@ -238,6 +238,34 @@ function run(game, ticks) {
   check('starving remote garrison loses units',
     wOut.garrison.deploy + wOut.garrison.supply + wOut.garrison.farm < 2,
     `left=${JSON.stringify(wOut.garrison)}`);
+  check(`in-territory larder stockpiles past the old garrison×10 cap (${wIn.garrFood.toFixed(0)}/${S.C.WALL_FOOD_CAP})`,
+    wIn.garrFood > 50, `garrFood=${wIn.garrFood.toFixed(1)}`);
+}
+
+// ---------------------------------------------------------------- 5b. garrison role switching
+
+{
+  console.log('wall garrison role switching:');
+  const g = fresh();
+  const spot = findClearPair(g);
+  const w = injectWall(g, 0, spot.x, spot.y, { deploy: 0, supply: 4, farm: 0 });
+  let r = S.opWallGarrisonRole(g, w.id, 'farm');
+  check('instant switch to farm', !r.err && w.garrison.farm === 4 && w.garrison.supply === 0, JSON.stringify(w.garrison));
+  r = S.opWallGarrisonRole(g, w.id, 'deploy');
+  check('arming to deploy is pending, not instant', !r.err && !!w.convert && w.garrison.deploy === 0, JSON.stringify(w.convert));
+  // the pending arm-up survives save/load and completes on schedule
+  const d = S.serialize(g);
+  const g2 = S.deserialize(JSON.parse(JSON.stringify(d)));
+  const w2 = g2.walls.find(x => x.id === w.id);
+  check('pending arm-up survives save/load', !!(w2 && w2.convert && w2.convert.role === 'deploy'));
+  run(g2, S.C.CONVERT_TICKS + 5);
+  check('arm-up completes after CONVERT_TICKS', w2.garrison.deploy === 4 && !w2.convert, JSON.stringify(w2.garrison));
+  // fielding cancels a pending arm-up — the units march out unconverted
+  S.opWallGarrisonRole(g, w.id, 'supply');
+  S.opWallGarrisonRole(g, w.id, 'deploy');
+  const rf = S.opFieldWall(g, w.id);
+  check('fielding cancels the pending arm-up', !rf.err && w.convert == null && rf.blob.count.supply === 4,
+    JSON.stringify(rf.blob && rf.blob.count));
 }
 
 // ---------------------------------------------------------------- 6. supply routes feed wall garrisons
@@ -268,7 +296,7 @@ function run(game, ticks) {
   let peak = w.garrFood;
   for (let t = 0; t < 2500; t++) { S.step(g); peak = Math.max(peak, w.garrFood); }
   const gTot = w.garrison.deploy + w.garrison.supply + w.garrison.farm;
-  check(`caravan topped the garrison up (peak garrFood ${peak.toFixed(1)})`, peak > 15, `peak=${peak.toFixed(1)}`);
+  check(`caravan stockpiled past the old garrison×10 cap (peak ${peak.toFixed(1)})`, peak > 40, `peak=${peak.toFixed(1)}`);
   check(`rations still healthy at the end (${w.garrFood.toFixed(1)})`, w.garrFood > 5, `garrFood=${w.garrFood.toFixed(1)}`);
   check('garrison survived on caravan rations', gTot === 2, `left=${JSON.stringify(w.garrison)}`);
   check('route still alive', g.routes.some(x => x.targetKind === 'wall' && x.targetId === w.id));

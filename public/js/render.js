@@ -1394,7 +1394,7 @@ export function createRenderer(canvas, minimap) {
     // slow-blinking red when the garrison is starving on an empty meter.
     // Same s ≥ 8 threshold as the chip so it stays unobtrusive.
     if (!ghost && !building && gTot > 0 && s >= 8) {
-      const meter = Math.max(0, Math.min(1, (w.garrFood || 0) / (gTot * S.C.FOOD_PER_UNIT)));
+      const meter = Math.max(0, Math.min(1, (w.garrFood || 0) / S.C.WALL_FOOD_CAP));
       let ry = y0 + size + 1;
       if (w.hp < S.C.WALL_HP) ry += 4; // stack under the damage bar
       const rx = x0 + size * 0.15, rw = size * 0.7;

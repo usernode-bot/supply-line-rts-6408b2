@@ -77,6 +77,7 @@ export const C = {
   WALL_BUILD_TICKS: 120,   // ticks per tile for a SINGLE builder unit (≈24 s at 1×)
   WALL_BUILD_MAX_SPEED: 4, // cap on the √crew-size build multiplier (fastest tile ≈6 s at 1×)
   WALL_GARRISON_CAP: 4,    // units per wall tile
+  WALL_FOOD_CAP: 100,      // flat food stockpile per wall tile — the garrison's larder
   WALL_NEAR_PROT: 10,      // structure-damage divisor while a friendly garrison is within 1 tile
   WALL_VISION: 4,          // fog reveal radius per GARRISONED wall tile
 };
@@ -871,20 +872,44 @@ export function opBuildWalls(game, b, tiles) {
   return { ok: true, queued: valid.length, skipped: tiles.length - valid.length };
 }
 
-// Field a wall's whole garrison as one blob beside the tile, carrying
-// the garrison's rations (like opFieldGarrison, minus the stockpile
-// top-up — walls have no stockpile).
+// Field a wall's whole garrison as one blob beside the tile. The units
+// march out with what they can carry from the tile's stockpile; the
+// rest stays in the larder for the next garrison.
 export function opFieldWall(game, wallId) {
   const w = game.walls.find(x => x.id === wallId);
   if (!w) return { err: 'No such wall' };
   if (wallGarrisonTotal(w) === 0) return { err: 'No garrison' };
+  w.convert = null; // fielding cancels a pending garrison arm-up
   const i = w.y * game.map.w + w.x;
   const spot = nearestPassable(game.map, w.x, w.y, 4, null, new Set([i])) || { x: w.x, y: w.y };
   const b = makeBlob(game, w.owner, spot.x + 0.5, spot.y + 0.5, w.garrison);
-  b.food = Math.min(foodCap(b), Math.max(0, w.garrFood || 0));
-  w.garrFood = 0;
+  const take = Math.min(foodCap(b), Math.max(0, w.garrFood || 0));
+  b.food = take;
+  w.garrFood = Math.max(0, (w.garrFood || 0) - take);
   w.garrison = { deploy: 0, supply: 0, farm: 0 };
   return { ok: true, blob: b };
+}
+
+// Switch a wall garrison's role, mirroring opGarrisonRole for
+// settlements: disarming to supply/farm is instant; arming to deploy
+// takes CONVERT_TICKS and completes in tickWalls. Fielding cancels.
+export function opWallGarrisonRole(game, wallId, role) {
+  const w = game.walls.find(x => x.id === wallId);
+  if (!w) return { err: 'No such wall' };
+  if (w.building) return { err: 'Still under construction' };
+  if (!['deploy', 'supply', 'farm'].includes(role)) return { err: 'Bad role' };
+  const g = wallGarrisonTotal(w);
+  if (g === 0) return { err: 'No garrison' };
+  if (role === 'deploy') {
+    if (w.garrison.deploy === g) { w.convert = null; return { ok: true }; }
+    if (w.convert && w.convert.role === 'deploy') return { ok: true };
+    w.convert = { role: 'deploy', done: game.tick + C.CONVERT_TICKS };
+    return { ok: true };
+  }
+  w.convert = null;
+  w.garrison = { deploy: 0, supply: 0, farm: 0 };
+  w.garrison[role] = g;
+  return { ok: true };
 }
 
 // Builder order tick: march to the current tile, start the site on
@@ -927,7 +952,7 @@ function tickWallOrder(game, b, o) {
     const w = {
       id: game.nextId++, owner: b.owner, x: t.x, y: t.y, hp: 0, building: true,
       garrison: { deploy: 0, supply: 0, farm: 0 }, garrFood: 0,
-      garrLoss: 0, lastHitT: -999, starving: false,
+      garrLoss: 0, lastHitT: -999, starving: false, convert: null,
     };
     game.walls.push(w);
     game.wallAt[i] = w.id;
@@ -978,17 +1003,27 @@ function tickWallBuild(game) {
 }
 
 // Per-wall upkeep: slow self-repair out of combat (same rate as
-// settlements) and the garrison meter — eat, starve, recover.
+// settlements), pending garrison arm-ups, and the tile's food
+// stockpile — a flat WALL_FOOD_CAP larder the garrison eats from.
 function tickWalls(game) {
   for (const w of [...game.walls]) {
     if (w.building) continue;
     if (w.hp < C.WALL_HP && game.tick - (w.lastHitT != null ? w.lastHitT : -999) > 100) {
       w.hp = Math.min(C.WALL_HP, w.hp + C.SETT_REGEN);
     }
+    // pending garrison arm-up (#108 pattern): converts the whole
+    // garrison to the ordered role once the countdown completes
+    if (w.convert && game.tick >= w.convert.done) {
+      const gAll = wallGarrisonTotal(w);
+      if (gAll > 0) {
+        w.garrison = { deploy: 0, supply: 0, farm: 0 };
+        w.garrison[w.convert.role] = gAll;
+      }
+      w.convert = null;
+    }
     const g = wallGarrisonTotal(w);
+    w.garrFood = Math.min(w.garrFood || 0, C.WALL_FOOD_CAP);
     if (g > 0) {
-      const gcap = g * C.FOOD_PER_UNIT;
-      w.garrFood = Math.min(w.garrFood || 0, gcap);
       w.garrFood = Math.max(0, w.garrFood - g * C.EAT_PER_SEC * C.DT);
       if (w.garrFood <= 0.0001) {
         if (!w.starving) {
@@ -996,7 +1031,7 @@ function tickWalls(game) {
           game.events.push({ owner: w.owner, msg: '💀 Your wall garrison is starving!', x: w.x + 0.5, y: w.y + 0.5 });
         }
         applyGarrisonLosses(game, w, g * C.STARVE_FRAC, true, w.x + 0.5, w.y + 0.5);
-      } else if (w.starving && w.garrFood >= 0.25 * gcap) {
+      } else if (w.starving && w.garrFood >= 0.25 * g * C.FOOD_PER_UNIT) {
         w.starving = false;
       }
     }
@@ -1862,8 +1897,7 @@ function tickOrder(game, b) {
             }
             recount(b);
             b.food = Math.max(0, b.food - foodShare);
-            const gcap = wallGarrisonTotal(w) * C.FOOD_PER_UNIT;
-            w.garrFood = Math.min(gcap, (w.garrFood || 0) + foodShare);
+            w.garrFood = Math.min(C.WALL_FOOD_CAP, (w.garrFood || 0) + foodShare);
             if (b.units.length === 0) b.dead = true;
             else b.food = Math.min(b.food, foodCap(b));
             game.events.push({ owner: b.owner, msg: `🧱 +${take} garrisoned on the wall`, x: w.x + 0.5, y: w.y + 0.5 });
@@ -2062,10 +2096,8 @@ function tickCarrier(game, b) {
       taken = Math.min(give, room);
       tgt.food += taken;
     } else if (route.targetKind === 'wall') {
-      // wall garrisons have no stockpile — deliveries top up the
-      // garrison's rations meter directly (#187)
-      const gcap = wallGarrisonTotal(tgt) * C.FOOD_PER_UNIT;
-      const room = Math.max(0, gcap - (tgt.garrFood || 0));
+      // deliveries fill the wall tile's flat food stockpile (#187)
+      const room = Math.max(0, C.WALL_FOOD_CAP - (tgt.garrFood || 0));
       taken = Math.min(give, room);
       tgt.garrFood = (tgt.garrFood || 0) + taken;
     } else {
@@ -2994,7 +3026,7 @@ function tickSettlement(game, s) {
       if (w.owner !== s.owner || w.building) continue;
       const gw = wallGarrisonTotal(w);
       if (gw <= 0 || !inTerritory(game, s, w.x + 0.5, w.y + 0.5)) continue;
-      const give = Math.min(gw * C.FOOD_PER_UNIT - (w.garrFood || 0), s.stockpile, gw * 0.1);
+      const give = Math.min(C.WALL_FOOD_CAP - (w.garrFood || 0), s.stockpile, gw * 0.1);
       if (give <= 0) continue;
       s.stockpile -= give;
       s.flowAcc -= give;
@@ -3323,6 +3355,7 @@ export function serialize(game) {
     walls: game.walls.map(w => ({
       id: w.id, owner: w.owner, x: w.x, y: w.y, hp: w.hp,
       building: !!w.building, garrison: w.garrison, garrFood: w.garrFood || 0,
+      convert: w.convert || null,
     })),
     ruins: game.ruins,
     fertDelta,
@@ -3405,6 +3438,7 @@ export function deserialize(data, prev) {
       garrison: wd.garrison || { deploy: 0, supply: 0, farm: 0 },
       garrFood: wd.garrFood || 0,
       garrLoss: 0, lastHitT: -999, starving: false,
+      convert: wd.convert || null,
     };
     game.walls.push(w);
     game.wallAt[w.y * map.w + w.x] = w.id;

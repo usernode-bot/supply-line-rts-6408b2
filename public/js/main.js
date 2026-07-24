@@ -821,6 +821,11 @@ function doFieldWall(w) {
   if (inPvp()) sendCmd({ op: 'fieldWall', wallId: w.id });
   return S.opFieldWall(game, w.id);
 }
+function doWallRole(w, role) {
+  if (tutBlocked('wallRole')) return TUT_BLOCKED;
+  if (inPvp()) sendCmd({ op: 'wallRole', wallId: w.id, role });
+  return S.opWallGarrisonRole(game, w.id, role);
+}
 
 // ---------------------------------------------------------------- match lifecycle
 
@@ -2245,6 +2250,16 @@ panel.addEventListener('click', (e) => {
       }
       break;
     }
+    case 'wrole': {
+      // wall-garrison role switch (#187) — mirrors the settlement 'grole'
+      const w = ui.selected && ui.selected.kind === 'wall'
+        ? game.walls.find(x => x.id === ui.selected.id) : null;
+      if (w) {
+        r = doWallRole(w, btn.dataset.role);
+        if (r.err) toast(r.err);
+      }
+      break;
+    }
     case 'pillage': {
       for (const b of blobs) doPillage(b, !b.pillaging);
       break;
@@ -2497,7 +2512,7 @@ function renderPanelInner(force) {
     const barCol = w.building ? 'bg-amber-500' : pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
     const prot = S.wallProtected(game, w);
     if (w.owner === me) {
-      const gMeter = gTot > 0 ? Math.max(0, Math.min(1, (w.garrFood || 0) / (gTot * S.C.FOOD_PER_UNIT))) : 0;
+      const gMeter = Math.max(0, Math.min(1, (w.garrFood || 0) / S.C.WALL_FOOD_CAP));
       const gFedColor = gMeter >= 0.75 ? 'text-emerald-400' : gMeter >= 0.5 ? 'text-lime-400' : gMeter >= 0.25 ? 'text-amber-400' : 'text-red-400';
       setPanelHTML(`
         <div class="flex items-center justify-between mb-1">
@@ -2508,14 +2523,18 @@ function renderPanelInner(force) {
         ${w.building
           ? '<div class="text-xs text-zinc-400">Builders raise it while standing beside the tile — more hands build faster. It can be attacked the whole time.</div>'
           : `<div class="text-xs mb-1 ${prot ? 'text-emerald-400' : 'text-amber-400'}">${prot ? '🛡️ Protected — a garrison holds within 1 tile' : '⚠️ Unprotected — falls fast under attack'}</div>
-        <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${w.garrison.deploy} 🚚${w.garrison.supply} 🌱${w.garrison.farm} / ${S.C.WALL_GARRISON_CAP}${gTot > 0 ? ` · <span class="${gFedColor}">${S.fedLabel(gMeter)}</span>` : ''}</div>
+        <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${w.garrison.deploy} 🚚${w.garrison.supply} 🌱${w.garrison.farm} / ${S.C.WALL_GARRISON_CAP} · Stockpile <b class="${gFedColor}">🌾 ${Math.floor(w.garrFood || 0)}</b> / ${S.C.WALL_FOOD_CAP}</div>
         ${(() => {
           // inbound wall-garrison supply lines (#187)
           const inW = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'wall' && r2.targetId === w.id);
           return inW.length ? '<div class="text-xs text-sky-300 mb-1">🚚 Supplied by ' + (inW.length === 1 ? 'a supply route' : inW.length + ' supply routes') + '</div>' : '';
         })()}
         ${gTot > 0
-          ? '<button data-act="fieldwall" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (' + gTot + ')</button>'
+          ? `<div class="flex gap-1 mb-1">
+              ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
+            </div>
+            ${w.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(w.convert)}s (fielding cancels)</div>` : ''}
+            <button data-act="fieldwall" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>`.replaceAll('data-act="role"', 'data-act="wrole"')
           : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '). A garrisoned wall attacks enemies within 1 tile; a supply route can keep it fed.</div>'}`}`);
     } else {
       const vis = S.isVisible(game, w.x + 0.5, w.y + 0.5);

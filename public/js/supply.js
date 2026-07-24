@@ -142,7 +142,7 @@ export function routeHealth(game, route) {
   const full = route.targetKind === 'blob'
     ? target.food >= 0.95 * foodCap(target)
     : route.targetKind === 'wall'
-      ? (target.garrFood || 0) >= 0.95 * units * C.FOOD_PER_UNIT
+      ? (target.garrFood || 0) >= 0.95 * C.WALL_FOOD_CAP
       : target.stockpile >= 0.95 * C.STOCK_CAP;
   if (full || units <= 0) return 1;
   // consumption: units × (1/12) food/s over the window span
