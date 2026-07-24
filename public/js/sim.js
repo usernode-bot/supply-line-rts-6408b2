@@ -407,6 +407,15 @@ export function newTutorialGame() {
     const fb = spawnWorkingFarmer(game, outpost);
     fb.food = foodCap(fb);
   }
+  // Fielded supply band for the resupply step: 4 supply units camped in
+  // the open just outside the outpost's footprint — deliberately NOT
+  // garrisoned, so the player walks the select-units-then-route flow.
+  // Idle blobs are never absorbed (garrisoning triggers only on
+  // move-order arrival) and the outpost's territory keeps them fed.
+  const cSpot = nearestPassable(game.map, outpost.x + 3, outpost.y + 1, 4, null,
+    new Set(settTiles(game.map, outpost))) || { x: outpost.x + 3, y: outpost.y + 1 };
+  const carriers = makeBlob(game, 0, cSpot.x + 0.5, cSpot.y + 0.5, { deploy: 0, supply: 4, farm: 0 });
+  carriers.food = foodCap(carriers);
   // Enemy war party camped near the outpost: inside its vision
   // (VISION_SETT 8) so it renders immediately, and beyond AGGRO reach of
   // the field crews (farmers work up to ~2.7 from the center, so ≥ 6.8
@@ -444,7 +453,7 @@ export function newTutorialGame() {
   for (const u of eb.units) u.hp = Math.round(unitMaxHP(u.role) * 0.5);
   eb.food = foodCap(eb);
   const army = game.blobs.find(b => b.owner === 0 && b.count.deploy >= C.SETT_COST);
-  game.tutorialIds = { home: home.id, outpost: outpost.id, army: army.id, enemy: eb.id };
+  game.tutorialIds = { home: home.id, outpost: outpost.id, army: army.id, enemy: eb.id, carriers: carriers.id };
   updateVision(game);
   return game;
 }
