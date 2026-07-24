@@ -357,6 +357,24 @@ export function createRenderer(canvas, minimap) {
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(terrain, ox, oy, game.map.w * s, game.map.h * s);
 
+    // selected blob ids — single tap OR box multi-select (#62): the same
+    // white ring / path treatment applies to every selected blob,
+    // working farmers included. Computed before the route pass so a
+    // selected carrier can light up its supply line (#193).
+    let selSet = null;
+    if (ui.selected) {
+      if (ui.selected.kind === 'multi') selSet = new Set(ui.selected.ids);
+      else if (ui.selected.kind === 'blob' || ui.selected.kind === 'enemy-blob') selSet = new Set([ui.selected.id]);
+    }
+    // routes served by a selected carrier (#193) — drawn highlighted
+    // below; the fog gate still decides whether an enemy line draws
+    const hlRoutes = new Set();
+    if (selSet) {
+      for (const b of game.blobs) {
+        if (!b.dead && selSet.has(b.id) && b.order && b.order.type === 'route') hlRoutes.add(b.order.routeId);
+      }
+    }
+
     // supply routes (under entities)
     for (const r of game.routes) {
       const src = SUP.routeSource(game, r);
@@ -368,15 +386,30 @@ export function createRenderer(canvas, minimap) {
         if (!seen) continue;
       }
       const health = SUP.routeHealth(game, r);
-      ctx.strokeStyle = health >= 0.9 ? 'rgba(74,222,128,0.8)'
-        : health >= 0.5 ? 'rgba(251,191,36,0.8)' : 'rgba(248,113,113,0.85)';
-      ctx.lineWidth = 2;
+      const hl = hlRoutes.has(r.id);
+      if (hl) {
+        // soft sky underlay so the selected carrier's line pops (#193)
+        ctx.strokeStyle = 'rgba(56,189,248,0.30)';
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        ctx.moveTo(wx(src.x + 1), wy(src.y + 1));
+        ctx.lineTo(wx(tp.x), wy(tp.y));
+        ctx.stroke();
+      }
+      ctx.strokeStyle = health >= 0.9 ? `rgba(74,222,128,${hl ? 1 : 0.8})`
+        : health >= 0.5 ? `rgba(251,191,36,${hl ? 1 : 0.8})` : `rgba(248,113,113,${hl ? 1 : 0.85})`;
+      ctx.lineWidth = hl ? 3 : 2;
       ctx.setLineDash(r.owner !== viewer(game) ? [6, 5] : [10, 4]);
+      // highlighted dashes march from source toward destination — wall
+      // clock, like the armed-source halo, so they keep moving while
+      // the game is paused
+      if (hl) ctx.lineDashOffset = -((now / 40) % 14);
       ctx.beginPath();
       ctx.moveTo(wx(src.x + 1), wy(src.y + 1));
       ctx.lineTo(wx(tp.x), wy(tp.y));
       ctx.stroke();
       ctx.setLineDash([]);
+      ctx.lineDashOffset = 0;
     }
 
     // territory borders — armies inside get fed from the stockpile.
@@ -427,15 +460,6 @@ export function createRenderer(canvas, minimap) {
       strokeTerritory(k.x, k.y);
     }
     ctx.globalAlpha = 1;
-
-    // selected blob ids — single tap OR box multi-select (#62): the same
-    // white ring / path treatment applies to every selected blob,
-    // working farmers included
-    let selSet = null;
-    if (ui.selected) {
-      if (ui.selected.kind === 'multi') selSet = new Set(ui.selected.ids);
-      else if (ui.selected.kind === 'blob' || ui.selected.kind === 'enemy-blob') selSet = new Set([ui.selected.id]);
-    }
 
     // selected blob paths (own blobs only — never reveal enemy plans)
     if (selSet) {
@@ -494,6 +518,39 @@ export function createRenderer(canvas, minimap) {
       if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
       const sel = ui.selected && (ui.selected.kind === 'settlement' || ui.selected.kind === 'enemy-settlement') && ui.selected.id === st.id;
       drawSettlement(game, st, wx, wy, s, false, sel, workingBy.get(st.id) || 0);
+    }
+
+    // selected-carrier route endpoints (#193): steady sky markers on the
+    // highlighted line's source and destination — a dashed rect around a
+    // settlement footprint, a ring around an army target. Deliberately
+    // non-pulsing so they can't read as the armed-source halo below.
+    if (hlRoutes.size) {
+      ctx.strokeStyle = 'rgba(56,189,248,0.8)';
+      ctx.lineWidth = 2.5;
+      const markSett = (st2) => {
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(wx(st2.x) - 3, wy(st2.y) - 3, 2 * s + 6, 2 * s + 6);
+        ctx.setLineDash([]);
+      };
+      for (const r of game.routes) {
+        if (!hlRoutes.has(r.id)) continue;
+        const rsrc = SUP.routeSource(game, r);
+        const rtgt = SUP.routeTarget(game, r);
+        if (!rsrc || !rtgt) continue;
+        if (r.owner !== viewer(game)) {
+          // same fog gate as the line itself — markers never reveal more
+          const tp2 = r.targetKind === 'blob' ? { x: bx(rtgt), y: by(rtgt) } : S.settCenter(rtgt);
+          if (!S.settVisible(game, rsrc) && !S.isVisible(game, tp2.x, tp2.y)) continue;
+        }
+        markSett(rsrc);
+        if (r.targetKind === 'blob') {
+          ctx.beginPath();
+          ctx.arc(wx(bx(rtgt)), wy(by(rtgt)), Math.max(10, S.blobRadius(rtgt) * s) + 4, 0, Math.PI * 2);
+          ctx.stroke();
+        } else {
+          markSett(rtgt);
+        }
+      }
     }
 
     // armed supply-route source: while a route pick is pending, a pulsing
