@@ -408,8 +408,9 @@ function findRemoteTile(game) {
   // arrival: a full-bellied blob garrisons an EMPTY wall — bellies fill to
   // capacity, the spare spills into the stash
   const wA = injectWall(g, 0, far.x, far.y, null, { garrFood: 0, stock: 0 });
-  const b = spawnBlob(g, 0, far.x + 2.5, far.y + 0.5, 6, 0); // 6 units, 60🌾
-  b.food = 60;
+  // 10 units (more than the 8-per-tile cap, #199) so the cap is exercised
+  const b = spawnBlob(g, 0, far.x + 2.5, far.y + 0.5, 10, 0); // 10 units, 100🌾
+  b.food = 100;
   S.opMove(g, b, far.x + 0.5, far.y + 0.5);
   run(g, 400);
   const gA = S.wallGarrisonTotal(wA);
@@ -423,7 +424,7 @@ function findRemoteTile(game) {
   const leftover = g.blobs.filter(x => !x.dead && x.owner === 0 && x.id === b.id)
     .reduce((a, x) => a + x.food, 0);
   check('no food invented or lost when garrisoning',
-    wA.garrFood + (wA.stock || 0) + leftover <= 60 + 1e-6,
+    wA.garrFood + (wA.stock || 0) + leftover <= 100 + 1e-6,
     `bellies=${wA.garrFood.toFixed(2)} stock=${(wA.stock || 0).toFixed(2)} blob=${leftover.toFixed(2)}`);
 
   check('bellies never exceed the garrison capacity after an arrival',

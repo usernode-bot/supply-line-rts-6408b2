@@ -11,7 +11,7 @@
 // aiTick once per owner with its own state object — the defaults keep
 // every existing call site behaving exactly as before.
 
-import { dist } from './mapgen.js';
+import { dist, passable } from './mapgen.js';
 
 const SETT_TARGETS = { small: 3, medium: 4, large: 5 };
 
@@ -27,6 +27,7 @@ export function aiTick(game, S, owner = 1, state = game.ai) {
   updateMemory(game, S, mine, setts, owner, state, diff);
   develop(game, S, setts, mine);
   defend(game, S, setts, mine, state, diff);
+  walls(game, S, setts, mine, state, diff, owner);
   expand(game, S, setts, mine, state, diff);
   scout(game, S, setts, mine, state, diff, owner);
   attack(game, S, setts, mine, state, diff);
@@ -180,6 +181,7 @@ function expand(game, S, setts, mine, state, diff) {
 
 function pickSite(game, S, setts, state, diff) {
   const { w, h } = game.map;
+  const owner = setts[0].owner;
   let best = null, bestScore = -Infinity;
   for (let y = 4; y < h - 4; y += 3) {
     for (let x = 4; x < w - 4; x += 3) {
@@ -195,7 +197,13 @@ function pickSite(game, S, setts, state, diff) {
       const fert = siteFertility(game, x, y);
       let danger = 0;
       for (const k of Object.values(state.known)) danger += Math.max(0, 30 - dist(k.x, k.y, x, y));
-      let score = fert - nearest * 0.15 - danger * 0.2;
+      // own wall tiles inside the would-be farm ring cost plots
+      // (previewFields skips walls, #205) — steer founding away from them
+      let wallPen = 0;
+      for (const wl of game.walls || []) {
+        if (wl.owner === owner && dist(wl.x + 0.5, wl.y + 0.5, x + 1, y + 1) <= 2.7) wallPen += 1.5;
+      }
+      let score = fert - nearest * 0.15 - danger * 0.2 - wallPen;
       // a sloppy surveyor mis-judges land quality, so the best site
       // doesn't reliably win (easy)
       if (diff.siteNoise) score *= 1 - Math.random() * diff.siteNoise;
@@ -318,6 +326,7 @@ function muster(game, S, setts, mine, state, diff) {
   for (const b of mine) {
     if (b.order || b.pillaging || b.id === state.armyId || b.id === state.scoutId) continue;
     if (state.expand && state.expand.blobId === b.id) continue;
+    if (state.wallPlan && state.wallPlan.blobId === b.id) continue; // crew about to garrison (#205)
     if (b.count.deploy === 0) continue;
     const r = rallyPoint(game, setts);
     if (dist(b.x, b.y, r.x, r.y) > 3) S.opMove(game, b, r.x, r.y);
@@ -382,7 +391,8 @@ function attack(game, S, setts, mine, state, diff) {
   // launch a new offensive when the rally blob is big enough
   const candidates = mine.filter(b =>
     b.count.deploy >= diff.muster && b.id !== state.scoutId &&
-    !(state.expand && state.expand.blobId === b.id));
+    !(state.expand && state.expand.blobId === b.id) &&
+    !(state.wallPlan && state.wallPlan.blobId === b.id));
   if (!candidates.length) return;
   const army = candidates[0];
   const t = nearestKnown(state, army.x, army.y, game, diff);
@@ -465,8 +475,42 @@ function defend(game, S, setts, mine, state, diff) {
       if (best && bd > 3) {
         S.opMove(game, best, s.x + 1, s.y + 1);
         if (best.id === state.armyId) { state.armyId = null; state.attacking = false; }
+        if (state.wallPlan && best.id === state.wallPlan.blobId) state.wallPlan = null;
       }
       break; // one proactive response per evaluation is plenty
+    }
+  }
+  // wall upkeep (hard, #205): arm any manned own wall that isn't deploy
+  // yet, and re-garrison a bared in-territory wall with a remembered war
+  // party bearing down — one re-garrison per evaluation is plenty
+  if (diff.wallGarrison && game.walls && game.walls.length) {
+    const owner = setts[0].owner;
+    for (const w of game.walls) {
+      if (w.owner !== owner || w.building || w.convert) continue;
+      const g = S.wallGarrisonTotal(w);
+      if (g > 0 && w.garrison.deploy < g) S.opWallGarrisonRole(game, w.id, 'deploy');
+    }
+    if (state.threats) {
+      const range = S.C.TERRITORY + S.C.AGGRO;
+      for (const w of game.walls) {
+        if (w.owner !== owner || w.building || S.wallGarrisonTotal(w) > 0) continue;
+        let close = false;
+        for (const k of Object.values(state.threats)) {
+          if (dist(k.x, k.y, w.x + 0.5, w.y + 0.5) <= range) { close = true; break; }
+        }
+        if (!close) continue;
+        // only walls a settlement's drip can feed get a fresh garrison
+        const home = setts.find(x => !x.building && S.garrisonTotal(x) >= 8 &&
+          S.inTerritory(game, x, w.x + 0.5, w.y + 0.5));
+        if (!home) continue;
+        const role = home.garrison.supply >= 4 ? 'supply'
+          : home.garrison.farm >= 4 ? 'farm'
+          : home.garrison.deploy >= 8 ? 'deploy' : null;
+        if (!role) continue;
+        const r = S.opFieldRole(game, home, role, 4);
+        if (r.ok) S.opMove(game, r.blob, w.x + 0.5, w.y + 0.5);
+        break;
+      }
     }
   }
   const hit = setts.find(s => game.tick - s.lastHitT < 100);
@@ -481,5 +525,299 @@ function defend(game, S, setts, mine, state, diff) {
   if (best && bd > 3) {
     S.opMove(game, best, hit.x + 1, hit.y + 1);
     if (best.id === state.armyId) { state.armyId = null; state.attacking = false; }
+    if (state.wallPlan && best.id === state.wallPlan.blobId) state.wallPlan = null;
   }
+}
+
+// -- walls (#205): fortify threatened and frontier settlements ----------
+// Shares the player's rules exactly: any unit builds, and a wall costs
+// only time and hands. Shields go in the 3.2–4.4 band around a
+// settlement's footprint center — outside the 2.7 farm ring (no plot is
+// ever denied), inside TERRITORY (the stockpile drip feeds a garrison).
+// No Math.random anywhere in placement, so attract snapshots and
+// save/resume replays stay reproducible.
+
+const WALL_ARC = Math.PI * 35 / 180; // ± around the threat bearing
+const WALL_JOB_TICKS = 1800;         // stalled-job deadline (~6 min at 1×)
+const WALL_RING_MIN = 3.2;
+const WALL_RING_MAX = 4.4;
+const WALL_PER_SETT = 6;             // per-settlement fortification cap
+
+function walls(game, S, setts, mine, state, diff, owner) {
+  // -- finish an in-flight job first (mirrors expand's shape) --
+  if (state.wallPlan) {
+    const plan = state.wallPlan;
+    // garrison phase (hard): the crew is marching onto the finished
+    // chain; once folded into the tile, arm the wall garrison
+    if (plan.phase === 'garrison') {
+      const wid = game.wallAt[plan.gy * game.map.w + plan.gx];
+      const w = wid ? game.walls.find(x => x.id === wid && x.owner === owner) : null;
+      if (!w || game.tick - plan.t > WALL_JOB_TICKS) { state.wallPlan = null; return; }
+      if (S.wallGarrisonTotal(w) > 0) {
+        S.opWallGarrisonRole(game, w.id, 'deploy');
+        state.wallPlan = null;
+      }
+      return;
+    }
+    let b = mine.find(x => x.id === plan.blobId);
+    if (!b && game.mergeLog && game.mergeLog[plan.blobId] != null) {
+      b = mine.find(x => x.id === game.mergeLog[plan.blobId]);
+      if (b) plan.blobId = b.id;
+    }
+    if (!b) { state.wallPlan = null; return; } // crew died
+    if (plan.kind === 'shield' && !game.settlements.some(x => x.id === plan.settId)) {
+      state.wallPlan = null; // shielded town fell — nothing left to cover
+      sendToRally(game, S, setts, b);
+      return;
+    }
+    if (b.order && b.order.type !== 'wall') { state.wallPlan = null; return; } // crew repurposed
+    if (game.tick - plan.t > WALL_JOB_TICKS) {
+      // stalled — abandon the job (the move overrides the wall order)
+      state.wallPlan = null;
+      sendToRally(game, S, setts, b);
+      return;
+    }
+    if (!b.order) {
+      // run finished (or was cancelled by the sim)
+      if (diff.wallGarrison && plan.kind === 'shield') {
+        const done = plan.tiles.filter(t => {
+          const wid = game.wallAt[t.y * game.map.w + t.x];
+          const w = wid && game.walls.find(x => x.id === wid);
+          return w && w.owner === owner && !w.building;
+        });
+        if (done.length) {
+          // man the middle of the chain — arrival folds the crew in
+          const t = done[(done.length - 1) >> 1];
+          if (S.opMove(game, b, t.x + 0.5, t.y + 0.5).ok) {
+            plan.phase = 'garrison'; plan.gx = t.x; plan.gy = t.y; plan.t = game.tick;
+            return;
+          }
+        }
+      }
+      state.wallPlan = null;
+      if (b.count.deploy > 0) sendToRally(game, S, setts, b);
+      else S.opMove(game, b, setts[0].x + 1, setts[0].y + 1); // reabsorb the hands
+    }
+    return;
+  }
+
+  // -- gates --
+  if (!diff.wallCap) return; // a careless commander never walls (easy)
+  if (game.tick - (state.lastWall || 0) < diff.wallTicks) return;
+  if (state.expand) return; // never compete with a founding
+  let ownTiles = 0;
+  for (const w of game.walls || []) if (w.owner === owner) ownTiles++;
+  if (ownTiles >= diff.wallCap) return;
+
+  const target = SETT_TARGETS[game.sizeKey] || 4;
+  const reactiveOnly = setts.length < target; // defence beats greed pre-target
+  const threshold = diff.threats ? 1 : 3;     // an alert commander walls pre-emptively
+
+  // -- threat score per settlement (fog-fair evidence only) --
+  const enemyStart = game.map.starts[1 - owner];
+  let frontier = null, fd = Infinity;
+  for (const s of setts) {
+    if (s.building) continue;
+    const d = dist(s.x + 1, s.y + 1, enemyStart.x, enemyStart.y);
+    if (d < fd) { fd = d; frontier = s; }
+  }
+  let best = null, bestScore = 0;
+  for (const s of setts) {
+    if (s.building) continue;
+    let near = 0;
+    for (const w of game.walls || []) {
+      if (w.owner === owner && dist(w.x + 0.5, w.y + 0.5, s.x + 1, s.y + 1) <= S.C.TERRITORY) near++;
+    }
+    if (near >= WALL_PER_SETT) continue; // already fortified
+    let score = 0;
+    if (game.tick - s.lastHitT < 600) score += 3;
+    if (S.besieged(game, s)) score += 3;
+    if (diff.threats && state.threats) {
+      const range = S.C.TERRITORY + S.C.AGGRO + 6;
+      for (const k of Object.values(state.threats)) {
+        if (dist(k.x, k.y, s.x + 1, s.y + 1) <= range) { score += 2; break; }
+      }
+    }
+    for (const k of Object.values(state.known)) {
+      if (dist(k.x, k.y, s.x + 1, s.y + 1) <= 22) { score += 1; break; }
+    }
+    if (diff.threats && s === frontier) score += 1; // frontier fortification
+    if (score > bestScore) { bestScore = score; best = s; } // first-in-list keeps ties
+  }
+
+  if (best && bestScore >= threshold && (!reactiveOnly || bestScore >= 3)) {
+    state.lastWall = game.tick; // started OR refused — back off either way
+    const reactive = game.tick - best.lastHitT < 600 || S.besieged(game, best);
+    const span = Math.min(diff.wallSpan || 3, diff.wallCap - ownTiles);
+    if (span < 2) return; // a 1-tile stub shields nothing
+    const tiles = planShield(game, S, best, threatBearing(game, state, best, owner), span, owner);
+    if (!tiles) return;
+    const crew = wallCrew(game, S, setts, mine, state, best, reactive, target, diff);
+    if (!crew) return;
+    dispatchWallJob(game, S, state, crew, 'shield', best.id, tiles);
+    return;
+  }
+  // choke plug (hard): no settlement calls for a shield — seal a narrow
+  // pass on the approach to the frontier town instead. Left unmanned by
+  // design: it sits outside territory, where a garrison would starve.
+  if (diff.wallChoke && !reactiveOnly && frontier) {
+    state.lastWall = game.tick;
+    const tiles = planChoke(game, S, frontier, threatBearing(game, state, frontier, owner), owner,
+      Math.min(4, diff.wallCap - ownTiles));
+    if (!tiles) return;
+    const crew = wallCrew(game, S, setts, mine, state, frontier, false, target, diff);
+    if (!crew) return;
+    dispatchWallJob(game, S, state, crew, 'choke', frontier.id, tiles);
+  }
+}
+
+// Direction trouble comes from: the nearest remembered war party, else
+// the nearest known enemy settlement, else the mirrored start.
+function threatBearing(game, state, s, owner) {
+  const cx = s.x + 1, cy = s.y + 1;
+  let bx = null, by = null, bd = Infinity;
+  for (const k of Object.values(state.threats || {})) {
+    const d = dist(k.x, k.y, cx, cy);
+    if (d < bd) { bd = d; bx = k.x; by = k.y; }
+  }
+  if (bx == null) {
+    for (const k of Object.values(state.known)) {
+      const d = dist(k.x, k.y, cx, cy);
+      if (d < bd) { bd = d; bx = k.x; by = k.y; }
+    }
+  }
+  if (bx == null) { bx = game.map.starts[1 - owner].x; by = game.map.starts[1 - owner].y; }
+  return Math.atan2(by - cy, bx - cx);
+}
+
+// A short arc of wall across the threatened side: legal tiles in the
+// 3.2–4.4 band within ±35° of the bearing, chained 8-connected (diagonal
+// adjacency seals — movement corner-cuts are prevented and the pillage /
+// farm floods are 4-connected). Own construction sites count as free
+// progress, so a stalled orphan site near the town gets resumed.
+function planShield(game, S, s, bearing, span, owner) {
+  const cx = s.x + 1, cy = s.y + 1;
+  const { w, h } = game.map;
+  const cand = [];
+  for (let ty = Math.max(0, Math.floor(cy - 5)); ty <= Math.min(h - 1, Math.ceil(cy + 5)); ty++) {
+    for (let tx = Math.max(0, Math.floor(cx - 5)); tx <= Math.min(w - 1, Math.ceil(cx + 5)); tx++) {
+      const d = dist(tx + 0.5, ty + 0.5, cx, cy);
+      if (d < WALL_RING_MIN || d > WALL_RING_MAX) continue;
+      let da = Math.atan2(ty + 0.5 - cy, tx + 0.5 - cx) - bearing;
+      while (da > Math.PI) da -= 2 * Math.PI;
+      while (da < -Math.PI) da += 2 * Math.PI;
+      if (Math.abs(da) > WALL_ARC) continue;
+      const r = S.canPlaceWall(game, owner, tx, ty);
+      if (r.err) continue;
+      cand.push({ x: tx, y: ty, da, resume: r.resume ? 1 : 0 });
+    }
+  }
+  if (cand.length < 2) return null;
+  // sweep the arc in angle order and chain consecutive adjacent tiles
+  cand.sort((a, b) => a.da - b.da || (a.y * w + a.x) - (b.y * w + b.x));
+  const chains = [];
+  let cur = [cand[0]];
+  for (let i = 1; i < cand.length; i++) {
+    const p = cur[cur.length - 1], t = cand[i];
+    if (Math.max(Math.abs(t.x - p.x), Math.abs(t.y - p.y)) === 1) cur.push(t);
+    else { chains.push(cur); cur = [t]; }
+  }
+  chains.push(cur);
+  const scoreOf = c => c.length * 10 + c.reduce((a, t) => a + t.resume, 0);
+  let best = chains[0];
+  for (const c of chains) if (scoreOf(c) > scoreOf(best)) best = c;
+  if (best.length < 2) return null;
+  if (best.length > span) {
+    // keep the middle of the chain so it stays centred on the bearing
+    const off = (best.length - span) >> 1;
+    best = best.slice(off, off + span);
+  }
+  return best.map(t => ({ x: t.x, y: t.y }));
+}
+
+// A narrow mountain pass on the approach from the threat bearing,
+// sealable end to end with at most `maxNew` fresh tiles. Sampled along
+// the ray at 6–14 tiles out — close enough that the plug defends the
+// town and rarely trips canPlaceWall's enemy-territory rule.
+function planChoke(game, S, s, bearing, owner, maxNew) {
+  if (maxNew < 1) return null;
+  const cx = s.x + 1, cy = s.y + 1;
+  const dx = Math.cos(bearing), dy = Math.sin(bearing);
+  let px = Math.round(-dy), py = Math.round(dx); // perpendicular, snapped to the grid
+  if (px === 0 && py === 0) py = 1;
+  for (let r = 6; r <= 14; r++) {
+    const sx = Math.floor(cx + dx * r), sy = Math.floor(cy + dy * r);
+    if (!passable(game.map, sx, sy)) continue;
+    // walk both ways to the flanking mountains (map edge counts)
+    const gap = [{ x: sx, y: sy }];
+    let wide = false;
+    for (const dir of [1, -1]) {
+      let closed = false;
+      for (let k = 1; k <= 5; k++) {
+        const tx = sx + px * k * dir, ty = sy + py * k * dir;
+        if (!passable(game.map, tx, ty)) { closed = true; break; }
+        gap.push({ x: tx, y: ty });
+      }
+      if (!closed) { wide = true; break; }
+    }
+    if (wide || gap.length > 5) continue; // not a choke
+    // sealable end to end: every gap tile is an own wall already or placeable
+    const fresh = [];
+    let ok = true;
+    for (const t of gap) {
+      const wid = game.wallAt[t.y * game.map.w + t.x];
+      if (wid) {
+        const wl = game.walls.find(x => x.id === wid);
+        if (wl && wl.owner === owner && !wl.building) continue; // already sealed
+        if (wl && wl.owner === owner && wl.building) { fresh.push(t); continue; } // resume
+        ok = false; break;
+      }
+      if (S.canPlaceWall(game, owner, t.x, t.y).err) { ok = false; break; }
+      fresh.push(t);
+    }
+    if (!ok || !fresh.length || fresh.length > maxNew) continue;
+    // order along the perpendicular so the build walks the line
+    fresh.sort((a, b) => (a.x - b.x) * px + (a.y - b.y) * py);
+    return fresh;
+  }
+  return null;
+}
+
+// A build crew: an idle nearby blob, else hands fielded from the target
+// settlement's garrison — farmers and carriers first (any unit builds),
+// deploy last and only when it doesn't undercut expansion's muster or
+// the home guard.
+function wallCrew(game, S, setts, mine, state, s, reactive, target, diff) {
+  const size = diff.wallGarrison ? 6 : 4;
+  const idle = mine.find(b =>
+    !b.order && !b.pillaging && b.working == null && !b.convert &&
+    b.id !== state.armyId && b.id !== state.scoutId &&
+    !(state.expand && state.expand.blobId === b.id) &&
+    S.total(b) >= 3 && dist(b.x, b.y, s.x + 1, s.y + 1) <= 12);
+  if (idle) return idle;
+  for (const role of ['farm', 'supply', 'deploy']) {
+    const have = s.garrison[role];
+    if (have <= 0) continue;
+    const take = Math.min(size, have, S.garrisonTotal(s) - 4); // keep a home guard
+    if (take <= 0) continue;
+    if (role === 'deploy') {
+      if (s.garrison.deploy - take < 4) continue;       // keep the guard ARMED
+      if (setts.length < target && !reactive) continue; // protect expansion's 9-deploy muster
+    }
+    const r = S.opFieldRole(game, s, role, take);
+    if (r.ok) return r.blob;
+  }
+  return null;
+}
+
+// Queue the chain from the end nearest the crew (tickWallOrder walks the
+// list in order) and record the in-flight plan on success.
+function dispatchWallJob(game, S, state, crew, kind, settId, tiles) {
+  const t0 = tiles[0], tn = tiles[tiles.length - 1];
+  if (dist(crew.x, crew.y, tn.x + 0.5, tn.y + 0.5) < dist(crew.x, crew.y, t0.x + 0.5, t0.y + 0.5)) {
+    tiles.reverse();
+  }
+  const r = S.opBuildWalls(game, crew, tiles);
+  if (r.err || !r.queued) return; // back off (lastWall is already stamped)
+  state.wallPlan = { blobId: crew.id, settId, kind, tiles, t: game.tick };
 }
