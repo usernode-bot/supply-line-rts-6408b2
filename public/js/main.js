@@ -1704,13 +1704,16 @@ function recallFarmers(st, n) {
   toast(c ? `🏠 Recalling ${c} farmer${c === 1 ? '' : 's'}` : 'No farmers working the fields');
 }
 
-// Recall gesture (#189): the phone panel's Recall button mirrors the
-// split button's hold UX — a plain tap recalls the shown count,
-// press-and-hold (~350 ms) reveals a fill bar and horizontal drag picks
-// how many farmers come home; release commits, pointercancel aborts.
+// Hold-drag count buttons (#189): the phone panel's Recall and Field
+// buttons mirror the split button's hold UX — a plain tap acts on the
+// shown count (via the click dispatcher), press-and-hold (~350 ms)
+// reveals a fill bar and the count follows the finger's absolute
+// horizontal screen position (holdValueFromX); release commits,
+// pointercancel aborts. cfg: { max(), label(v, max), onArm(), commit(v) }.
 let recallHoldConsumed = false; // eat the synthesized click after a hold
+let fieldHoldConsumed = false;
 
-function attachRecallHold(btn) {
+function attachHoldCount(btn, cfg) {
   let timer = null, sliding = false, lastX = 0, value = 1, maxV = 1, row = null, fill = null;
 
   function cleanup() {
@@ -1722,22 +1725,19 @@ function attachRecallHold(btn) {
 
   function update() {
     if (fill) fill.style.width = (maxV <= 1 ? 100 : Math.round(100 * (value - 1) / (maxV - 1))) + '%';
-    btn.textContent = `Recall ${value}/${maxV}`;
+    btn.textContent = cfg.label(value, maxV);
   }
 
   btn.addEventListener('pointerdown', (e) => {
-    const st = selectedSettlement();
-    if (!st || S.workingCount(game, st) < 2) return; // nothing to adjust — plain tap covers it
+    if (cfg.max() < 2) return; // nothing to adjust — plain tap covers it
     try { btn.setPointerCapture(e.pointerId); } catch { }
     lastX = e.clientX;
     timer = setTimeout(() => {
       timer = null;
-      const st2 = selectedSettlement();
-      if (!st2) return;
-      maxV = S.workingCount(game, st2);
+      maxV = cfg.max(); // the sim kept ticking — re-resolve
       if (maxV < 2) return;
       sliding = true;
-      recallHoldConsumed = true;
+      cfg.onArm();
       value = holdValueFromX(lastX, maxV);
       row = document.createElement('div');
       row.className = 'mt-1';
@@ -1758,20 +1758,47 @@ function attachRecallHold(btn) {
 
   function end(e) {
     if (timer) { clearTimeout(timer); timer = null; }
-    if (!sliding) return; // plain tap — the click dispatcher recalls
+    if (!sliding) return; // plain tap — the click dispatcher acts
     const commit = e.type === 'pointerup';
     cleanup();
-    if (commit) {
-      ui.recallCount = value;
-      const st = selectedSettlement();
-      // the sim kept ticking during the hold — recallFarmers re-clamps
-      if (st) recallFarmers(st, value);
-    }
+    if (commit) cfg.commit(value);
     lastPanelHTML = ''; // the hold mutated the button text — force a rebuild
     renderPanel(true);
   }
   btn.addEventListener('pointerup', end);
   btn.addEventListener('pointercancel', end);
+}
+
+function attachRecallHold(btn) {
+  attachHoldCount(btn, {
+    max: () => { const st = selectedSettlement(); return st ? S.workingCount(game, st) : 0; },
+    label: (v, m) => `Recall ${v}/${m}`,
+    onArm: () => { recallHoldConsumed = true; },
+    commit: (v) => {
+      ui.recallCount = v;
+      const st = selectedSettlement();
+      if (st) recallFarmers(st, v); // recallFarmers re-clamps
+    },
+  });
+}
+
+function attachFieldHold(btn) {
+  attachHoldCount(btn, {
+    max: () => {
+      const st = selectedSettlement();
+      return st && ui.fieldRole ? st.garrison[ui.fieldRole] : 0;
+    },
+    label: (v, m) => `Field ${v}/${m}`,
+    onArm: () => { fieldHoldConsumed = true; },
+    commit: (v) => {
+      const st = selectedSettlement();
+      const role = ui.fieldRole;
+      if (!st || !role) return;
+      ui.fieldCounts[role] = v;
+      const r = doFieldRole(st, role, Math.max(1, Math.min(st.garrison[role], v)));
+      if (r.err) toast(r.err);
+    },
+  });
 }
 
 // Touch build placement (#94): the armed outline sits at ui.buildSite;
@@ -2183,6 +2210,8 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'fieldn': {
+      // a hold-commit already fielded — eat exactly one synthesized click
+      if (fieldHoldConsumed) { fieldHoldConsumed = false; break; }
       if (st) {
         const role = btn.dataset.role;
         const n = Math.max(1, Math.min(st.garrison[role], ui.fieldCounts[role] || 1));
@@ -2491,28 +2520,22 @@ function renderPanelInner(force) {
         <button data-act="fieldn" data-role="${role}" id="field-btn-${role}" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Field ${cur}</button>
       </div>`;
     }).join('');
-    // phone (#189): one unified field row — a chip per garrisoned role picks
-    // which role the single slider + Field button act on
-    let fieldControls = fieldRows;
+    // phone (#189): role chips pick which garrisoned role the compact
+    // hold-drag Field button (bottom controls row) acts on
+    const fieldControls = fieldRows; // desktop only; the phone template omits it
+    let fieldChips = '', fieldAr = null, fieldCur = 1;
     if (mob) {
       const present = ['deploy', 'supply', 'farm'].filter(role => g[role] >= 1);
       const ar = present.includes(ui.fieldRole) ? ui.fieldRole : present[0];
       ui.fieldRole = ar || null;
       if (ar) {
-        const max = g[ar];
-        const cur = Math.max(1, Math.min(max, ui.fieldCounts[ar] || Math.max(1, Math.floor(max / 2))));
-        ui.fieldCounts[ar] = cur;
-        const chips = present.map(role => {
+        fieldAr = ar;
+        fieldCur = Math.max(1, Math.min(g[ar], ui.fieldCounts[ar] || Math.max(1, Math.floor(g[ar] / 2))));
+        ui.fieldCounts[ar] = fieldCur;
+        fieldChips = present.map(role => {
           const icon = role === 'deploy' ? '⚔️' : role === 'supply' ? '🚚' : '🌱';
           return `<button data-act="fieldrole" data-role="${role}" class="btn-sm px-1.5 rounded whitespace-nowrap text-xs ${role === ar ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-300'}">${icon}${g[role]}</button>`;
         }).join('');
-        fieldControls = `<div class="flex items-center gap-1 mb-1">
-          ${chips}
-          <input id="field-count-${ar}" type="range" min="1" max="${max}" step="1" value="${cur}" class="flex-1 min-w-0">
-          <button data-act="fieldn" data-role="${ar}" id="field-btn-${ar}" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Field ${cur}</button>
-        </div>`;
-      } else {
-        fieldControls = '';
       }
     }
     // phone (#189): garrison action buttons share a two-column grid; a lone
@@ -2575,7 +2598,6 @@ function renderPanelInner(force) {
             ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
           </div>
           ${st.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(st.convert)}s (fielding cancels)</div>` : ''}
-          ${fieldControls}
           ${garrisonActions}
         `.replaceAll('data-act="role"', 'data-act="grole"') : ''}
         <div class="mt-1 pt-1 border-t border-zinc-800">
@@ -2588,12 +2610,17 @@ function renderPanelInner(force) {
           ${modeOptions}
           ${warn}
         </div>
-        <div class="flex items-center gap-2 mt-1 pt-1 border-t border-zinc-800">
-          <div class="text-xs text-zinc-500 flex-1">🌱 ${wc} farmer${wc === 1 ? '' : 's'} · <b class="text-zinc-300">${y.workedCells}/${st.tilled.length} plots</b> · <b class="${y.workedCells > 0 ? 'text-emerald-400' : 'text-zinc-400'}">${fmtRate(farmContrib)}/s</b>${farmHint}</div>
+        ${fieldAr || wc >= 1 ? `
+        <div class="flex items-center gap-1 mt-1 pt-1 border-t border-zinc-800">
+          ${fieldChips}
+          ${fieldAr ? `<button data-act="fieldn" data-role="${fieldAr}" id="field-hold" style="touch-action:none" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Field ${fieldCur}</button>` : ''}
+          <span class="flex-1"></span>
           ${wc >= 1 ? `<button data-act="recall" id="recall-hold" style="touch-action:none" class="btn-sm px-2 rounded bg-zinc-700 hover:bg-zinc-600 whitespace-nowrap">Recall ${rc}</button>` : ''}
-        </div>`);
+        </div>` : ''}`);
       const rb = panel.querySelector('#recall-hold');
       if (rb && !rb.dataset.holdWired) { rb.dataset.holdWired = '1'; attachRecallHold(rb); }
+      const fb = panel.querySelector('#field-hold');
+      if (fb && !fb.dataset.holdWired) { fb.dataset.holdWired = '1'; attachFieldHold(fb); }
       return;
     }
     setPanelHTML(`
