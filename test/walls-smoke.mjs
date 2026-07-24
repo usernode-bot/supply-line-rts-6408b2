@@ -9,6 +9,7 @@
 
 import * as S from '../public/js/sim.js';
 import * as SUP from '../public/js/supply.js';
+import { passable } from '../public/js/mapgen.js';
 
 // routeHealth treats a topped-off destination as "keeping up" (#143) — for
 // a wall that means the SUPPLIES stash, not the garrison's bellies (#200).
@@ -66,7 +67,7 @@ function spawnBlob(game, owner, x, y, deploy, supply) {
     food: (deploy + (supply || 0)) * 10,
     order: null, path: null, pathGoal: null,
     pillaging: false, working: null, facing: 0, convert: null,
-    engagedT: -999, meleeT: -999, chaseId: null,
+    engagedT: -999, meleeT: -999, rearT: -999, chaseId: null,
     dead: false, mergedInto: null, noMerge: false,
     lastYieldT: game.tick, starving: false, lowFood: false, zeroSince: -1, foodWin: [],
   };
@@ -413,7 +414,10 @@ function findRemoteTile(game) {
   S.opMove(g, b, far.x + 0.5, far.y + 0.5);
   run(g, 400);
   const gA = S.wallGarrisonTotal(wA);
-  check('arrivals garrisoned up to the cap', gA === S.C.WALL_GARRISON_CAP, `garrisoned=${gA}`);
+  // 6 arrivals fit under the 8-unit cap (#199/#202), so ALL of them get in
+  // — the stale pre-#202 expectation here was the cap itself
+  check('every arrival garrisoned (under the cap)',
+    gA === 6 && gA <= S.C.WALL_GARRISON_CAP, `garrisoned=${gA}`);
   check('their rations landed in bellies, capped',
     wA.garrFood <= gA * S.C.FOOD_PER_UNIT + 1e-6 && wA.garrFood > 0,
     `garrFood=${wA.garrFood.toFixed(2)} cap=${gA * S.C.FOOD_PER_UNIT}`);
@@ -725,6 +729,220 @@ function siegeReturnFire(frac, ticks) {
   const g4 = S.deserialize(old);
   const mw4 = g4.walls.find(x => x.id === 90001);
   check('a small old larder stays in bellies', mw4.garrFood === 6 && mw4.stock === 0);
+}
+
+// ---------------------------------- 9. disengage + garrison under fire (#201)
+
+// A square of clear, un-owned, un-tilled ground with radius r — every
+// placement and every path in the tests below stays inside it, so the
+// geometry is exact instead of terrain-dependent.
+function findOpenArea(game, r, minD) {
+  const { w, h } = game.map;
+  const away = minD == null ? 9 : minD;
+  for (let y = r + 1; y < h - r - 1; y++) {
+    for (let x = r + 1; x < w - r - 1; x++) {
+      let ok = true;
+      for (let dy = -r; dy <= r && ok; dy++) {
+        for (let dx = -r; dx <= r && ok; dx++) {
+          const i = (y + dy) * w + (x + dx);
+          if (!passable(game.map, x + dx, y + dy)) ok = false;
+          else if (game.settAt[i] || game.tilledBy[i] || game.wallAt[i]) ok = false;
+        }
+      }
+      if (!ok) continue;
+      if (game.settlements.every(s => Math.hypot(s.x + 1 - x, s.y + 1 - y) > away)) return { x, y };
+    }
+  }
+  return null;
+}
+
+// The field cases need ~7 tiles of clear ground to march across, which
+// the xsmall map never has — they run on `small` instead.
+function freshField() {
+  return S.newGame('withdraw-smoke-1', 'small', 'normal');
+}
+
+function hpOf(b) { return b.units.reduce((a, u) => a + u.hp, 0); }
+
+{
+  console.log('a group ordered to move while in melee actually withdraws (#201):');
+  const g = freshField();
+  const area = findOpenArea(g, 7);
+  check('found an open test area', !!area);
+  if (area) {
+    // the reported case: our army is at an enemy settlement's walls AND
+    // locked with an enemy army. The settlement contact only sets
+    // engagedT; the BLOB contact refreshes meleeT every tick, which is
+    // what used to swallow the retreat order.
+    const foeSett = g.settlements.find(s => s.owner === 1);
+    const mine = spawnBlob(g, 0, area.x + 0.5, area.y + 0.5, 10, 0);
+    const foe = spawnBlob(g, 1, area.x + 1.5, area.y + 0.5, 6, 0);
+    run(g, 2);
+    check('the two armies are in melee', g.tick - mine.meleeT < 5,
+      `meleeT=${mine.meleeT} tick=${g.tick}`);
+    const dest = { x: area.x + 0.5, y: area.y - 5.5 }; // straight away from the foe
+    const r = S.opMove(g, mine, dest.x, dest.y);
+    check('the retreat order is accepted', !!r.ok, JSON.stringify(r));
+    check('a move issued in melee is flagged as a disengagement',
+      !!(mine.order && mine.order.disengage));
+    const from = { x: mine.x, y: mine.y };
+    run(g, 30);
+    const moved = Math.hypot(mine.x - from.x, mine.y - from.y);
+    check(`the army actually walks out (moved ${moved.toFixed(2)} tiles)`, moved > 1);
+    check('it breaks contact with the enemy army',
+      Math.hypot(mine.x - foe.x, mine.y - foe.y) > S.C.MELEE_RANGE + 0.2,
+      `d=${Math.hypot(mine.x - foe.x, mine.y - foe.y).toFixed(2)}`);
+    check('the enemy settlement is untouched by this test', !!foeSett && !foeSett.building);
+  }
+}
+
+{
+  console.log('an ordinary march intercepted en route still stands and fights (#74/#82):');
+  const g = freshField();
+  const area = findOpenArea(g, 7);
+  if (area) {
+    const mine = spawnBlob(g, 0, area.x + 0.5, area.y + 0.5, 10, 0);
+    // order given BEFORE any contact — no disengage flag
+    const r = S.opMove(g, mine, area.x + 0.5, area.y + 6.5);
+    check('the march order is accepted', !!r.ok);
+    check('a move issued out of melee is not a disengagement', !mine.order.disengage);
+    spawnBlob(g, 1, area.x + 1.4, area.y + 0.5, 6, 0);
+    const from = { x: mine.x, y: mine.y };
+    run(g, 20);
+    const moved = Math.hypot(mine.x - from.x, mine.y - from.y);
+    check(`the intercepted march halts (moved only ${moved.toFixed(2)} tiles)`, moved < 0.4);
+    check('the order is still held, not cancelled', !!mine.order);
+  }
+}
+
+{
+  console.log('the disengage exemption lapses once the group is clear (#201):');
+  const g = freshField();
+  const area = findOpenArea(g, 7);
+  if (area) {
+    const mine = spawnBlob(g, 0, area.x + 0.5, area.y + 0.5, 10, 0);
+    const foe = spawnBlob(g, 1, area.x + 1.0, area.y + 0.5, 4, 0);
+    run(g, 2);
+    S.opMove(g, mine, area.x + 0.5, area.y - 6.5);
+    check('flagged while in contact', !!mine.order.disengage);
+    foe.dead = true; // the fight ends
+    run(g, 30);
+    check('the order survives (destination not reached yet)', !!mine.order);
+    check('the flag is gone once clear of melee for ~2 s',
+      !!mine.order && !mine.order.disengage);
+  }
+}
+
+{
+  console.log('withdrawing turns your back: pursuers land the rear bonus (#201):');
+  // identical geometry twice — one victim stands its ground, one withdraws
+  function trial(withdraw) {
+    const g = freshField();
+    const area = findOpenArea(g, 7);
+    if (!area) return null;
+    const v = spawnBlob(g, 0, area.x + 0.5, area.y + 0.5, 20, 0);
+    const p = spawnBlob(g, 1, area.x - 0.5, area.y + 0.5, 3, 0);
+    run(g, 1);
+    S.opMove(g, p, v.x, v.y, { kind: 'blob', id: v.id }); // pursue
+    if (withdraw) S.opMove(g, v, area.x + 6.5, area.y + 0.5); // run, back to the foe
+    const before = hpOf(v);
+    // sample the panel's rear-hit window (#201) mid-pursuit: rearT is the
+    // per-victim mark of the same event that flags link.rear
+    let rearFresh = false;
+    for (let i = 0; i < 40; i++) {
+      S.step(g);
+      if (i === 20) rearFresh = g.tick - v.rearT < 5;
+    }
+    return { loss: before - hpOf(v), rearFresh };
+  }
+  const stood = trial(false);
+  const ran = trial(true);
+  check('both trials ran', stood != null && ran != null);
+  if (stood != null && ran != null) {
+    check(`a withdrawing group takes more damage (${ran.loss.toFixed(1)} vs ${stood.loss.toFixed(1)} HP)`,
+      ran.loss > stood.loss * 1.1, `stand=${stood.loss.toFixed(2)} withdraw=${ran.loss.toFixed(2)}`);
+    check('the withdrawer is marked rear-hit (rearT fresh mid-pursuit)', ran.rearFresh);
+    check('the standing victim is never marked rear-hit (lone frontal attacker)', !stood.rearFresh);
+  }
+}
+
+{
+  console.log('reinforcements can garrison a wall that is under attack (#201):');
+  const g = freshField();
+  const area = findOpenArea(g, 6);
+  if (area) {
+    const w = injectWall(g, 0, area.x, area.y, { deploy: 1, supply: 0, farm: 0 });
+    // an attacker standing beside the wall: Chebyshev 1, so it batters the
+    // tile AND comes into melee with anything walking onto it
+    spawnBlob(g, 1, area.x + 1.5, area.y + 0.5, 4, 0);
+    const mine = spawnBlob(g, 0, area.x - 2.5, area.y + 0.5, 6, 0);
+    const before = S.wallGarrisonTotal(w);
+    const r = S.opMove(g, mine, area.x + 0.5, area.y + 0.5);
+    check('the garrison order is accepted', !!r.ok, JSON.stringify(r));
+    check('a move onto an own wall is flagged as a garrison push',
+      !!(mine.order && mine.order.garrison));
+    run(g, 60);
+    check(`the reinforcements got in (${before} → ${S.wallGarrisonTotal(w)})`,
+      S.wallGarrisonTotal(w) > before);
+    check('the wall still stands', g.walls.some(x => x.id === w.id));
+  }
+}
+
+{
+  console.log('a full wall says so instead of swallowing the order (#201):');
+  const g = freshField();
+  const area = findOpenArea(g, 6);
+  if (area) {
+    const w = injectWall(g, 0, area.x, area.y,
+      { deploy: S.C.WALL_GARRISON_CAP, supply: 0, farm: 0 });
+    const mine = spawnBlob(g, 0, area.x - 2.5, area.y + 0.5, 3, 0);
+    S.opMove(g, mine, area.x + 0.5, area.y + 0.5);
+    run(g, 60);
+    check('the garrison stays at the cap',
+      S.wallGarrisonTotal(w) === S.C.WALL_GARRISON_CAP);
+    check('the arrivals are still alive outside', !mine.dead && S.total(mine) === 3);
+    const full = g.events.filter(e => e.msg.includes('Wall garrison is full'));
+    check(`exactly one "garrison is full" notice (got ${full.length})`, full.length === 1);
+  }
+}
+
+{
+  console.log('reinforcements can march into a besieged settlement (#201):');
+  const g = freshField();
+  const home = g.settlements.find(s => s.owner === 0);
+  const c = { x: home.x + 1, y: home.y + 1 };
+  // a besieger at the walls, and our relief column behind it on the same side
+  spawnBlob(g, 1, c.x + 2.2, c.y, 5, 0);
+  const relief = spawnBlob(g, 0, c.x + 4.0, c.y, 6, 0);
+  const before = S.garrisonTotal(home);
+  check('the settlement is besieged', S.besieged(g, home));
+  const r = S.opMove(g, relief, c.x, c.y);
+  check('the relief order is accepted', !!r.ok, JSON.stringify(r));
+  check('a move onto an own settlement is a garrison push', !!relief.order.garrison);
+  run(g, 150);
+  check(`the relief column reached the garrison (${before} → ${S.garrisonTotal(home)})`,
+    S.garrisonTotal(home) > before);
+}
+
+{
+  console.log('the new order flags survive a save/load round-trip (#201):');
+  const g = freshField();
+  const area = findOpenArea(g, 7);
+  const home = g.settlements.find(s => s.owner === 0);
+  if (area) {
+    const a = spawnBlob(g, 0, area.x + 0.5, area.y + 0.5, 8, 0);
+    spawnBlob(g, 1, area.x + 1.0, area.y + 0.5, 4, 0);
+    run(g, 2);
+    S.opMove(g, a, area.x + 0.5, area.y - 5.5);
+    const b = spawnBlob(g, 0, home.x + 4, home.y + 1, 4, 0);
+    S.opMove(g, b, home.x + 1, home.y + 1);
+    check('set up: disengage + garrison orders', !!a.order.disengage && !!b.order.garrison);
+    const g2 = S.deserialize(JSON.parse(JSON.stringify(S.serialize(g))));
+    const a2 = g2.blobs.find(x => x.id === a.id);
+    const b2 = g2.blobs.find(x => x.id === b.id);
+    check('the disengage flag survives', !!(a2 && a2.order && a2.order.disengage));
+    check('the garrison flag survives', !!(b2 && b2.order && b2.order.garrison));
+  }
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall checks passed');

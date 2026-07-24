@@ -495,7 +495,7 @@ function makeBlob(game, owner, x, y, count, units) {
     pillaging: false, working: null,
     facing: 0,                    // radians; movement/combat facing (#108, serialized)
     convert: null,                // pending arm-up {role:'deploy', done:tick} (#108, serialized)
-    engagedT: -999, meleeT: -999, chaseId: null,
+    engagedT: -999, meleeT: -999, rearT: -999, chaseId: null,
     dead: false, mergedInto: null,
     noMerge: false,               // set on split; cleared when a move order completes
     lastYieldT: game.tick,        // last tick pillaging yielded food (transient)
@@ -1241,6 +1241,24 @@ function fieldAssign(game, b, x, y) {
   return { ok: true, fielded: n };
 }
 
+// Whether (x, y) is a spot where `owner`'s arriving units fold into a
+// garrison (#201): one of its own finished wall tiles, or inside the
+// settlement-absorb radius of one of its own completed settlements —
+// the same 1.9 the arrival branch of tickOrder uses. Purely positional,
+// so player, AI and relayed PvP orders all resolve it the same way.
+function isOwnGarrisonSpot(game, owner, x, y) {
+  const tx = Math.floor(x), ty = Math.floor(y);
+  if (tx >= 0 && ty >= 0 && tx < game.map.w && ty < game.map.h) {
+    const wid = game.wallAt[ty * game.map.w + tx];
+    if (wid) {
+      const w = game.walls.find(x2 => x2.id === wid);
+      if (w && w.owner === owner && !w.building) return true;
+    }
+  }
+  return game.settlements.some(s =>
+    s.owner === owner && !s.building && dist(s.x + 1, s.y + 1, x, y) < 1.9);
+}
+
 export function opMove(game, b, x, y, target) {
   if (b.dead) return { err: 'Gone' };
   if (!(target && target.kind && target.id != null)) {
@@ -1251,6 +1269,16 @@ export function opMove(game, b, x, y, target) {
   b.working = null;
   const o = { type: 'move', x, y };
   if (target && target.kind && target.id != null) { o.tkind = target.kind; o.tid = target.id; }
+  // #201 — two escape hatches from the melee hold in tickOrder, both
+  // DERIVED here from authoritative state (never trusted from a client),
+  // so the AI and relayed PvP orders get them identically:
+  //   disengage — the group is in melee right now, so this move can only
+  //               mean "break off"; it overrides the stand-and-fight hold
+  //   garrison  — the destination is one of the mover's own finished walls
+  //               or completed settlements, so the march must push through
+  //               contact to actually ARRIVE (the absorb is arrival-gated)
+  if (game.tick - b.meleeT < 5) o.disengage = true;
+  if (isOwnGarrisonSpot(game, b.owner, x, y)) o.garrison = true;
   b.order = o;
   b.chaseId = null;
   // soft enemy avoidance (#169): plan around visible enemy war parties
@@ -1956,9 +1984,16 @@ function tickOrder(game, b) {
   // and fight back instead of marching out of it. Settlement contact
   // deliberately doesn't hold them (#82) — a settlement can't disengage,
   // so waiting for it would freeze the move order forever.
+  // Three cases (#201): an ordinary march intercepted en route still
+  // halts and fights; a move ORDERED WHILE IN MELEE is a withdrawal and
+  // always walks (opMove's `disengage`); a move onto an own wall or
+  // settlement is a garrison push that must reach the tile to absorb.
+  // The withdrawal exemption lapses once the group has been clear of
+  // melee for ~2 s, so the rest of a long order can be halted again.
+  if (o.disengage && game.tick - b.meleeT > 20) delete o.disengage;
   if (b.count.deploy > 0) {
     b.chaseId = null;
-    if (game.tick - b.meleeT < 5) return;
+    if (game.tick - b.meleeT < 5 && !o.disengage && !o.garrison) return;
   }
   if (!b.path && b.pathGoal == null && !o.waiting) ensurePath(game, b, o.x, o.y); // resumed save
   if (pathBlocked(game, b) && !ensurePath(game, b, o.x, o.y)) {
@@ -2049,6 +2084,15 @@ function tickOrder(game, b) {
             if (b.units.length === 0) b.dead = true;
             else b.food = Math.min(b.food, foodCap(b));
             game.events.push({ owner: b.owner, msg: `🧱 +${take} garrisoned on the wall`, x: w.x + 0.5, y: w.y + 0.5 });
+          } else if (!o.fullWarned) {
+            // a full tile used to swallow the order in silence (#201) —
+            // say so once, then let the group stand where it was sent
+            o.fullWarned = true;
+            game.events.push({
+              owner: b.owner,
+              msg: `🧱 Wall garrison is full (${C.WALL_GARRISON_CAP}/${C.WALL_GARRISON_CAP})`,
+              x: w.x + 0.5, y: w.y + 0.5,
+            });
           }
           return; // the wall was the destination — never fall through to a settlement absorb
         }
@@ -2356,7 +2400,17 @@ function angDiff(a, b) {
 // Returns { dir, excludeId } or null when not locked.
 function lockedFacing(game, b) {
   const o = b.order;
-  if (!o || o.type !== 'move' || !o.tkind) return null;
+  if (!o || o.type !== 'move') return null;
+  // withdrawing under fire (#201): a group running while still in contact
+  // keeps its back to the fight — it never wheels to meet its pursuers, so
+  // anyone in its rear arc lands the existing REAR_MULT bonus. That is the
+  // whole price of disengaging: no cooldown, no speed penalty.
+  if (o.disengage && game.tick - b.meleeT < 5) {
+    const dx = b.x - (b.prevX != null ? b.prevX : b.x);
+    const dy = b.y - (b.prevY != null ? b.prevY : b.y);
+    if (dx * dx + dy * dy > 1e-6) return { dir: Math.atan2(dy, dx), excludeId: null };
+  }
+  if (!o.tkind) return null;
   if (o.tkind === 'blob') {
     const t = game.blobs.find(x => x.id === o.tid && !x.dead);
     if (t && dist(b.x, b.y, t.x, t.y) <= C.MELEE_RANGE + 0.2) {
@@ -2464,7 +2518,14 @@ function tickCombat(game) {
       if (amt > 0) {
         if (!hitBy.has(v)) hitBy.set(v, new Map());
         hitBy.get(v).set(e.attacker, (hitBy.get(v).get(e.attacker) || 0) + amt);
-        if (mult > 1) e.link.rear = true; // renderer highlights the bonus link
+        if (mult > 1) {
+          e.link.rear = true; // renderer highlights the bonus link
+          // per-victim mark for the panel's rear-attack line (#201):
+          // link.rear is shared by both directions of the pair, so it
+          // can't say WHO took the bonus hit — this can. Transient like
+          // engagedT/meleeT: never serialized, refreshed while it lasts.
+          v.rearT = game.tick;
+        }
       }
     }
   }
@@ -3757,7 +3818,7 @@ export function deserialize(data, prev) {
       path: null, pathGoal: null,
       pillaging: bd.pillaging, working: bd.working != null ? bd.working : null,
       facing: bd.facing || 0, convert: bd.convert || null,
-      engagedT: -999, meleeT: -999, chaseId: null, dead: false, mergedInto: null,
+      engagedT: -999, meleeT: -999, rearT: -999, chaseId: null, dead: false, mergedInto: null,
       noMerge: !!bd.noMerge, lastYieldT: data.tick, starving: false,
       lowFood: false, zeroSince: -1,
       foodWin: [],
