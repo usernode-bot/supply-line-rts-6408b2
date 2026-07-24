@@ -67,6 +67,20 @@ function updateMemory(game, S, mine, setts, owner, state, diff) {
       delete known[id]; // a forgetful commander loses stale intel
     }
   }
+  // enemy walls (#187), fog-fair like settlement memory: the AI blocks
+  // (and breaches) only walls it has actually seen
+  const knownWalls = state.knownWalls || (state.knownWalls = {});
+  for (const w of game.walls || []) {
+    if (w.owner === 1 - owner && canSee(mine, setts, w.x + 0.5, w.y + 0.5, S)) {
+      knownWalls[w.id] = { x: w.x, y: w.y };
+    }
+  }
+  for (const id of Object.keys(knownWalls)) {
+    const k = knownWalls[id];
+    if (canSee(mine, setts, k.x + 0.5, k.y + 0.5, S) && !(game.walls || []).some(w => w.id === +id)) {
+      delete knownWalls[id];
+    }
+  }
   // sighted enemy war parties (fog-fair: recorded only while actually
   // visible; entries are last-seen snapshots, not live tracking)
   if (diff.threats) {

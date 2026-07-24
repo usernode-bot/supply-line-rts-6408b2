@@ -471,6 +471,31 @@ export function createRenderer(canvas, minimap) {
       drawSettlement(game, { x: k.x, y: k.y, owner: 1 - viewer(game), hp: S.C.SETT_HP, name: k.name }, wx, wy, s, true, gsel, 0);
     }
 
+    // walls (#187): per-tile stone entities. Protected walls (manned, or
+    // a friendly garrison within 1 tile — same rule as the sim) read
+    // bright and crenellated; unprotected ones dark and inert; scaffolds
+    // translucent + dashed. Enemy walls remembered but out of sight draw
+    // as dimmed ghosts from the viewer's wall memory.
+    {
+      for (const w of game.walls || []) {
+        const vis = game.fog[w.y * game.map.w + w.x] === 2;
+        if (w.owner !== viewer(game) && !vis) continue; // ghosted below if remembered
+        const wsel = ui.selected && (ui.selected.kind === 'wall' || ui.selected.kind === 'enemy-wall') && ui.selected.id === w.id;
+        drawWall(game, w, wx, wy, s, false, wsel);
+      }
+      for (const [id, k] of Object.entries(game.wallMemo || {})) {
+        const live = (game.walls || []).find(x => x.id === +id);
+        if (live && game.fog[live.y * game.map.w + live.x] === 2) continue; // drawn live above
+        const wsel = ui.selected && ui.selected.kind === 'enemy-wall' && ui.selected.id === +id;
+        drawWall(game, {
+          id: +id, x: k.x, y: k.y,
+          owner: k.owner != null ? k.owner : 1 - viewer(game),
+          hp: S.C.WALL_HP, building: !!k.building,
+          garrison: { deploy: 0, supply: 0, farm: 0 }, lastHitT: -999,
+        }, wx, wy, s, true, wsel);
+      }
+    }
+
     // working farmers — drawn before settlements so they can never cover
     // the garrison readouts. A farmer currently crossing a settlement
     // footprint (#135 — friendly footprints are walkable, so shortest
@@ -687,8 +712,11 @@ export function createRenderer(canvas, minimap) {
       for (const b of game.blobs) if (!b.dead) blobById.set(b.id, b);
       const settById = new Map();
       for (const st of game.settlements) settById.set(st.id, st);
+      const wallById = new Map();
+      for (const w of game.walls || []) wallById.set(w.id, w);
       const blobSeen = b => b.owner !== 1 || S.isVisible(game, b.x, b.y);
       const settSeen = st => st.owner !== 1 || S.settVisible(game, st);
+      const wallSeen = w => w.owner === viewer(game) || S.isVisible(game, w.x + 0.5, w.y + 0.5);
       const blobPxR = b => b.working != null ? Math.max(2, s * 0.13) * 2 : Math.max(10, S.blobRadius(b) * s);
       const pulse = 0.55 + 0.45 * Math.sin((game.tick + alpha) * 2.2);
       const arrowAt = (x, y, ang, size) => {
@@ -775,12 +803,22 @@ export function createRenderer(canvas, minimap) {
       ctx.beginPath();
       arrows.length = 0;
       for (const l of game.combat || []) {
-        if (l.kind !== 'bs') continue;
-        const b = blobById.get(l.b), st = settById.get(l.s);
-        if (!b || !st || !blobSeen(b) || !settSeen(st)) continue;
-        const x1 = wx(bx(b)), y1 = wy(by(b)), x2 = wx(st.x + 1), y2 = wy(st.y + 1);
+        if (l.kind !== 'bs' && l.kind !== 'bw') continue;
+        const b = blobById.get(l.b);
+        let tx3, ty3, boxHalf;
+        if (l.kind === 'bs') {
+          const st = settById.get(l.s);
+          if (!b || !st || !blobSeen(b) || !settSeen(st)) continue;
+          tx3 = st.x + 1; ty3 = st.y + 1; boxHalf = half;
+        } else {
+          // walls (#187): same siege-line treatment onto the wall tile
+          const wl = wallById.get(l.w);
+          if (!b || !wl || !blobSeen(b) || !wallSeen(wl)) continue;
+          tx3 = wl.x + 0.5; ty3 = wl.y + 0.5; boxHalf = Math.max(5, 0.55 * s);
+        }
+        const x1 = wx(bx(b)), y1 = wy(by(b)), x2 = wx(tx3), y2 = wy(ty3);
         const ang = Math.atan2(y2 - y1, x2 - x1);
-        const ex = x2 - Math.cos(ang) * (half + 3), ey = y2 - Math.sin(ang) * (half + 3);
+        const ex = x2 - Math.cos(ang) * (boxHalf + 3), ey = y2 - Math.sin(ang) * (boxHalf + 3);
         const sx = x1 + Math.cos(ang) * blobPxR(b), sy = y1 + Math.sin(ang) * blobPxR(b);
         ctx.moveTo(sx, sy);
         ctx.lineTo(ex, ey);
@@ -916,6 +954,40 @@ export function createRenderer(canvas, minimap) {
         dashedPlot(ax, ay,
           a.err ? 'rgba(248,113,113,0.95)' : 'rgba(74,222,128,0.95)',
           a.err ? 'rgba(248,113,113,0.14)' : 'rgba(74,222,128,0.14)');
+      }
+    }
+
+    // wall placement preview (#187): the two-click line, green/red per
+    // tile by live placement validity (re-checked each frame like the
+    // build preview), with a brighter outline on the anchored start.
+    // Before the first click a mouse shows a single tile under the
+    // cursor; after it the line follows the hover until the second
+    // click pins ui.wallEnd.
+    if (ui.pending === 'wall') {
+      let end = ui.wallEnd;
+      if (!end && ui.hover) end = { x: Math.floor(ui.hover.x), y: Math.floor(ui.hover.y) };
+      if (end) {
+        end = {
+          x: Math.max(0, Math.min(game.map.w - 1, end.x)),
+          y: Math.max(0, Math.min(game.map.h - 1, end.y)),
+        };
+      }
+      const startT = ui.wallStart || end;
+      if (startT && end) {
+        const own = viewer(game);
+        ctx.setLineDash([5, 3]);
+        for (const t of S.wallLineTiles(startT.x, startT.y, end.x, end.y)) {
+          const ok = !S.canPlaceWall(game, own, t.x, t.y).err;
+          const isStart = !!(ui.wallStart && t.x === ui.wallStart.x && t.y === ui.wallStart.y);
+          ctx.fillStyle = ok ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.15)';
+          ctx.fillRect(wx(t.x), wy(t.y), s, s);
+          ctx.strokeStyle = ok
+            ? `rgba(74,222,128,${isStart ? 1 : 0.8})`
+            : `rgba(248,113,113,${isStart ? 1 : 0.8})`;
+          ctx.lineWidth = isStart ? 2.5 : 1.5;
+          ctx.strokeRect(wx(t.x) + 0.5, wy(t.y) + 0.5, s - 1, s - 1);
+        }
+        ctx.setLineDash([]);
       }
     }
 
@@ -1178,6 +1250,106 @@ export function createRenderer(canvas, minimap) {
     ctx.globalAlpha = 1;
   }
 
+  // A wall tile (#187). Protected walls (per S.wallProtected — the same
+  // rule combat uses, so the look can never drift from the sim) draw as
+  // bright crenellated stone with an owner banner; unprotected walls as
+  // dark flat stone with cracks growing as HP falls; construction sites
+  // as translucent dashed scaffolding with an amber progress bar.
+  function drawWall(game, w, wx, wy, s, ghost, sel) {
+    const x0 = wx(w.x), y0 = wy(w.y);
+    const size = s;
+    const building = !!w.building;
+    const prot = !ghost && !building && S.wallProtected(game, w);
+    const baseAlpha = ghost ? 0.4 : building ? 0.7 : 1;
+    ctx.globalAlpha = baseAlpha;
+    // stone body
+    ctx.fillStyle = prot ? '#a1a1aa' : '#52525b';
+    ctx.fillRect(x0, y0, size, size);
+    // owner band along the bottom — a bright banner when protected
+    const band = Math.max(2, size * 0.2);
+    ctx.globalAlpha = baseAlpha * (prot ? 0.95 : 0.45);
+    ctx.fillStyle = ownerColor(game, w.owner);
+    ctx.fillRect(x0, y0 + size - band, size, band);
+    ctx.globalAlpha = baseAlpha;
+    // crenellated cap on protected walls
+    if (prot && s >= 7) {
+      ctx.fillStyle = '#d4d4d8';
+      const mw = size / 5;
+      for (let k = 0; k < 3; k++) {
+        ctx.fillRect(x0 + mw * (2 * k) + mw * 0.25, y0, mw, Math.max(2, size * 0.24));
+      }
+    }
+    // cracks build in as structure HP falls (finished walls only)
+    if (!building && !ghost && w.hp < S.C.WALL_HP - 0.5 && s >= 6) {
+      const k = 1 - Math.max(0, w.hp / S.C.WALL_HP);
+      const h1 = ((w.x * 31 + w.y * 137) >>> 0) % 7;
+      ctx.strokeStyle = `rgba(24,24,27,${(0.35 + 0.5 * k).toFixed(2)})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x0 + size * 0.2, y0 + size * (0.15 + h1 * 0.05));
+      ctx.lineTo(x0 + size * 0.5, y0 + size * 0.5);
+      ctx.lineTo(x0 + size * (0.35 + h1 * 0.04), y0 + size * 0.85);
+      if (k > 0.5) {
+        ctx.moveTo(x0 + size * 0.8, y0 + size * 0.25);
+        ctx.lineTo(x0 + size * 0.55, y0 + size * 0.6);
+      }
+      ctx.stroke();
+    }
+    // outline — shared edges with same-owner finished neighbors are
+    // skipped so a run of tiles reads as one continuous wall
+    const hit = !ghost && w.lastHitT != null && game.tick - w.lastHitT < 3;
+    ctx.strokeStyle = hit ? '#f87171' : sel ? '#ffffff' : prot ? ownerColor(game, w.owner) : 'rgba(9,9,11,0.6)';
+    ctx.lineWidth = sel || hit ? 2.5 : 1.5;
+    if (building) ctx.setLineDash([4, 3]);
+    const wmap = game.map.w;
+    const joins = (dx2, dy2) => {
+      if (sel || hit || ghost) return false; // full outline when highlighted
+      const nx = w.x + dx2, ny = w.y + dy2;
+      if (nx < 0 || ny < 0 || nx >= game.map.w || ny >= game.map.h) return false;
+      const nid = game.wallAt ? game.wallAt[ny * wmap + nx] : 0;
+      if (!nid) return false;
+      const nw = (game.walls || []).find(z => z.id === nid);
+      return !!nw && nw.owner === w.owner && !nw.building === !building;
+    };
+    ctx.beginPath();
+    if (!joins(0, -1)) { ctx.moveTo(x0, y0); ctx.lineTo(x0 + size, y0); }
+    if (!joins(0, 1)) { ctx.moveTo(x0, y0 + size); ctx.lineTo(x0 + size, y0 + size); }
+    if (!joins(-1, 0)) { ctx.moveTo(x0, y0); ctx.lineTo(x0, y0 + size); }
+    if (!joins(1, 0)) { ctx.moveTo(x0 + size, y0); ctx.lineTo(x0 + size, y0 + size); }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (building && s >= 6) {
+      ctx.font = `${Math.max(9, Math.min(16, s * 0.7))}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('🔨', x0 + size / 2, y0 + size / 2);
+    }
+    // build-progress / damage bar below the tile
+    if (!ghost && w.hp < S.C.WALL_HP) {
+      const barY = y0 + size + 1;
+      ctx.fillStyle = '#111827';
+      ctx.fillRect(x0, barY, size, 3);
+      ctx.fillStyle = building ? '#fbbf24' : '#f87171';
+      ctx.fillRect(x0, barY, size * Math.max(0, Math.min(1, w.hp / S.C.WALL_HP)), 3);
+    }
+    // garrison count chip
+    const gTot = w.garrison ? w.garrison.deploy + w.garrison.supply + w.garrison.farm : 0;
+    if (!ghost && gTot > 0 && s >= 8) {
+      const fs = Math.max(9, Math.min(12, s * 0.5));
+      const label = `⚔️${gTot}`;
+      ctx.font = `600 ${fs}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const tw = ctx.measureText(label).width;
+      const lx = x0 + size / 2, ly = y0 + size * 0.45;
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(lx - tw / 2 - 2, ly - fs * 0.7, tw + 4, fs * 1.4);
+      ctx.fillStyle = '#e4e4e7';
+      ctx.fillText(label, lx, ly);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   function drawMinimap(game, view) {
     const mw = minimap.width, mh = minimap.height;
     mctx.imageSmoothingEnabled = false;
@@ -1200,6 +1372,20 @@ export function createRenderer(canvas, minimap) {
       mctx.fillStyle = 'rgba(239,68,68,0.5)';
       mctx.fillRect((k.x + 1) * sx - 3, (k.y + 1) * sy - 3, 6, 6);
     }
+    // walls (#187): small owner-colored marks — own always, enemy while
+    // visible; remembered enemy walls draw dimmer from the wall memory
+    for (const w of game.walls || []) {
+      if (w.owner !== viewer(game) && game.fog[w.y * game.map.w + w.x] !== 2) continue;
+      mctx.fillStyle = ownerColor(game, w.owner);
+      mctx.globalAlpha = 0.75;
+      mctx.fillRect((w.x + 0.5) * sx - 1, (w.y + 0.5) * sy - 1, 2, 2);
+    }
+    mctx.globalAlpha = 0.4;
+    mctx.fillStyle = OWNER_COLOR[1];
+    for (const k of Object.values(game.wallMemo || {})) {
+      mctx.fillRect((k.x + 0.5) * sx - 1, (k.y + 0.5) * sy - 1, 2, 2);
+    }
+    mctx.globalAlpha = 1;
     for (const b of game.blobs) {
       if (b.dead) continue;
       if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
