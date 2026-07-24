@@ -74,8 +74,8 @@ export const C = {
   CONVERT_TICKS: 100,      // 10 native seconds to arm units into the deploy role
   // -- walls (#187) --
   WALL_HP: 100,            // per-tile wall structure HP (same scale as SETT_HP)
-  WALL_BUILD_TICKS: 60,    // ticks per tile for a SINGLE builder unit (≈12 s at 1×)
-  WALL_BUILD_MAX_SPEED: 4, // cap on the √crew-size build multiplier (fastest tile ≈3 s at 1×)
+  WALL_BUILD_TICKS: 120,   // ticks per tile for a SINGLE builder unit (≈24 s at 1×)
+  WALL_BUILD_MAX_SPEED: 4, // cap on the √crew-size build multiplier (fastest tile ≈6 s at 1×)
   WALL_GARRISON_CAP: 4,    // units per wall tile
   WALL_NEAR_PROT: 10,      // structure-damage divisor while a friendly garrison is within 1 tile
   WALL_VISION: 4,          // fog reveal radius per GARRISONED wall tile
@@ -938,7 +938,8 @@ function tickWallOrder(game, b, o) {
 // can't double-count: every same-owner blob working this tile from
 // within Chebyshev 1 pools its unit count into one n, and the rate is
 // base × min(WALL_BUILD_MAX_SPEED, √n) — diminishing returns with clean
-// anchors (1 unit → 1×, 4 → 2×, 9 → 3×, 16+ → capped 4×).
+// anchors (1 unit → 1× ≈24 s/tile at 1×, 4 → 2× ≈12 s, 9 → 3× ≈8 s,
+// 16+ → capped 4× ≈6 s).
 function tickWallBuild(game) {
   if (!game.walls.length) return;
   let crews = null; // wallId -> pooled builder unit count

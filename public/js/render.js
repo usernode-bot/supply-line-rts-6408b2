@@ -927,6 +927,35 @@ export function createRenderer(canvas, minimap) {
       if (!b.order || b.order.type !== 'move' || !b.order.build) continue;
       dashedPlot(b.order.build.x, b.order.build.y, 'rgba(255,255,255,0.75)');
     }
+    // queued wall tiles (#187): every own builder's remaining line draws
+    // as dashed ghost markers — like the founding-site outlines above —
+    // so the player sees where walls are going to be placed while the
+    // crew travels and works. Tiles whose site has started are skipped:
+    // the scaffold entity already renders there.
+    for (const b of game.blobs) {
+      if (b.dead || b.owner !== viewer(game)) continue;
+      if (!b.order || b.order.type !== 'wall') continue;
+      const o = b.order;
+      for (let k = o.k; k < o.tiles.length; k++) {
+        const t = o.tiles[k];
+        if (game.wallAt && game.wallAt[t.y * game.map.w + t.x]) continue;
+        ctx.fillStyle = 'rgba(212,212,216,0.10)';
+        ctx.fillRect(wx(t.x), wy(t.y), s, s);
+        ctx.strokeStyle = 'rgba(212,212,216,0.7)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(wx(t.x) + 0.5, wy(t.y) + 0.5, s - 1, s - 1);
+        ctx.setLineDash([]);
+        if (s >= 10) {
+          ctx.globalAlpha = 0.45;
+          ctx.font = `${Math.max(8, Math.min(14, s * 0.55))}px system-ui`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('🧱', wx(t.x + 0.5), wy(t.y + 0.5));
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
     if (ui.pending === 'build') {
       let plot = null;
       if (ui.buildSite) plot = ui.buildSite;
