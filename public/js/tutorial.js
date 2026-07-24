@@ -66,7 +66,10 @@ function selIsHome(g, sel) {
 // allowed selection targets; target — the allowed world circle for
 // orders/armed-pending taps; marker — the pulsing map ring; done —
 // completion predicate polled each frame (state-based, so any input path
-// that reaches the goal counts).
+// that reaches the goal counts). ops/acts may also be (game, ui) =>
+// array, for steps whose buttons only apply to one specific selection —
+// e.g. the wall step must not let a pulsing 🧱 arm for the supply
+// carriers left selected by the resupply step.
 const STEPS = [
   { // 1 — welcome
     next: true,
@@ -197,8 +200,11 @@ const STEPS = [
       }
       return `Your army won — but far from your territory, units go hungry: they must pillage or be resupplied. Supply units are camped outside ${oName} — ${m ? 'tap' : 'click'} the marked group to select them.`;
     },
-    ops: ['route'],
-    acts: ['route', 'proutearm'],
+    // only live while the carriers are the selection — the army arrives
+    // here selected from the attack step, and its (disabled) route
+    // button must not pulse or answer
+    ops: (g, ui) => selIsCarriers(g, ui.selected) ? ['route'] : [],
+    acts: (g, ui) => selIsCarriers(g, ui.selected) ? ['route', 'proutearm'] : [],
     select: (g, sel) => selIsCarriers(g, sel),
     target: (g, ui) => {
       if (ui.pending !== 'route') return null;
@@ -241,8 +247,11 @@ const STEPS = [
         ? 'Now hold what you took: enemies can\'t cross finished walls. Tap your army, then tap it again and choose the highlighted 🧱 Wall… button.'
         : 'Now hold what you took: enemies can\'t cross finished walls. Select your army, then press the highlighted 🧱 Wall… button.';
     },
-    ops: ['wallBuild'],
-    acts: ['wall', 'pwallarm', 'pwall', 'pwallx'],
+    // only live while the ARMY is the selection: the carriers arrive
+    // here selected from the resupply step, and their wall button must
+    // stay dimmed — soldiers build this wall, not the supply band
+    ops: (g, ui) => selIsArmy(g, ui.selected) ? ['wallBuild'] : [],
+    acts: (g, ui) => selIsArmy(g, ui.selected) ? ['wall', 'pwallarm', 'pwall', 'pwallx'] : [],
     select: (g, sel) => selIsArmy(g, sel),
     target: (g, ui) => {
       if (ui.pending !== 'wall') return null;
@@ -315,8 +324,15 @@ function render(game, ui) {
   $('tut-keep').classList.toggle('hidden', !step.finish);
 }
 
+// Resolve a step's ops/acts field: plain array, or a (game, ui) =>
+// array function for selection-aware steps.
+function stepList(v) {
+  if (typeof v === 'function') return (st && v(st.game, st.ui)) || [];
+  return v || [];
+}
+
 function actAllowed(step, ds) {
-  const acts = step.acts || [];
+  const acts = stepList(step.acts);
   return acts.some(a => typeof a === 'string'
     ? a === ds.act
     : a.act === ds.act && (!a.mode || a.mode === ds.mode) && (!a.role || a.role === ds.role));
@@ -499,8 +515,7 @@ export function tick(game, ui) {
 
 export function allowsOp(op) {
   if (!st) return true;
-  const s = STEPS[st.idx];
-  return !!(s.ops && s.ops.includes(op));
+  return stepList(STEPS[st.idx].ops).includes(op);
 }
 
 export function allowsAct(ds) {
