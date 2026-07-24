@@ -752,6 +752,67 @@ function destroySettlement(game, s, why) {
 
 export function wallGarrisonTotal(w) { return w.garrison.deploy + w.garrison.supply + w.garrison.farm; }
 
+// -- wall rations readouts (#200). A wall tile has exactly ONE food
+// value: garrFood, a flat WALL_FOOD_CAP larder the garrison eats from
+// (there is no second per-unit hunger pool the way a settlement has a
+// stockpile beside its garrison meter). These helpers are pure and
+// derive every display state from that one value, so the panel and the
+// map tile can never disagree — or imply two independent numbers.
+
+// Larder fullness, 0..1 — the fill fraction both surfaces draw.
+export function wallRationsFrac(w) {
+  return Math.max(0, Math.min(1, (w.garrFood || 0) / C.WALL_FOOD_CAP));
+}
+
+// Display starvation: units on the tile with an empty larder. Matches
+// the tickWalls starve branch and the 0.5× combat case exactly. NOT the
+// `w.starving` field — that's a one-shot toast latch with per-unit
+// hysteresis, never a display state.
+export function wallStarving(w) {
+  return wallGarrisonTotal(w) > 0 && (w.garrFood || 0) <= 0.0001;
+}
+
+// Ticks the larder lasts at the current garrison's eating rate, ignoring
+// any inflow. Infinity with no mouths to feed — never format that.
+export function wallRationTicks(w) {
+  const g = wallGarrisonTotal(w);
+  if (g <= 0) return Infinity;
+  return (w.garrFood || 0) / (g * C.EAT_PER_SEC * C.DT);
+}
+
+// Drop a COMPLETED, optionally garrisoned wall onto a tile — the same
+// record tickWallBuild finishes, minus the build. Used by the
+// screenshot-state deep link (#200) to reach a garrisoned-wall panel
+// deterministically; the caller is responsible for tile legality
+// (canPlaceWall). Returns the wall, or null if the tile is taken.
+export function placeFinishedWall(game, owner, x, y, garrison, food) {
+  const i = y * game.map.w + x;
+  if (game.wallAt[i]) return null;
+  const g = garrison || { deploy: 0, supply: 0, farm: 0 };
+  const w = {
+    id: game.nextId++, owner, x, y, hp: C.WALL_HP, building: false,
+    garrison: { deploy: g.deploy || 0, supply: g.supply || 0, farm: g.farm || 0 },
+    garrFood: food != null ? food : 0,
+    garrLoss: 0, lastHitT: -999, starving: false, convert: null,
+  };
+  game.walls.push(w);
+  game.wallAt[i] = w.id;
+  return w;
+}
+
+// The settlement whose territory drip is topping this wall up, or null.
+// Mirrors the tickSettlement loop that actually feeds walls so the panel
+// can never name a feeder the sim isn't using.
+export function wallFeeder(game, w) {
+  if (w.building) return null;
+  for (const s of game.settlements) {
+    if (s.owner !== w.owner || s.building) continue;
+    if (s.stockpile <= 0.01) continue;
+    if (inTerritory(game, s, w.x + 0.5, w.y + 0.5)) return s;
+  }
+  return null;
+}
+
 // Straight tile line from (x0,y0) to (x1,y1) inclusive — Bresenham.
 // Shared by the placement preview and the dispatch path so they can
 // never disagree on which tiles a two-click line covers.

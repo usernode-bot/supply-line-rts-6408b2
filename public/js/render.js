@@ -10,6 +10,11 @@ import { fertTier } from './mapgen.js';
 const T = 16;     // terrain layer px per tile (drawn smoothed — kills shimmer)
 const FOG_T = 4;  // fog layer px per tile (tighter edge gradient)
 
+// stored-grain wheat (#200): the canvas twin of the panel's text-amber-300,
+// worn by a wall tile's 🌾 chip AND its rations bar — one number, one colour,
+// deliberately outside the green→red fed-ring palette that means hunger.
+const WHEAT = '#fcd34d';
+
 const OWNER_COLOR = ['#8b5cf6', '#ef4444'];
 const OWNER_DARK = ['#4c1d95', '#7f1d1d'];
 // unit-figure bodies: brighter than OWNER_DARK so the tiny figures
@@ -1428,20 +1433,22 @@ export function createRenderer(canvas, minimap) {
     // stacked below the tile: damage/progress, rations, arming progress.
     const gTot = w.garrison ? w.garrison.deploy + w.garrison.supply + w.garrison.farm : 0;
     const own = !ghost && w.owner === viewer(game);
-    const chipAt = (label, lx, ly, fs) => {
+    const chipAt = (label, lx, ly, fs, col) => {
       ctx.font = `600 ${fs}px system-ui`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       const tw = ctx.measureText(label).width;
       ctx.fillStyle = 'rgba(0,0,0,0.45)';
       ctx.fillRect(lx - tw / 2 - 2, ly - fs * 0.7, tw + 4, fs * 1.4);
-      ctx.fillStyle = '#e4e4e7';
+      ctx.fillStyle = col || '#e4e4e7';
       ctx.fillText(label, lx, ly);
     };
     const fs = Math.max(9, Math.min(12, s * 0.5));
     const showStock = own && !building && s >= 8 && (gTot > 0 || (w.garrFood || 0) >= 1);
     if (showStock) {
-      chipAt(`🌾${Math.floor(w.garrFood || 0)}`, x0 + size / 2, y0 + size * 0.3, fs);
+      // wheat-tinted, matching the rations bar below (#200): the chip and
+      // the bar are the SAME number, so they wear the same colour
+      chipAt(`🌾${Math.floor(w.garrFood || 0)}`, x0 + size / 2, y0 + size * 0.3, fs, WHEAT);
     }
     if (!ghost && gTot > 0 && s >= 8) {
       // role-mix icons, like settlement garrison chips, not a flat ⚔️
@@ -1460,23 +1467,23 @@ export function createRenderer(canvas, minimap) {
       ctx.fillRect(x0, barY, size * Math.max(0, Math.min(1, w.hp / S.C.WALL_HP)), 3);
       barY += 4;
     }
-    // garrison rations meter (#187): a tiny fed-state bar, same palette
-    // as the blob fed rings — calm green when provisioned, amber when
-    // low, slow-blinking red when the garrison is starving on empty.
+    // garrison rations meter (#187, relabelled #200): how full the tile's
+    // ONE larder is — deliberately NOT the blob fed-ring palette, which
+    // would read as per-unit hunger tiers a wall doesn't have. Wheat at
+    // any level, slow-blinking red only when the garrison is genuinely
+    // starving on empty (the only threshold the sim acts on).
     // Same s ≥ 8 threshold as the chips so it stays unobtrusive.
     if (!ghost && !building && gTot > 0 && s >= 8) {
-      const meter = Math.max(0, Math.min(1, (w.garrFood || 0) / S.C.WALL_FOOD_CAP));
+      const meter = S.wallRationsFrac(w);
       const rx = x0 + size * 0.15, rw = size * 0.7;
       ctx.fillStyle = '#111827';
       ctx.fillRect(rx, barY, rw, 2);
-      if (meter <= 0.02) {
+      if (S.wallStarving(w)) {
         const blink = 0.45 + 0.45 * Math.sin(game.tick * 0.35);
         ctx.fillStyle = `rgba(248,113,113,${blink.toFixed(2)})`;
         ctx.fillRect(rx, barY, rw, 2);
       } else {
-        ctx.fillStyle = meter >= 0.75 ? '#4ade80'
-          : meter >= 0.5 ? '#a3e635'
-            : meter >= 0.25 ? '#fbbf24' : '#f87171';
+        ctx.fillStyle = WHEAT;
         ctx.fillRect(rx, barY, rw * meter, 2);
       }
       barY += 3;

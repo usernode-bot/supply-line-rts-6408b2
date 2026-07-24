@@ -89,9 +89,12 @@ function randomSeed() { return Math.random().toString(36).slice(2, 10); }
 
 async function acquire(sid) {
   try {
-    fetchCtl = new AbortController();
-    const timer = setTimeout(() => fetchCtl.abort(), FETCH_TIMEOUT);
-    const res = await fetch('/api/attract-snapshot', { signal: fetchCtl.signal });
+    // hold the controller locally: stopAttract() nulls the module-level
+    // one the moment a match starts, and the timeout can fire after that
+    const ctl = new AbortController();
+    fetchCtl = ctl;
+    const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT);
+    const res = await fetch('/api/attract-snapshot', { signal: ctl.signal });
     clearTimeout(timer);
     if (sid !== session) return;
     if (res.ok) {

@@ -2484,11 +2484,28 @@ panel.addEventListener('input', (e) => {
   }
 });
 
-// Seconds of real time until a pending arm-up (#108) completes, at the
-// current display speed (sim runs at speed × 0.5 of native ticks).
+// Ticks → seconds of real time at the current display speed (the sim runs
+// at speed × 0.5 of native ticks). Shared by every countdown a panel
+// shows, so they can't drift apart.
+function ticksToSeconds(ticks) {
+  return Math.max(0, ticks) / (10 * Math.max(0.25, speed * 0.5));
+}
+
+// Seconds until a pending arm-up (#108) completes.
 function convertEta(convert) {
-  const ticks = Math.max(0, convert.done - game.tick);
-  return Math.max(1, Math.ceil(ticks / (10 * Math.max(0.25, speed * 0.5))));
+  return Math.max(1, Math.ceil(ticksToSeconds(convert.done - game.tick)));
+}
+
+// Coarse duration for the wall rations runway (#200). Quantised — nearest
+// 5 s under 90 s, nearest half-minute above — because renderPanel diffs
+// against lastPanelHTML and an exact value would rewrite the panel every
+// frame (blowing away in-panel focus / hold state).
+function fmtRunway(ticks) {
+  if (!isFinite(ticks)) return null;
+  const secs = ticksToSeconds(ticks);
+  if (secs < 90) return `~${Math.max(0, Math.round(secs / 5) * 5)}s`;
+  const mins = Math.round(secs / 30) / 2;
+  return `~${mins % 1 === 0 ? mins : mins.toFixed(1)}m`;
 }
 
 function roleBtn(role, label, active, disabled) {
@@ -2634,8 +2651,16 @@ function renderPanelInner(force) {
     const barCol = w.building ? 'bg-amber-500' : pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
     const prot = S.wallProtected(game, w);
     if (w.owner === me) {
-      const gMeter = Math.max(0, Math.min(1, (w.garrFood || 0) / S.C.WALL_FOOD_CAP));
-      const gFedColor = gMeter >= 0.75 ? 'text-emerald-400' : gMeter >= 0.5 ? 'text-lime-400' : gMeter >= 0.25 ? 'text-amber-400' : 'text-red-400';
+      // wall rations (#200): ONE pool, named once. The larder fraction
+      // drives the bar; hunger is the binary state the sim actually uses
+      // (grain ⇒ full strength, empty ⇒ half strength + losses), never a
+      // four-tier fed palette — that language belongs to real per-unit
+      // hunger (blobs, settlement garrisons).
+      const starving = S.wallStarving(w);
+      const rFrac = S.wallRationsFrac(w);
+      const runway = fmtRunway(S.wallRationTicks(w));
+      const feeder = S.wallFeeder(game, w);
+      const inW = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'wall' && r2.targetId === w.id);
       setPanelHTML(`
         <div class="flex items-center justify-between mb-1">
           <span class="font-semibold">🧱 Wall${w.building ? ' — under construction' : ''}</span>
@@ -2645,18 +2670,25 @@ function renderPanelInner(force) {
         ${w.building
           ? '<div class="text-xs text-zinc-400">Builders raise it while standing beside the tile — more hands build faster. It can be attacked the whole time.</div>'
           : `<div class="text-xs mb-1 ${prot ? 'text-emerald-400' : 'text-amber-400'}">${prot ? '🛡️ Protected — a garrison holds within 1 tile' : '⚠️ Unprotected — falls fast under attack'}</div>
-        <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${w.garrison.deploy} 🚚${w.garrison.supply} 🌱${w.garrison.farm} / ${S.C.WALL_GARRISON_CAP} · Stockpile <b class="${gFedColor}">🌾 ${Math.floor(w.garrFood || 0)}</b> / ${S.C.WALL_FOOD_CAP}</div>
-        ${(() => {
-          // inbound wall-garrison supply lines (#187)
-          const inW = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'wall' && r2.targetId === w.id);
-          return inW.length ? '<div class="text-xs text-sky-300 mb-1">🚚 Supplied by ' + (inW.length === 1 ? 'a supply route' : inW.length + ' supply routes') + '</div>' : '';
-        })()}
+        <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${w.garrison.deploy} 🚚${w.garrison.supply} 🌱${w.garrison.farm} / ${S.C.WALL_GARRISON_CAP}${gTot > 0
+          ? ` · <span class="${starving ? 'text-red-400' : 'text-emerald-400'}">${starving ? 'Starving' : 'Fed'}</span>` : ''}</div>
+        <div class="text-xs text-zinc-400">Rations <b class="${starving ? 'text-red-400' : 'text-amber-300'}">🌾 ${Math.floor(w.garrFood || 0)}</b> / ${S.C.WALL_FOOD_CAP}${gTot > 0
+          ? `${runway && !starving ? ` · ${runway} left` : ''} · ${gTot} mouth${gTot === 1 ? '' : 's'}` : ' · no mouths to feed'}</div>
+        <div class="h-0.5 rounded bg-zinc-800 overflow-hidden mb-1"><div class="h-full ${starving ? 'bg-red-500' : 'bg-amber-300'}" style="width:${Math.round(rFrac * 100)}%"></div></div>
+        ${starving ? '<div class="text-xs text-red-400 mb-1">💀 Starving — the garrison is dying, and fights at half strength.</div>' : ''}
+        ${gTot > 0 ? '<div class="text-xs text-zinc-500 mb-1">One pool — the garrison eats straight from this larder. There is no separate hunger meter.</div>' : ''}
+        ${inW.length
+          ? '<div class="text-xs text-sky-300 mb-1">🚚 Supplied by ' + (inW.length === 1 ? 'a supply route' : inW.length + ' supply routes') + '</div>'
+          : feeder
+            ? `<div class="text-xs text-sky-300 mb-1">🏠 Topped up from ${feeder.name || 'a settlement'}'s stores</div>`
+            : gTot > 0 ? '<div class="text-xs text-amber-400 mb-1">⚠️ No supply — the larder only drains</div>' : ''}
         ${gTot > 0
           ? `<div class="flex gap-1 mb-1">
               ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
             </div>
             ${w.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(w.convert)}s (fielding cancels)</div>` : ''}
-            <button data-act="fieldwall" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>`.replaceAll('data-act="role"', 'data-act="wrole"')
+            <button data-act="fieldwall" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>
+            <div class="text-xs text-zinc-600 mt-1">Fielding marches them out with up to ${S.C.FOOD_PER_UNIT}🌾 each; the rest stays in the larder.</div>`.replaceAll('data-act="role"', 'data-act="wrole"')
           : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '). A garrisoned wall attacks enemies within 1 tile; a supply route can keep it fed.</div>'}`}`);
     } else {
       const vis = S.isVisible(game, w.x + 0.5, w.y + 0.5);
@@ -3115,4 +3147,62 @@ refreshTutorialButton();
 refreshServerSave();
 loadHistory();
 startMenuPolling();
-startAttract();
+// a `?shot=` boot goes straight into a match — the menu backdrop would
+// only fetch a snapshot for a screen nobody sees
+if (!params.get('shot')) startAttract();
+
+// Screenshot-state deep links (#200): the wall-garrison panel only exists
+// mid-match on a selected wall, so no plain URL can reach it — screenshots
+// and the "Test this change" button would land on the main menu. `?shot=`
+// boots straight into a deterministic state: fixed seed, one finished
+// garrisoned wall in home territory, that wall selected, sim paused so the
+// readouts hold still. Pure UI state — nothing persists (the save is
+// cleared, not written), so it works in every environment.
+const SHOTS = {
+  // a fed wall garrison: rations mid-larder, the runway, the topped-up
+  // supply line, and the role/field controls all on screen at once
+  'wall-panel': { food: 39, garrison: { deploy: 3, supply: 1, farm: 0 } },
+  // the same panel with an empty larder: Starving + the half-strength note
+  'wall-panel-starving': { food: 0, garrison: { deploy: 3, supply: 1, farm: 0 } },
+};
+function bootShot(name) {
+  const cfg = SHOTS[name];
+  if (!cfg) return;
+  try {
+    clearSaves();
+    me = 0;
+    const g = S.newGame('shot-wall-panel', 'xsmall', 'normal');
+    const home = g.settlements.find(s => s.owner === 0);
+    if (!home) return;
+    // nearest wall-legal tile inside the home territory, scanned in a
+    // fixed order so the same seed always picks the same tile — starting
+    // past the farmland ring so the tile's own 🌾 chip and rations bar
+    // aren't crowded by the settlement's chips
+    let spot = null;
+    for (let r = 4; r <= S.C.TERRITORY && !spot; r++) {
+      for (let dy = -r; dy <= r && !spot; dy++) {
+        for (let dx = -r; dx <= r && !spot; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const x = home.x + 1 + dx, y = home.y + 1 + dy;
+          if (x < 0 || y < 0 || x >= g.map.w || y >= g.map.h) continue;
+          if (S.canPlaceWall(g, 0, x, y).err) continue;
+          if (S.inTerritory(g, home, x + 0.5, y + 0.5)) spot = { x, y };
+        }
+      }
+    }
+    if (!spot) return;
+    const w = S.placeFinishedWall(g, 0, spot.x, spot.y, cfg.garrison, cfg.food);
+    if (!w) return;
+    startMatch(g);
+    ui.selected = { kind: 'wall', id: w.id };
+    view.cx = spot.x + 0.5; view.cy = spot.y + 0.5; view.scale = 26;
+    paused = true;
+    $('btn-pause').textContent = '▶';
+    renderPanel(true);
+    updateHUD();
+  } catch (e) {
+    console.error('shot boot failed', e);
+  }
+}
+const shot = params.get('shot');
+if (shot) bootShot(shot);

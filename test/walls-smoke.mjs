@@ -240,6 +240,82 @@ function run(game, ticks) {
     `left=${JSON.stringify(wOut.garrison)}`);
   check(`in-territory larder stockpiles past the old garrison×10 cap (${wIn.garrFood.toFixed(0)}/${S.C.WALL_FOOD_CAP})`,
     wIn.garrFood > 50, `garrFood=${wIn.garrFood.toFixed(1)}`);
+  // panel readout (#200): the wall names the settlement whose drip is
+  // actually feeding it, and nothing at all when it's on its own
+  home.stockpile = 100; // deterministic: the drip needs stock to give
+  check('wallFeeder names the in-territory settlement',
+    S.wallFeeder(g, wIn) === home, `got ${S.wallFeeder(g, wIn)}`);
+  check('wallFeeder is null for the remote wall', S.wallFeeder(g, wOut) === null);
+}
+
+// ------------------------------------------------- 5b. rations readouts (#200)
+
+{
+  console.log('wall rations readouts derive from the one larder:');
+  const g = fresh();
+  const spot = findClearPair(g);
+
+  // the exact case that used to render amber "hungry": 4 mouths with
+  // 39🌾 stored — nearly full bellies, and fighting at full strength
+  const w4 = injectWall(g, 0, spot.x, spot.y, { deploy: 4, supply: 0, farm: 0 });
+  w4.garrFood = 39;
+  check('4 units on 39🌾 are Fed, not starving', S.wallStarving(w4) === false);
+  check('39/100 larder reads as 39% full',
+    Math.abs(S.wallRationsFrac(w4) - 0.39) < 1e-9, `frac=${S.wallRationsFrac(w4)}`);
+
+  // the starving state is derived, never the one-shot toast latch
+  w4.starving = true;
+  check('a stale starving latch does not fake the display state', S.wallStarving(w4) === false);
+  w4.starving = false;
+
+  // empty larder: starving only while there are mouths on the tile
+  const wEmpty = injectWall(g, 0, spot.x + 1, spot.y, { deploy: 2, supply: 0, farm: 0 });
+  wEmpty.garrFood = 0;
+  check('empty larder with a garrison is starving', S.wallStarving(wEmpty) === true);
+  const wBare = injectWall(g, 0, spot.x + 2, spot.y, { deploy: 0, supply: 0, farm: 0 });
+  wBare.garrFood = 0;
+  check('empty larder with no garrison is not starving', S.wallStarving(wBare) === false);
+
+  // clamps: undefined, zero, and over-cap all land inside 0..1
+  delete wBare.garrFood;
+  check('missing garrFood clamps to 0', S.wallRationsFrac(wBare) === 0);
+  wBare.garrFood = 0;
+  check('zero garrFood clamps to 0', S.wallRationsFrac(wBare) === 0);
+  wBare.garrFood = S.C.WALL_FOOD_CAP * 3;
+  check('over-cap garrFood clamps to 1', S.wallRationsFrac(wBare) === 1);
+
+  // runway: no mouths ⇒ Infinity (the panel must never format it);
+  // more mouths on the same larder ⇒ strictly shorter
+  wBare.garrFood = 50;
+  check('no mouths ⇒ infinite runway', S.wallRationTicks(wBare) === Infinity);
+  const w1 = injectWall(g, 0, spot.x, spot.y + 1, { deploy: 1, supply: 0, farm: 0 });
+  const w8 = injectWall(g, 0, spot.x + 1, spot.y + 1, { deploy: 8, supply: 0, farm: 0 });
+  w1.garrFood = 50; w8.garrFood = 50;
+  check('runway is finite with a garrison', isFinite(S.wallRationTicks(w1)));
+  check('8 mouths drain the same larder faster than 1',
+    S.wallRationTicks(w8) < S.wallRationTicks(w1),
+    `8→${S.wallRationTicks(w8).toFixed(0)} vs 1→${S.wallRationTicks(w1).toFixed(0)}`);
+
+  // and the prediction matches the real drain: a remote wall (no drip,
+  // no route) must empty within a tick of where wallRationTicks says
+  const g2 = fresh();
+  let far = null;
+  for (let y = 1; y < g2.map.h - 1 && !far; y++) {
+    for (let x = 1; x < g2.map.w - 1 && !far; x++) {
+      if (S.canPlaceWall(g2, 0, x, y).err) continue;
+      if (g2.settlements.every(s => Math.hypot(s.x + 1 - x, s.y + 1 - y) > 12)) far = { x, y };
+    }
+  }
+  check('found a remote tile for the drain check', !!far);
+  const wd = injectWall(g2, 0, far.x, far.y, { deploy: 2, supply: 0, farm: 0 });
+  wd.garrFood = 6;
+  const predicted = Math.ceil(S.wallRationTicks(wd));
+  run(g2, predicted - 1);
+  check('larder still has grain one tick before the predicted empty',
+    wd.garrFood > 0, `garrFood=${wd.garrFood.toFixed(3)} after ${predicted - 1} ticks`);
+  run(g2, 2);
+  check('larder is empty by the predicted tick',
+    wd.garrFood <= 0.0001 && S.wallStarving(wd), `garrFood=${wd.garrFood.toFixed(3)}`);
 }
 
 // ---------------------------------------------------------------- 4b. walls fence pillaging out
