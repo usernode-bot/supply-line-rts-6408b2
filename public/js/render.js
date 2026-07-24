@@ -362,7 +362,9 @@ export function createRenderer(canvas, minimap) {
       const src = SUP.routeSource(game, r);
       const tgt = SUP.routeTarget(game, r);
       if (!src || !tgt) continue;
-      const tp = r.targetKind === 'blob' ? { x: bx(tgt), y: by(tgt) } : S.settCenter(tgt);
+      const tp = r.targetKind === 'blob' ? { x: bx(tgt), y: by(tgt) }
+        : r.targetKind === 'wall' ? { x: tgt.x + 0.5, y: tgt.y + 0.5 } // (#187)
+          : S.settCenter(tgt);
       if (r.owner !== viewer(game)) {
         const seen = S.settVisible(game, src) || S.isVisible(game, tp.x, tp.y);
         if (!seen) continue;
@@ -659,6 +661,16 @@ export function createRenderer(canvas, minimap) {
       if (b.pillaging) {
         ctx.font = `${Math.max(10, r * 0.6)}px system-ui`;
         ctx.fillText('🔥', px + r * 0.9, py - r * 0.9);
+      }
+      // building-a-wall badge (#187): same working-state treatment as the
+      // pillage torch, on the opposite shoulder, with a subtle pulse while
+      // the crew is actively raising a tile
+      if (b.order && b.order.type === 'wall') {
+        const pulse2 = 0.7 + 0.3 * Math.sin((game.tick + alpha) * 0.6);
+        ctx.globalAlpha = pulse2;
+        ctx.font = `${Math.max(10, r * 0.6)}px system-ui`;
+        ctx.fillText('🧱', px - r * 0.9, py - r * 0.9);
+        ctx.globalAlpha = 1;
       }
       // arm-up progress (#108): amber bar while the group converts to
       // fighters — until it fills, the units keep their old role

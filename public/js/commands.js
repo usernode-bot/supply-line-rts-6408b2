@@ -72,6 +72,10 @@ export function applyCommand(g, owner, c) {
         } else if (c.target.kind === 'settlement') {
           const t = g.settlements.find(s => s.id === c.target.id && s.owner === owner);
           if (t) S.opRoute(g, b, { kind: 'settlement', id: t.id }, srcId);
+        } else if (c.target.kind === 'wall') {
+          // wall-garrison supply line (#187): own finished walls only
+          const t = g.walls.find(w => w.id === c.target.id && w.owner === owner && !w.building);
+          if (t) S.opRoute(g, b, { kind: 'wall', id: t.id }, srcId);
         }
       }
       break;
@@ -108,6 +112,9 @@ export function applyCommand(g, owner, c) {
         } else if (c.target.kind === 'blob') {
           const t = resolveBlobIn(g, owner, c.target.id);
           if (t) S.opSupplyRoute(g, st, { kind: 'blob', id: t.id });
+        } else if (c.target.kind === 'wall') {
+          const t = g.walls.find(w => w.id === c.target.id && w.owner === owner && !w.building);
+          if (t) S.opSupplyRoute(g, st, { kind: 'wall', id: t.id });
         }
       }
       break;

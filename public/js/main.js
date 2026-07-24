@@ -1893,6 +1893,10 @@ function dispatchRoutes(carriers, target, sourceId) {
       const st = game.settlements.find(s => s.id === target.id);
       dest = (st && st.name) || 'settlement';
       if (st) pingRoute(st.x + 1, st.y + 1);
+    } else if (target.kind === 'wall') {
+      const w = game.walls.find(x => x.id === target.id);
+      dest = 'wall garrison';
+      if (w) pingRoute(w.x + 0.5, w.y + 0.5);
     } else {
       const tb = findBlob(target.id);
       if (tb) pingRoute(tb.x, tb.y);
@@ -2082,8 +2086,15 @@ function resolvePending(world, pointerType, screen) {
     // route targets, so they're excluded from the blob hit test too.
     let st = S.settlementAt(game, world.x, world.y, 1.9);
     if (st && st.owner !== me) st = null;
-    let tgt = null;
+    // wall-garrison line (#187): a tap on an own finished wall tile
+    // targets the wall — exact-tile, like the settlement-first rule
+    let wl = null;
     if (!st) {
+      const w2 = wallAtPoint(world);
+      if (w2 && w2.owner === me && !w2.building) wl = w2;
+    }
+    let tgt = null;
+    if (!st && !wl) {
       tgt = S.blobAt(game, world.x, world.y, hitR);
       if (tgt && (tgt.owner !== me || tgt.working != null || carriers.some(c => c.id === tgt.id))) tgt = null;
       if (!tgt) {
@@ -2091,14 +2102,16 @@ function resolvePending(world, pointerType, screen) {
         if (st && st.owner !== me) st = null;
       }
     }
-    if (tgt) {
+    if (wl) {
+      dispatchRoutes(carriers, { kind: 'wall', id: wl.id }, srcId);
+    } else if (tgt) {
       dispatchRoutes(carriers, { kind: 'blob', id: tgt.id }, srcId);
     } else if (st && st.id === srcId) {
       toast('Route must lead away from its source');
     } else if (st) {
       dispatchRoutes(carriers, { kind: 'settlement', id: st.id }, srcId);
     } else {
-      toast('Tap a friendly army or settlement to supply');
+      toast('Tap a friendly army, wall or settlement to supply');
     }
   } else if (pending === 'route-sett') {
     // settlement-to-settlement supply line (#108): source is the
@@ -2108,9 +2121,15 @@ function resolvePending(world, pointerType, screen) {
     if (!src) return;
     const hitR = Math.max(1.5, 24 / view.scale);
     const stT = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+    const wlT = wallAtPoint(world);
     if (stT && stT.owner === me && stT.id !== src.id && !stT.building) {
       const r = doSupplyRoute(src, { kind: 'settlement', id: stT.id });
       if (!r.err) pingRoute(stT.x + 1, stT.y + 1);
+      toast(r.err ? r.err : '🚚 Supply route established');
+    } else if (wlT && wlT.owner === me && !wlT.building) {
+      // wall-garrison line (#187)
+      const r = doSupplyRoute(src, { kind: 'wall', id: wlT.id });
+      if (!r.err) pingRoute(wlT.x + 0.5, wlT.y + 0.5);
       toast(r.err ? r.err : '🚚 Supply route established');
     } else {
       const tgt = S.blobAt(game, world.x, world.y, hitR);
@@ -2119,7 +2138,7 @@ function resolvePending(world, pointerType, screen) {
         if (!r.err) pingRoute(tgt.x, tgt.y);
         toast(r.err ? r.err : '🚚 Supply route established');
       } else {
-        toast('Tap a friendly settlement or army to supply');
+        toast('Tap a friendly settlement, wall or army to supply');
       }
     }
   }
@@ -2138,9 +2157,9 @@ function updateHint() {
       ? (ui.buildSite ? 'Tap ✓ to found here — or tap elsewhere to move the site'
         : 'Tap where to found the settlement…')
       : ui.pending === 'route-sett'
-        ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination settlement (or army) to supply…`
+        ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination settlement, wall or army to supply…`
         : ui.routeSrc != null
-          ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination — a friendly settlement or army…`
+          ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination — a friendly settlement, wall or army…`
           : `${isMobile() ? 'Tap' : 'Tap or right-click'} the source settlement to load from…`;
   $('hint-text').textContent = text;
   el.classList.remove('hidden');
@@ -2490,9 +2509,14 @@ function renderPanelInner(force) {
           ? '<div class="text-xs text-zinc-400">Builders raise it while standing beside the tile — more hands build faster. It can be attacked the whole time.</div>'
           : `<div class="text-xs mb-1 ${prot ? 'text-emerald-400' : 'text-amber-400'}">${prot ? '🛡️ Protected — a garrison holds within 1 tile' : '⚠️ Unprotected — falls fast under attack'}</div>
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${w.garrison.deploy} 🚚${w.garrison.supply} 🌱${w.garrison.farm} / ${S.C.WALL_GARRISON_CAP}${gTot > 0 ? ` · <span class="${gFedColor}">${S.fedLabel(gMeter)}</span>` : ''}</div>
+        ${(() => {
+          // inbound wall-garrison supply lines (#187)
+          const inW = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'wall' && r2.targetId === w.id);
+          return inW.length ? '<div class="text-xs text-sky-300 mb-1">🚚 Supplied by ' + (inW.length === 1 ? 'a supply route' : inW.length + ' supply routes') + '</div>' : '';
+        })()}
         ${gTot > 0
           ? '<button data-act="fieldwall" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (' + gTot + ')</button>'
-          : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '). A garrisoned wall attacks enemies within 1 tile.</div>'}`}`);
+          : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '). A garrisoned wall attacks enemies within 1 tile; a supply route can keep it fed.</div>'}`}`);
     } else {
       const vis = S.isVisible(game, w.x + 0.5, w.y + 0.5);
       if (vis) {
@@ -2739,7 +2763,7 @@ function renderPanelInner(force) {
       <span class="font-semibold">${multi ? `${blobs.length} blobs` : 'Blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
-    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
+    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
     `;
   const convertLine = blobs.some(b => b.convert) ? `<div class="text-xs text-amber-400 mb-2">⚔️ Arming… ready in ~${convertEta(blobs.filter(b => b.convert).reduce((a, b) => (a.convert.done >= b.convert.done ? a : b)).convert)}s — units fight as their old role until then; picking another role cancels</div>` : '';
 

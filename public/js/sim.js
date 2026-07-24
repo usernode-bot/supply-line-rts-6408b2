@@ -1326,6 +1326,10 @@ export function opSupplyRoute(game, s, target) {
     if (!tgt) return { err: 'No destination there' };
     if (tgt.building) return { err: 'Still under construction' };
     if (tgt.owner !== s.owner) return { err: 'Destination must be friendly' };
+  } else if (target.kind === 'wall') {
+    const tw = game.walls.find(x => x.id === target.id);
+    if (!tw || tw.owner !== s.owner) return { err: 'No friendly wall there' };
+    if (tw.building) return { err: 'Still under construction' };
   } else {
     const tb = game.blobs.find(x => x.id === target.id && !x.dead);
     if (!tb || tb.owner !== s.owner) return { err: 'No friendly target there' };
@@ -1963,7 +1967,9 @@ function tickTargetedMove(game, b, o) {
 // -- supply carriers
 
 function targetPos(tgt, kind) {
-  return kind === 'blob' ? { x: tgt.x, y: tgt.y } : settCenter(tgt);
+  if (kind === 'blob') return { x: tgt.x, y: tgt.y };
+  if (kind === 'wall') return { x: tgt.x + 0.5, y: tgt.y + 0.5 }; // single-tile center (#187)
+  return settCenter(tgt);
 }
 
 // Delivery dock distance: to an army it's the touching-radii distance
@@ -2055,6 +2061,13 @@ function tickCarrier(game, b) {
       const room = foodCap(tgt) - tgt.food;
       taken = Math.min(give, room);
       tgt.food += taken;
+    } else if (route.targetKind === 'wall') {
+      // wall garrisons have no stockpile — deliveries top up the
+      // garrison's rations meter directly (#187)
+      const gcap = wallGarrisonTotal(tgt) * C.FOOD_PER_UNIT;
+      const room = Math.max(0, gcap - (tgt.garrFood || 0));
+      taken = Math.min(give, room);
+      tgt.garrFood = (tgt.garrFood || 0) + taken;
     } else {
       const room = C.STOCK_CAP - tgt.stockpile;
       taken = Math.min(give, room);
@@ -2065,10 +2078,11 @@ function tickCarrier(game, b) {
     o.cargo -= taken;
     if (taken > 0) SUP.recordDelivery(game, route, taken);
     if (o.cargo <= 0.01) { o.phase = 'return'; o.running = false; b.path = null; }
-    else if (taken <= 0.001 && b.food < 0.25 * foodCap(b)) {
-      // destination is topped off (#143): park at the dock and keep it
-      // fed as it eats instead of hauling the leftover cargo home. The
-      // parked carrier nibbles its own cargo so it never starves here.
+    else if (taken < 0.1 && b.food < 0.25 * foodCap(b)) {
+      // destination is topped off — or only sips a trickle, like a wall
+      // garrison's small rations meter (#187) — park at the dock and keep
+      // it fed as it eats instead of hauling the leftover cargo home. The
+      // parked carrier nibbles its own cargo so it never starves here (#143).
       const bite = Math.min(o.cargo, foodCap(b) - b.food);
       o.cargo -= bite; b.food += bite;
     }

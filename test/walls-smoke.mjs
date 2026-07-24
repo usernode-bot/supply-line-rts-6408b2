@@ -240,7 +240,47 @@ function run(game, ticks) {
     `left=${JSON.stringify(wOut.garrison)}`);
 }
 
-// ---------------------------------------------------------------- 6. save / load round-trip
+// ---------------------------------------------------------------- 6. supply routes feed wall garrisons
+
+{
+  console.log('a supply route tops up a remote wall garrison:');
+  const g = fresh();
+  const home = g.settlements.find(s => s.owner === 0);
+  home.stockpile = 400;
+  // a wall well outside every settlement's territory, so only the
+  // caravan can feed it
+  let outSpot = null;
+  const { w: mw, h: mh } = g.map;
+  for (let y = 1; y < mh - 1 && !outSpot; y++) {
+    for (let x = 1; x < mw - 1 && !outSpot; x++) {
+      if (S.canPlaceWall(g, 0, x, y).err) continue;
+      if (g.settlements.every(s => Math.hypot(s.x + 1 - x, s.y + 1 - y) > 12)) outSpot = { x, y };
+    }
+  }
+  check('found a remote spot', !!outSpot);
+  const w = injectWall(g, 0, outSpot.x, outSpot.y, { deploy: 2, supply: 0, farm: 0 });
+  w.garrFood = 10; // draining — no territory feeding out here
+  const carrier = spawnBlob(g, 0, home.x + 2.5, home.y + 0.5, 0, 5);
+  const r = S.opRoute(g, carrier, { kind: 'wall', id: w.id }, home.id);
+  check('opRoute accepts a wall target', !r.err, JSON.stringify(r));
+  check('route registered with wall targetKind',
+    g.routes.some(x => x.targetKind === 'wall' && x.targetId === w.id));
+  let peak = w.garrFood;
+  for (let t = 0; t < 2500; t++) { S.step(g); peak = Math.max(peak, w.garrFood); }
+  const gTot = w.garrison.deploy + w.garrison.supply + w.garrison.farm;
+  check(`caravan topped the garrison up (peak garrFood ${peak.toFixed(1)})`, peak > 15, `peak=${peak.toFixed(1)}`);
+  check(`rations still healthy at the end (${w.garrFood.toFixed(1)})`, w.garrFood > 5, `garrFood=${w.garrFood.toFixed(1)}`);
+  check('garrison survived on caravan rations', gTot === 2, `left=${JSON.stringify(w.garrison)}`);
+  check('route still alive', g.routes.some(x => x.targetKind === 'wall' && x.targetId === w.id));
+  // destroying the wall dissolves the line instead of stranding carriers
+  w.hp = 0;
+  g.walls = g.walls.filter(x => x.id !== w.id);
+  g.wallAt[outSpot.y * mw + outSpot.x] = 0;
+  run(g, 5);
+  check('route dissolves when the wall is gone', !g.routes.some(x => x.targetKind === 'wall'));
+}
+
+// ---------------------------------------------------------------- 7. save / load round-trip
 
 {
   console.log('serialize → deserialize round-trips walls + in-flight orders:');
