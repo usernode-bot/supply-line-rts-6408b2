@@ -2008,11 +2008,14 @@ function targetPos(tgt, kind) {
 
 // Delivery dock distance: to an army it's the touching-radii distance
 // (carrier edge meets target edge, #147); to a settlement it's the fixed
-// unload range around the 2×2 footprint center.
+// unload range around the 2×2 footprint center. A wall is a single tile
+// (#187): the carrier must be ON it or directly adjacent — 1.5 from the
+// tile center covers every Chebyshev-≤1 neighbor's center (diagonal
+// √2 ≈ 1.41) while a tile 2 away (≥ 2.0) stays out of range.
 function dockRange(b, tgt, kind) {
-  return kind === 'blob'
-    ? blobRadius(b) + blobRadius(tgt) + SUP.TOUCH_SLACK
-    : SUP.UNLOAD_RANGE;
+  if (kind === 'blob') return blobRadius(b) + blobRadius(tgt) + SUP.TOUCH_SLACK;
+  if (kind === 'wall') return 1.5;
+  return SUP.UNLOAD_RANGE;
 }
 
 // No way through to this leg's destination (revealed mountains walled it
@@ -2652,6 +2655,42 @@ export function pillageCells(game, b) {
   // shielded by an overlapping friendly ring, is pillageable)
   const friendlyIds = new Set(
     game.settlements.filter(st => st.owner === b.owner).map(st => st.id));
+  // walls fence pillage out (#187): only tiles actually REACHABLE from
+  // the army's own tile — flooding through the disc's window without
+  // crossing mountains, enemy keeps or finished enemy walls — can be
+  // stripped. Land behind an intact wall line stays safe until the wall
+  // is breached. 4-connected, like previewFields' flood, so a diagonal
+  // gap between wall tiles doesn't leak pillage through (matching the
+  // corner-cut rule in movement).
+  const x0 = Math.max(0, cx - span), x1 = Math.min(w - 1, cx + span);
+  const y0 = Math.max(0, cy - span), y1 = Math.min(h - 1, cy + span);
+  const open = (tx, ty) => {
+    if (tx < x0 || ty < y0 || tx > x1 || ty > y1) return false;
+    const i = ty * w + tx;
+    if (game.map.mountain[i]) return false;
+    if (game.settAt[i]) {
+      const so = game.settlements.find(st => st.id === game.settAt[i]);
+      if (so && so.owner !== b.owner) return false; // enemy keep — impassable
+    }
+    const wid = game.wallAt ? game.wallAt[i] : 0;
+    if (wid) {
+      const wl = game.walls.find(x => x.id === wid);
+      if (wl && !wl.building && wl.owner !== b.owner) return false; // sealed
+    }
+    return true;
+  };
+  const reached = new Set([cy * w + cx]);
+  const stack = [cy * w + cx];
+  const DIRS4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  while (stack.length) {
+    const i = stack.pop();
+    const tx = i % w, ty = (i / w) | 0;
+    for (const [dx, dy] of DIRS4) {
+      if (!open(tx + dx, ty + dy)) continue;
+      const ni = (ty + dy) * w + (tx + dx);
+      if (!reached.has(ni)) { reached.add(ni); stack.push(ni); }
+    }
+  }
   const cells = [];
   for (let dy = -span; dy <= span; dy++) {
     for (let dx = -span; dx <= span; dx++) {
@@ -2659,6 +2698,7 @@ export function pillageCells(game, b) {
       if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
       if (dist(tx + 0.5, ty + 0.5, b.x, b.y) > reach) continue;
       const i = ty * w + tx;
+      if (!reached.has(i)) continue;
       if (game.map.mountain[i] || game.settAt[i] || (game.wallAt && game.wallAt[i])) continue;
       if (friendlyIds.has(game.tilledBy[i])) continue;
       if (friendlyIds.has(game.terr[i])) continue;

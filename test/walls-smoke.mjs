@@ -242,6 +242,45 @@ function run(game, ticks) {
     wIn.garrFood > 50, `garrFood=${wIn.garrFood.toFixed(1)}`);
 }
 
+// ---------------------------------------------------------------- 4b. walls fence pillaging out
+
+{
+  console.log('walls block pillaging past them:');
+  const g = fresh();
+  const { w: mw, h: mh } = g.map;
+  // a fully clear 7×7 window (no mountains/farmland/territory) so the
+  // only thing shaping the pillage disc is the wall we inject
+  let c0 = null;
+  outer: for (let y = 4; y < mh - 4; y++) {
+    for (let x = 4; x < mw - 4; x++) {
+      let clear = true;
+      for (let dy = -3; dy <= 3 && clear; dy++) {
+        for (let dx = -3; dx <= 3 && clear; dx++) {
+          const i = (y + dy) * mw + (x + dx);
+          if (g.map.mountain[i] || g.settAt[i] || g.tilledBy[i] || g.wallAt[i] || g.terr[i]) clear = false;
+        }
+      }
+      if (clear) { c0 = { x, y }; break outer; }
+    }
+  }
+  check('found a clear pillage field', !!c0);
+  const b = spawnBlob(g, 0, c0.x + 0.5, c0.y + 0.5, 5, 0);
+  S.opPillage(g, b, true);
+  const before = new Set(S.pillageCells(g, b));
+  check('far side harvestable with no wall', before.has(c0.y * mw + (c0.x + 2)));
+  // seal the column just right of the camp across the whole disc window
+  for (let dy = -3; dy <= 3; dy++) injectWall(g, 1, c0.x + 1, c0.y + dy);
+  const sealed = new Set(S.pillageCells(g, b));
+  check('tiles beyond the wall are fenced out', ![...sealed].some(i => (i % mw) > c0.x + 1));
+  check('near-side tiles still harvestable', sealed.has(c0.y * mw + (c0.x - 1)));
+  // breach: knock out the middle tile — the flood pours through the gap
+  const mid = g.walls.find(x => x.owner === 1 && x.x === c0.x + 1 && x.y === c0.y);
+  g.walls = g.walls.filter(x => x.id !== mid.id);
+  g.wallAt[mid.y * mw + mid.x] = 0;
+  const breached = new Set(S.pillageCells(g, b));
+  check('breaching the wall reopens the far side', [...breached].some(i => (i % mw) > c0.x + 1));
+}
+
 // ---------------------------------------------------------------- 5b. garrison role switching
 
 {
@@ -293,10 +332,21 @@ function run(game, ticks) {
   check('opRoute accepts a wall target', !r.err, JSON.stringify(r));
   check('route registered with wall targetKind',
     g.routes.some(x => x.targetKind === 'wall' && x.targetId === w.id));
-  let peak = w.garrFood;
-  for (let t = 0; t < 2500; t++) { S.step(g); peak = Math.max(peak, w.garrFood); }
+  let peak = w.garrFood, prevFood = w.garrFood, deliveredFar = false;
+  for (let t = 0; t < 2500; t++) {
+    S.step(g);
+    if (w.garrFood > prevFood + 1e-9) {
+      // deliveries must land touching / next to the tile (dock range 1.5
+      // from the tile center ⇒ on it or Chebyshev-adjacent)
+      const c = g.blobs.find(x => x.id === carrier.id && !x.dead);
+      if (c && Math.hypot(c.x - (w.x + 0.5), c.y - (w.y + 0.5)) > 1.55) deliveredFar = true;
+    }
+    prevFood = w.garrFood;
+    peak = Math.max(peak, w.garrFood);
+  }
   const gTot = w.garrison.deploy + w.garrison.supply + w.garrison.farm;
   check(`caravan stockpiled past the old garrison×10 cap (peak ${peak.toFixed(1)})`, peak > 40, `peak=${peak.toFixed(1)}`);
+  check('deliveries only landed touching/next to the wall', !deliveredFar);
   check(`rations still healthy at the end (${w.garrFood.toFixed(1)})`, w.garrFood > 5, `garrFood=${w.garrFood.toFixed(1)}`);
   check('garrison survived on caravan rations', gTot === 2, `left=${JSON.stringify(w.garrison)}`);
   check('route still alive', g.routes.some(x => x.targetKind === 'wall' && x.targetId === w.id));
