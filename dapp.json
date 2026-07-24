@@ -29,6 +29,10 @@
     { "name": "Resume button present for cross-device saves", "path": "/?demo=1", "expectSelector": "#btn-resume" },
     { "name": "Tutorial button on main menu", "path": "/?demo=1", "expectSelector": "#btn-tutorial" },
     { "name": "Tutorial overlay container present", "path": "/?demo=1", "expectSelector": "#tutorial-box" },
-    { "name": "Tutorial keep-playing button present", "path": "/?demo=1", "expectSelector": "#tut-keep" }
+    { "name": "Tutorial keep-playing button present", "path": "/?demo=1", "expectSelector": "#tut-keep" },
+    { "name": "How to Play states the 8-unit wall garrison cap", "path": "/?demo=1", "expectText": "Garrison up to 8 units per tile" },
+    { "name": "Wall garrison panel deep link renders the panel", "path": "/?shot=wall-garrison&demo=1", "expectSelector": "#panel button[data-act=fieldwall]" },
+    { "name": "Wall garrison panel shows the new 8-unit cap when full", "path": "/?shot=wall-garrison&demo=1", "expectText": "Garrison 8/8" },
+    { "name": "Wall garrison panel fields all 8 garrisoned units", "path": "/?shot=wall-garrison&demo=1", "expectText": "Field garrison (8)" }
   ]
 }
