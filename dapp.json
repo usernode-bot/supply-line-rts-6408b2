@@ -41,9 +41,8 @@
     { "name": "Wall garrison panel deep link renders the panel", "path": "/?shot=wall-garrison&demo=1", "expectSelector": "#panel button[data-act=fieldwall]" },
     { "name": "Wall garrison panel shows the new 8-unit cap when full", "path": "/?shot=wall-garrison&demo=1", "expectText": "Garrison 8/8" },
     { "name": "Wall garrison panel fields all 8 garrisoned units", "path": "/?shot=wall-garrison&demo=1", "expectText": "Field garrison (8)" },
-    { "name": "Withdraw deep link renders the Withdraw button", "path": "/?shot=withdraw&demo=1", "expectSelector": "#panel button[data-act=withdraw]" },
-    { "name": "Engaged army panel reads In combat", "path": "/?shot=withdraw&demo=1", "expectText": "In combat" },
-    { "name": "Withdrawing army panel reads Withdrawing", "path": "/?shot=withdraw-active&demo=1", "expectText": "Withdrawing" },
+    { "name": "Engaged army panel reads In combat", "path": "/?shot=withdraw-active&demo=1", "expectText": "In combat" },
+    { "name": "Disengaging army panel reads Withdrawing", "path": "/?shot=withdraw-active&demo=1", "expectText": "Withdrawing" },
     { "name": "Wall panel says reinforcements can march in under attack", "path": "/?shot=wall-panel&demo=1", "expectText": "while the wall is under attack" }
   ]
 }

@@ -10,7 +10,7 @@ import { createRenderer } from './render.js';
 import { createInput } from './input.js';
 import { startAttract, stopAttract } from './attract.js';
 import * as TUT from './tutorial.js';
-import { dist, fertTier, FERT_TIERS, nearestPassable } from './mapgen.js';
+import { dist, fertTier, FERT_TIERS } from './mapgen.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -1295,60 +1295,11 @@ function ownGarrisonTargetAt(world) {
   return null;
 }
 
-// Blobs that are in contact right now — drives the Withdraw affordance
-// and the panel's combat line (same 5-tick window the renderer uses).
+// Blobs that are in contact right now — drives the panel's combat lines
+// (same 5-tick window the renderer uses). Breaking off needs no special
+// affordance: an ordinary move order given during a fight IS the
+// withdrawal (opMove flags it, and tickOrder honours the flag).
 function inCombat(b) { return !!b && game.tick - b.engagedT < 5; }
-
-// Withdraw (#201): always-accepted disengagement that never depends on
-// click precision. Each blob pulls back to the nearest of the player's
-// own settlements / garrisoned-capable walls within 12 tiles, else
-// straight away from the enemies it is locked with. Rides the ordinary
-// move op, so PvP relay, prediction and the tutorial gate all apply.
-function withdrawSpot(b) {
-  let best = null, bd = 12;
-  for (const s of game.settlements) {
-    if (s.owner !== me || s.building) continue;
-    const d = dist(s.x + 1, s.y + 1, b.x, b.y);
-    if (d < bd) { bd = d; best = { x: s.x + 1, y: s.y + 1 }; }
-  }
-  for (const w of game.walls) {
-    if (w.owner !== me || w.building) continue;
-    if (S.wallGarrisonTotal(w) >= S.C.WALL_GARRISON_CAP) continue;
-    const d = dist(w.x + 0.5, w.y + 0.5, b.x, b.y);
-    if (d < bd) { bd = d; best = { x: w.x + 0.5, y: w.y + 0.5 }; }
-  }
-  if (best) return best;
-  // no shelter in reach — run directly away from the unit-weighted
-  // centroid of whatever is in contact with this group
-  let ex = 0, ey = 0, n = 0;
-  for (const e of game.blobs) {
-    if (e.dead || e.owner === me) continue;
-    if (dist(e.x, e.y, b.x, b.y) > S.C.MELEE_RANGE + 0.2) continue;
-    const wt = Math.max(1, S.total(e));
-    ex += e.x * wt; ey += e.y * wt; n += wt;
-  }
-  let ax = 0, ay = 0;
-  if (n > 0) { ax = b.x - ex / n; ay = b.y - ey / n; }
-  const len = Math.hypot(ax, ay);
-  if (len < 0.001) { ax = 0; ay = -1; } else { ax /= len; ay /= len; }
-  const tx = Math.max(0.5, Math.min(game.map.w - 0.5, b.x + ax * 5));
-  const ty = Math.max(0.5, Math.min(game.map.h - 0.5, b.y + ay * 5));
-  const spot = nearestPassable(game.map, Math.floor(tx), Math.floor(ty), 4);
-  return spot ? { x: spot.x + 0.5, y: spot.y + 0.5 } : { x: tx, y: ty };
-}
-
-function dispatchWithdraw(blobs) {
-  let ok = 0, err = null, last = null;
-  for (const b of blobs) {
-    const spot = withdrawSpot(b);
-    const r = doMove(b, spot.x, spot.y, null);
-    if (r.err) err = r.err; else { ok++; last = spot; }
-  }
-  if (ok) {
-    pingOrder(last, null);
-    toast('🏳️ Withdrawing from combat');
-  } else if (err) toast(err);
-}
 
 function onRightClick(world) {
   if (!game || game.result) return;
@@ -1407,7 +1358,7 @@ function orderMove(blobs, world, target) {
   if (ok) pingOrder(world, target);
   if (fielded) toast(`🌱 ${fielded} farmer${fielded === 1 ? '' : 's'} heading to the fields`);
   else if (err) toast(err);
-  else if (ok && wasFighting) toast('⚔️ Attacking — use Withdraw to break off');
+  else if (ok && wasFighting) toast('⚔️ Attacking — order a plain move to break off');
 }
 
 // Brief destination animation so a move/attack order visibly lands (#71).
@@ -1726,9 +1677,7 @@ function showUnitOptions(screen) {
   const pillaging = blobs.some(b => b.pillaging);
   const canSplit = blobs.length === 1 && tot >= 2;
   const canBuild = tot >= S.C.SETT_COST;
-  const fighting = blobs.some(inCombat);
   orderPopup.innerHTML = `
-    ${fighting ? '<button data-act="pwithdraw" class="btn px-3 rounded-lg text-left bg-amber-700 hover:bg-amber-600 text-white">🏳️ Withdraw</button>' : ''}
     <button data-act="pmovearm" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move…</button>
     <button data-act="ppillage" class="btn px-3 rounded-lg text-left ${pillaging ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 ${pillaging ? 'Stop pillaging' : 'Pillage'}</button>
     ${canSplit ? `<button data-act="psplit" style="touch-action:none" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">✂️ Split ${Math.floor(tot / 2)} / ${tot} <span class="text-xs text-zinc-500">(hold to adjust)</span></button>` : ''}
@@ -2169,7 +2118,6 @@ orderPopup.addEventListener('click', (e) => {
     return;
   }
   // unit-options popup actions (phone UI) — mirror the panel's cases
-  if (act === 'pwithdraw') { dispatchWithdraw(selectedBlobs()); renderPanel(true); return; }
   if (act === 'pmovearm') { ui.pending = 'move'; updateHint(); return; }
   if (act === 'proutearm') { ui.pending = 'route'; ui.routeSrc = null; updateHint(); return; }
   if (act === 'pbuildarm') {
@@ -2425,7 +2373,6 @@ panel.addEventListener('click', (e) => {
       break;
     }
     case 'move': ui.pending = 'move'; updateHint(); break;
-    case 'withdraw': dispatchWithdraw(blobs); break;
     case 'route': ui.pending = 'route'; ui.routeSrc = null; updateHint(); break;
     case 'split': {
       const b = blobs[0];
@@ -3107,7 +3054,7 @@ function renderPanelInner(force) {
   // group build (#130): an under-strength founding party holding its site
   const waitingBuild = blobs.some(b => b.order && b.order.type === 'move' && b.order.build && b.order.waiting);
   // combat state (#201): "why isn't my army moving" must be answerable
-  // from the panel, and Withdraw only shows while there's a fight to leave
+  // from the panel — and it names the way out (a plain move order)
   const fighting = blobs.some(inCombat);
   const withdrawing = blobs.some(b => b.order && b.order.type === 'move' && b.order.disengage);
   const hpSum = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + u.hp, 0), 0);
@@ -3134,8 +3081,8 @@ function renderPanelInner(force) {
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
     <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
-    ${withdrawing ? '<div class="text-xs text-amber-300 mb-2">🏳️ Withdrawing — backs turned, so pursuers hit harder until it breaks contact</div>'
-      : fighting ? '<div class="text-xs text-red-400 mb-2">⚔️ In combat — Withdraw pulls it out of the fight</div>' : ''}
+    ${fighting ? '<div class="text-xs text-red-400 mb-1">⚔️ In combat — a move order breaks it off</div>' : ''}
+    ${withdrawing ? '<div class="text-xs text-amber-300 mb-2">🏳️ Withdrawing — backs turned, so pursuers hit harder until it breaks contact</div>' : ''}
     `;
   const convertLine = blobs.some(b => b.convert) ? `<div class="text-xs text-amber-400 mb-2">⚔️ Arming… ready in ~${convertEta(blobs.filter(b => b.convert).reduce((a, b) => (a.convert.done >= b.convert.done ? a : b)).convert)}s — units fight as their old role until then; picking another role cancels</div>` : '';
 
@@ -3153,7 +3100,6 @@ function renderPanelInner(force) {
     </div>
     ${convertLine}
     <div class="grid grid-cols-2 gap-1 mb-2">
-      ${fighting ? '<button data-act="withdraw" class="btn rounded bg-amber-700 hover:bg-amber-600 text-white">🏳️ Withdraw</button>' : ''}
       <button data-act="move" class="btn rounded bg-zinc-800 hover:bg-zinc-700">📍 Move</button>
       <button data-act="pillage" class="btn rounded ${blobs.some(b => b.pillaging) ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 Pillage</button>
       <button data-act="build" class="btn rounded bg-zinc-800 hover:bg-zinc-700 ${tot < S.C.SETT_COST ? 'opacity-40' : ''}" ${tot < S.C.SETT_COST ? 'disabled' : ''}>🏠 Build (${S.C.SETT_COST})</button>
@@ -3277,15 +3223,16 @@ function shotWallGarrison() {
   renderPanel(true);
 }
 
-// Withdraw / in-combat panel states (#201) exist only while a selected
-// group is actually in contact, which no plain URL can reach — so
-// `?shot=withdraw` boots a solo match on a FIXED seed, marches the
-// enemy's opening war party to within 1 tile of the player's, steps a few
-// ticks so the melee registers, selects the player's group and pauses.
-// `?shot=withdraw-active` additionally issues the Withdraw order, so the
-// "🏳️ Withdrawing" line is reachable too. Pure local UI state — no DB
-// writes — so both work in every environment.
-function shotWithdraw(active) {
+// The in-combat / withdrawing panel lines (#201) exist only while a
+// selected group is actually in contact, which no plain URL can reach —
+// so `?shot=withdraw-active` boots a solo match on a FIXED seed, marches
+// the enemy's opening war party to within 1 tile of the player's, steps a
+// few ticks so the melee registers, then issues an ordinary move order
+// away from the fight (the withdrawal itself: opMove flags it because the
+// group is in melee). Both status lines render, the group is selected and
+// the sim is paused. Pure local UI state — no DB writes — so it works in
+// every environment.
+function shotWithdrawing() {
   clearSaves();
   me = 0;
   const g = S.newGame('shot201', 'xsmall', 'normal');
@@ -3300,7 +3247,10 @@ function shotWithdraw(active) {
   startMatch(g);
   for (let i = 0; i < 3; i++) S.step(g); // registers the melee (meleeT / engagedT)
   ui.selected = { kind: 'blob', id: mine.id };
-  if (active) dispatchWithdraw([mine]);
+  // break off toward home — a plain move, exactly what a player right-click
+  // issues; the sim marks it as a disengagement because contact is live
+  const home = g.settlements.find(s => s.owner === 0);
+  if (home) doMove(mine, home.x + 1, home.y + 1, null);
   view.cx = mine.x; view.cy = mine.y; view.scale = 26;
   paused = true;
   $('btn-pause').textContent = '▶';
@@ -3322,8 +3272,8 @@ if (!params.get('shot')) startAttract();
 if (SHOT === 'wall-garrison') {
   try { shotWallGarrison(); } catch (e) { console.warn('shot link failed', e); }
 }
-if (SHOT === 'withdraw' || SHOT === 'withdraw-active') {
-  try { shotWithdraw(SHOT === 'withdraw-active'); } catch (e) { console.warn('shot link failed', e); }
+if (SHOT === 'withdraw-active') {
+  try { shotWithdrawing(); } catch (e) { console.warn('shot link failed', e); }
 }
 
 // Screenshot-state deep links (#200): the wall-garrison panel only exists
