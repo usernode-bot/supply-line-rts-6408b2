@@ -474,6 +474,38 @@ function claimFootprint(game, s) {
   }
 }
 
+// -- territory ownership (#188): every tile whose center lies within
+// TERRITORY of a completed settlement's footprint center belongs to
+// exactly ONE settlement — the nearest, with ties kept by the lower
+// (older) id, the same incumbent-keeps-ties rule farmland uses (#167).
+// The split is global across both owners, so a frontier between
+// opposing settlements falls at the midline. game.terr is derived,
+// never serialized: a pure function of the settlement list, rebuilt on
+// found / complete / destroy / load, so live state, save/load and both
+// PvP sides always agree. terrVer bumps on every rebuild so the
+// renderer can cache its border segments.
+export function rebuildTerritory(game) {
+  const { w, h } = game.map;
+  if (!game.terr || game.terr.length !== w * h) game.terr = new Int32Array(w * h);
+  else game.terr.fill(0);
+  const best = new Float32Array(w * h).fill(Infinity);
+  const R = C.TERRITORY, span = Math.ceil(R);
+  for (const s of [...game.settlements].sort((a, b) => a.id - b.id)) {
+    if (s.building) continue;
+    const cx = s.x + 1, cy = s.y + 1;
+    for (let ty = s.y - span; ty <= s.y + 1 + span; ty++) {
+      for (let tx = s.x - span; tx <= s.x + 1 + span; tx++) {
+        if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+        const d = dist(tx + 0.5, ty + 0.5, cx, cy);
+        if (d > R) continue;
+        const i = ty * w + tx;
+        if (d < best[i]) { best[i] = d; game.terr[i] = s.id; }
+      }
+    }
+  }
+  game.terrVer = (game.terrVer || 0) + 1;
+}
+
 // Farmland ring: every non-mountain, unclaimed, un-tilled tile whose
 // center lies within FARM_RING of the footprint center — 20 tiles on
 // open ground, closely matching the old 21-tile disc so income holds.
@@ -636,6 +668,9 @@ function foundSettlement(game, owner, x, y, opts) {
   // farmland appears only when construction completes (tickSettlement)
   if (!construction) tillFields(game, s);
   game.settlements.push(s);
+  // completed settlements carve out territory immediately; construction
+  // sites get theirs on completion (tickSettlement), like farmland (#188)
+  rebuildTerritory(game);
   // units can't share a square with an enemy settlement — nudge them off
   const foot = new Set(settTiles(game.map, s));
   for (const b of game.blobs) {
@@ -671,6 +706,8 @@ function destroySettlement(game, s, why) {
   for (const o of [...game.settlements].sort((a, b) => a.id - b.id)) {
     if (!o.building) tillFields(game, o);
   }
+  // neighbors absorb the freed territory the same way (#188)
+  rebuildTerritory(game);
   for (const r of [...game.routes]) {
     if (r.settlementId === s.id || (r.targetKind === 'settlement' && r.targetId === s.id)) {
       SUP.dissolveRoute(game, r);
@@ -765,20 +802,23 @@ export function opMove(game, b, x, y, target) {
 }
 
 // Whether world position (x, y) lies inside settlement s's territory.
-// Tests the TILE CENTER under the point against TERRITORY — the identical
-// formula the renderer's drawn territory outline uses (#132) — so a unit
-// standing anywhere inside the drawn ring always qualifies. Raw
-// point-distance checks disagreed with the outline by up to ~0.7 tiles at
-// the edge, leaving units visually "home" but unfed/unhealed.
-export function inTerritory(s, x, y) {
-  return dist(Math.floor(x) + 0.5, Math.floor(y) + 0.5, s.x + 1, s.y + 1) <= C.TERRITORY;
+// Tests the TILE under the point against the derived ownership map
+// (#188) — the identical data the renderer's drawn borders come from,
+// keeping the #132 rule that a unit standing anywhere inside a drawn
+// ring always qualifies. Territory is exclusive: a tile in two
+// settlements' radius belongs only to the nearer one, so this returns
+// true for exactly one settlement per tile.
+export function inTerritory(game, s, x, y) {
+  const tx = Math.floor(x), ty = Math.floor(y);
+  if (tx < 0 || ty < 0 || tx >= game.map.w || ty >= game.map.h) return false;
+  return game.terr[ty * game.map.w + tx] === s.id;
 }
 
 // Field blobs may only become farmers at a friendly settlement.
 // Construction sites don't count as home (#95): no healing, no farming.
 export function isAtHome(game, b) {
   return game.settlements.some(s =>
-    s.owner === b.owner && !s.building && inTerritory(s, b.x, b.y));
+    s.owner === b.owner && !s.building && inTerritory(game, s, b.x, b.y));
 }
 
 export function opSetRole(game, b, role) {
@@ -805,7 +845,7 @@ export function opSetRole(game, b, role) {
     for (const st of game.settlements) {
       if (st.owner !== b.owner || st.building) continue;
       const d = dist(st.x + 1, st.y + 1, b.x, b.y);
-      if (inTerritory(st, b.x, b.y) && d < bd) { bd = d; s = st; }
+      if (inTerritory(game, st, b.x, b.y) && d < bd) { bd = d; s = st; }
     }
     if (!s) return { err: 'Farmers can only be assigned at a friendly settlement' };
     leaveRoute(game, b);
@@ -1152,7 +1192,7 @@ function backToWorkPlan(game, owner) {
     let walkSett = null, wd = Infinity;
     for (const s of setts) {
       const d = dist(s.x + 1, s.y + 1, b.x, b.y);
-      const home = inTerritory(s, b.x, b.y);
+      const home = inTerritory(game, s, b.x, b.y);
       if (home) atHomeOfAny = true;
       if (!safe.has(s.id)) continue;
       if (home && d < hd) { hd = d; homeSett = s; }
@@ -2155,9 +2195,11 @@ export function pillageCells(game, b) {
   const reach = C.PILLAGE_RADIUS;
   const span = Math.ceil(reach);
   // own settlement land is never pillaged (#85): own farmland, and any
-  // tile inside a friendly territory ring (matches the drawn border)
-  const friendly = game.settlements.filter(st => st.owner === b.owner);
-  const friendlyIds = new Set(friendly.map(st => st.id));
+  // tile OWNED by a friendly settlement (#188 — matches the drawn
+  // border exactly; enemy ground across a close frontier, formerly
+  // shielded by an overlapping friendly ring, is pillageable)
+  const friendlyIds = new Set(
+    game.settlements.filter(st => st.owner === b.owner).map(st => st.id));
   const cells = [];
   for (let dy = -span; dy <= span; dy++) {
     for (let dx = -span; dx <= span; dx++) {
@@ -2167,11 +2209,7 @@ export function pillageCells(game, b) {
       const i = ty * w + tx;
       if (game.map.mountain[i] || game.settAt[i]) continue;
       if (friendlyIds.has(game.tilledBy[i])) continue;
-      let own = false;
-      for (const st of friendly) {
-        if (inTerritory(st, tx + 0.5, ty + 0.5)) { own = true; break; }
-      }
-      if (own) continue;
+      if (friendlyIds.has(game.terr[i])) continue;
       cells.push(i);
     }
   }
@@ -2416,6 +2454,7 @@ function tickSettlement(game, s) {
     if (s.hp >= C.SETT_HP) {
       s.building = false;
       tillFields(game, s);
+      rebuildTerritory(game);
       game.events.push({ owner: s.owner, msg: `🏠 ${s.name} founded — settlement complete`, x: s.x + 1, y: s.y + 1 });
       game.events.push({ owner: 1 - s.owner, msg: `🏘️ We've heard rumors of the founding of a new settlement, ${s.name}`, x: s.x + 1, y: s.y + 1 });
       // the rumor is public news: in solo games queue it for the AI too
@@ -2510,7 +2549,7 @@ function tickSettlement(game, s) {
     const hungry = [];
     for (const b of game.blobs) {
       if (b.dead || b.owner !== s.owner) continue;
-      if (!inTerritory(s, b.x, b.y)) continue;
+      if (!inTerritory(game, s, b.x, b.y)) continue;
       if (foodCap(b) - b.food <= 0) continue;
       hungry.push(b);
     }
@@ -2940,6 +2979,10 @@ export function deserialize(data, prev) {
     if (!s.building) tillFields(game, s);
     game.settlements.push(s);
   }
+  // derived territory ownership (#188) — never serialized; a pure
+  // function of the settlement list, so rebuilding here reproduces the
+  // live division exactly
+  rebuildTerritory(game);
   for (const bd of data.blobs) {
     // pre-rework saves distinguished move vs attack-move; both map onto
     // the unified move order (same x/y fields)

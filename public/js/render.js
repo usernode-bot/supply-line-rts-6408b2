@@ -63,8 +63,11 @@ function fogTarget(v) { return v === 2 ? 0 : v === 1 ? 150 : 255; }
 // Grid-aligned territory outline: the border edges of the disc of tiles
 // whose centers lie within TERRITORY of a settlement's 2×2 footprint
 // center (anchor + (1, 1)), as segment endpoints in tile offsets from
-// the settlement's anchor tile. Computed once — the shape is identical
-// for every settlement.
+// the settlement's anchor tile. Computed once. Since #188 live
+// settlements stroke their OWNED region from game.terr instead; this
+// idealized circle remains only for the ghost rings of remembered
+// enemy settlements, which draw from a fog snapshot with no live
+// ownership to consult.
 const TERRITORY_EDGES = (() => {
   const R = S.C.TERRITORY;
   // tile (dx, dy) center relative to the footprint center is (dx - 0.5, dy - 0.5)
@@ -93,6 +96,55 @@ export function createRenderer(canvas, minimap) {
   let pendingDirty = new Set();
   let dpr = 1, cssW = 0, cssH = 0;
   let lastFrameT = 0;
+  // per-settlement territory border segments derived from the exclusive
+  // ownership map (#188), cached until the sim rebuilds it (terrVer)
+  let terrEdges = null, terrEdgesVer = -1, terrEdgesGame = null;
+
+  // Border segments of each settlement's OWNED tiles, in world tile
+  // coordinates: `outer` faces unowned or enemy-owned ground (the
+  // national border), `seam` faces a same-player neighbor settlement
+  // (the internal province line, kept on the lower-id side only so it
+  // never double-strokes).
+  function ensureTerrEdges(game) {
+    if (!game.terr) S.rebuildTerritory(game);
+    if (terrEdges && terrEdgesGame === game && terrEdgesVer === game.terrVer) return terrEdges;
+    const { w, h } = game.map;
+    const byId = new Map(game.settlements.map(s => [s.id, s]));
+    terrEdges = new Map();
+    const bag = (sid) => {
+      let e = terrEdges.get(sid);
+      if (!e) { e = { outer: [], seam: [] }; terrEdges.set(sid, e); }
+      return e;
+    };
+    const terr = game.terr;
+    for (let ty = 0; ty < h; ty++) {
+      for (let tx = 0; tx < w; tx++) {
+        const sid = terr[ty * w + tx];
+        if (!sid) continue;
+        const s = byId.get(sid);
+        if (!s) continue;
+        // [neighbor tx, neighbor ty, edge x1, y1, x2, y2]
+        const sides = [
+          [tx, ty - 1, tx, ty, tx + 1, ty],
+          [tx, ty + 1, tx, ty + 1, tx + 1, ty + 1],
+          [tx - 1, ty, tx, ty, tx, ty + 1],
+          [tx + 1, ty, tx + 1, ty, tx + 1, ty + 1],
+        ];
+        for (const [nx, ny, x1, y1, x2, y2] of sides) {
+          const nSid = nx < 0 || ny < 0 || nx >= w || ny >= h ? 0 : terr[ny * w + nx];
+          if (nSid === sid) continue;
+          const o = nSid ? byId.get(nSid) : null;
+          if (o && o.owner === s.owner) {
+            if (sid < nSid) bag(sid).seam.push([x1, y1, x2, y2]);
+          } else {
+            bag(sid).outer.push([x1, y1, x2, y2]);
+          }
+        }
+      }
+    }
+    terrEdgesGame = game; terrEdgesVer = game.terrVer;
+    return terrEdges;
+  }
 
   function resize() {
     dpr = window.devicePixelRatio || 1;
@@ -328,7 +380,37 @@ export function createRenderer(canvas, minimap) {
     }
 
     // territory borders — armies inside get fed from the stockpile.
-    // Solid, team-coloured, grid-aligned outlines (not circles).
+    // Exclusive per-tile ownership (#188): each settlement strokes the
+    // outline of the tiles it OWNS, so close settlements split the land
+    // at the midline instead of drawing overlapping rings. Seams between
+    // two same-player settlements draw thinner, reading as a province
+    // line rather than a frontier.
+    function strokeSegs(segs) {
+      ctx.beginPath();
+      for (const [x1, y1, x2, y2] of segs) {
+        ctx.moveTo(wx(x1), wy(y1));
+        ctx.lineTo(wx(x2), wy(y2));
+      }
+      ctx.stroke();
+    }
+    const edges = ensureTerrEdges(game);
+    for (const st of game.settlements) {
+      if (st.building) continue; // construction sites feed nobody — no ring yet (#95)
+      if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
+      const e = edges.get(st.id);
+      if (!e) continue;
+      ctx.strokeStyle = ownerColor(game, st.owner);
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 2;
+      strokeSegs(e.outer);
+      if (e.seam.length) {
+        ctx.globalAlpha = 0.35;
+        ctx.lineWidth = 1;
+        strokeSegs(e.seam);
+      }
+    }
+    // ghost rings for remembered enemy settlements draw from the fog
+    // snapshot, not live ownership — keep the plain circular outline
     function strokeTerritory(px0, py0) {
       ctx.beginPath();
       for (const [ax, ay, ex, ey] of TERRITORY_EDGES) {
@@ -338,13 +420,6 @@ export function createRenderer(canvas, minimap) {
       ctx.stroke();
     }
     ctx.lineWidth = 2;
-    for (const st of game.settlements) {
-      if (st.building) continue; // construction sites feed nobody — no ring yet (#95)
-      if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
-      ctx.strokeStyle = ownerColor(game, st.owner);
-      ctx.globalAlpha = 0.55;
-      strokeTerritory(st.x, st.y);
-    }
     for (const k of Object.values(knownOf(game))) {
       if (S.settVisible(game, k)) continue;
       ctx.strokeStyle = OWNER_COLOR[1];
