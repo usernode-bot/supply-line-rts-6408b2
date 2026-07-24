@@ -31,9 +31,11 @@
     { "name": "Tutorial overlay container present", "path": "/?demo=1", "expectSelector": "#tutorial-box" },
     { "name": "Tutorial keep-playing button present", "path": "/?demo=1", "expectSelector": "#tut-keep" },
     { "name": "Wall-panel screenshot state selects a garrisoned wall", "path": "/?shot=wall-panel&demo=1", "expectSelector": "#panel" },
-    { "name": "Wall panel calls the food pool Rations, not Stockpile", "path": "/?shot=wall-panel&demo=1", "expectText": "Rations" },
-    { "name": "Wall panel states the one-pool rule", "path": "/?shot=wall-panel&demo=1", "expectText": "There is no separate hunger meter" },
-    { "name": "Fed wall garrison reads a rations runway in mouths", "path": "/?shot=wall-panel&demo=1", "expectText": "mouths" },
-    { "name": "Empty-larder wall garrison reads Starving", "path": "/?shot=wall-panel-starving&demo=1", "expectText": "fights at half strength" }
+    { "name": "Wall panel names the stored-grain pool Supplies", "path": "/?shot=wall-panel&demo=1", "expectText": "Supplies" },
+    { "name": "Wall garrison shows a real per-unit hunger tier", "path": "/?shot=wall-panel&demo=1", "expectText": "Well-fed" },
+    { "name": "Wall panel explains the garrison refeeds from the supplies", "path": "/?shot=wall-panel&demo=1", "expectText": "refills them from these supplies" },
+    { "name": "Fed wall garrison shows a food runway in mouths", "path": "/?shot=wall-panel&demo=1", "expectText": "mouths" },
+    { "name": "Wall garrison with both pools empty reads Famished", "path": "/?shot=wall-panel-starving&demo=1", "expectText": "Famished" },
+    { "name": "Starving wall garrison warns it fights at half strength", "path": "/?shot=wall-panel-starving&demo=1", "expectText": "fights at half strength" }
   ]
 }

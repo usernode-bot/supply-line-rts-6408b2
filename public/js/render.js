@@ -1444,11 +1444,12 @@ export function createRenderer(canvas, minimap) {
       ctx.fillText(label, lx, ly);
     };
     const fs = Math.max(9, Math.min(12, s * 0.5));
-    const showStock = own && !building && s >= 8 && (gTot > 0 || (w.garrFood || 0) >= 1);
+    const showStock = own && !building && s >= 8 && (gTot > 0 || (w.stock || 0) >= 1);
     if (showStock) {
-      // wheat-tinted, matching the rations bar below (#200): the chip and
-      // the bar are the SAME number, so they wear the same colour
-      chipAt(`🌾${Math.floor(w.garrFood || 0)}`, x0 + size / 2, y0 + size * 0.3, fs, WHEAT);
+      // the tile's SUPPLIES stash (#200) — stored grain, wheat-tinted.
+      // Distinct from the hunger bar below it, which is the garrison's
+      // own bellies: two pools, two readouts, two colour languages.
+      chipAt(`🌾${Math.floor(w.stock || 0)}`, x0 + size / 2, y0 + size * 0.3, fs, WHEAT);
     }
     if (!ghost && gTot > 0 && s >= 8) {
       // role-mix icons, like settlement garrison chips, not a flat ⚔️
@@ -1467,14 +1468,15 @@ export function createRenderer(canvas, minimap) {
       ctx.fillRect(x0, barY, size * Math.max(0, Math.min(1, w.hp / S.C.WALL_HP)), 3);
       barY += 4;
     }
-    // garrison rations meter (#187, relabelled #200): how full the tile's
-    // ONE larder is — deliberately NOT the blob fed-ring palette, which
-    // would read as per-unit hunger tiers a wall doesn't have. Wheat at
-    // any level, slow-blinking red only when the garrison is genuinely
-    // starving on empty (the only threshold the sim acts on).
+    // garrison HUNGER meter (#200): the garrison's own bellies, so this
+    // wears the blob fed-ring palette on purpose — garrisoned units are
+    // ordinary units, and their hunger drives the same fedMult tiers.
+    // The wheat 🌾 chip above is the separate supplies stash they refeed
+    // from; the two never share a colour language. Slow-blinking red only
+    // when bellies AND stash are dry (the sim's starve threshold).
     // Same s ≥ 8 threshold as the chips so it stays unobtrusive.
     if (!ghost && !building && gTot > 0 && s >= 8) {
-      const meter = S.wallRationsFrac(w);
+      const meter = S.wallFedMeter(w);
       const rx = x0 + size * 0.15, rw = size * 0.7;
       ctx.fillStyle = '#111827';
       ctx.fillRect(rx, barY, rw, 2);
@@ -1483,13 +1485,15 @@ export function createRenderer(canvas, minimap) {
         ctx.fillStyle = `rgba(248,113,113,${blink.toFixed(2)})`;
         ctx.fillRect(rx, barY, rw, 2);
       } else {
-        ctx.fillStyle = WHEAT;
+        ctx.fillStyle = meter >= 0.75 ? '#4ade80'
+          : meter >= 0.5 ? '#a3e635'
+            : meter >= 0.25 ? '#fbbf24' : '#f87171';
         ctx.fillRect(rx, barY, rw * meter, 2);
       }
       barY += 3;
     }
     // garrison arm-up progress (own walls only) — the settlement convert
-    // bar treatment, stacked under the rations meter
+    // bar treatment, stacked under the hunger meter
     if (own && !building && w.convert) {
       const p = Math.max(0, Math.min(1, 1 - (w.convert.done - game.tick) / S.C.CONVERT_TICKS));
       ctx.fillStyle = '#111827';

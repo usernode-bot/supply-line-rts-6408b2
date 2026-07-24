@@ -77,7 +77,8 @@ export const C = {
   WALL_BUILD_TICKS: 120,   // ticks per tile for a SINGLE builder unit (≈24 s at 1×)
   WALL_BUILD_MAX_SPEED: 4, // cap on the √crew-size build multiplier (fastest tile ≈6 s at 1×)
   WALL_GARRISON_CAP: 4,    // units per wall tile
-  WALL_FOOD_CAP: 100,      // flat food stockpile per wall tile — the garrison's larder
+  WALL_FOOD_CAP: 100,      // flat supplies stash per wall tile (#200) — the garrison
+                           // refeeds its own bellies from this, never eats it directly
   WALL_NEAR_PROT: 10,      // structure-damage divisor while a friendly garrison is within 1 tile
   WALL_VISION: 4,          // fog reveal radius per GARRISONED wall tile
 };
@@ -116,6 +117,20 @@ export function fedLabel(m) {
   if (m >= 0.5) return 'Fed';
   if (m >= 0.25) return 'Hungry';
   return 'Famished';
+}
+// A settlement garrison's per-unit hunger (#200): the same 0..1 meter
+// fedMeter gives a blob, over the garrison's own rations (garrFood, #180)
+// against its bellies. ONE definition shared by the panel's fed word and
+// the combat multiplier, so the label can never promise a strength the
+// sim doesn't grant. `garrFood == null` reads FULL, mirroring the
+// pre-#180 grant in tickSettlement: tickCombat runs before
+// tickSettlement, so a freshly loaded old save must never read 0 and
+// halve its defenders for a tick.
+export function settFedMeter(s) {
+  const gcap = garrisonTotal(s) * C.FOOD_PER_UNIT;
+  if (gcap <= 0) return 0;
+  const food = s.garrFood == null ? gcap : s.garrFood;
+  return Math.max(0, Math.min(1, food / gcap));
 }
 export function blobRadius(b) {
   return Math.max(0.4, Math.min(2.2, 0.35 * Math.sqrt(total(b)) + 0.3));
@@ -752,47 +767,64 @@ function destroySettlement(game, s, why) {
 
 export function wallGarrisonTotal(w) { return w.garrison.deploy + w.garrison.supply + w.garrison.farm; }
 
-// -- wall rations readouts (#200). A wall tile has exactly ONE food
-// value: garrFood, a flat WALL_FOOD_CAP larder the garrison eats from
-// (there is no second per-unit hunger pool the way a settlement has a
-// stockpile beside its garrison meter). These helpers are pure and
-// derive every display state from that one value, so the panel and the
-// map tile can never disagree — or imply two independent numbers.
+// -- wall food readouts (#200). A wall tile carries TWO pools, exactly
+// like a settlement: `garrFood` is the garrison's own bellies (per-unit
+// hunger, cap garrison × FOOD_PER_UNIT) and `stock` is the supplies
+// stash it automatically refeeds from (flat WALL_FOOD_CAP). Garrisoned
+// units are ordinary units who happen to sit on a stash — so hunger and
+// stored grain are genuinely different numbers, and these helpers keep
+// the two apart everywhere they're read.
 
-// Larder fullness, 0..1 — the fill fraction both surfaces draw.
-export function wallRationsFrac(w) {
-  return Math.max(0, Math.min(1, (w.garrFood || 0) / C.WALL_FOOD_CAP));
+// The garrison's per-unit hunger, 0..1 — the blob fed meter's twin.
+// Drives fedLabel, fedMult and the tile's hunger bar.
+export function wallFedMeter(w) {
+  const gcap = wallGarrisonTotal(w) * C.FOOD_PER_UNIT;
+  if (gcap <= 0) return 0;
+  return Math.max(0, Math.min(1, (w.garrFood || 0) / gcap));
 }
 
-// Display starvation: units on the tile with an empty larder. Matches
-// the tickWalls starve branch and the 0.5× combat case exactly. NOT the
-// `w.starving` field — that's a one-shot toast latch with per-unit
-// hysteresis, never a display state.
+// How full the supplies stash is, 0..1 — the wheat bar's fill.
+export function wallStockFrac(w) {
+  return Math.max(0, Math.min(1, (w.stock || 0) / C.WALL_FOOD_CAP));
+}
+
+// Display starvation: units on the tile whose bellies are empty, which
+// only happens once the stash is dry too (tickWalls refeeds first).
+// Matches the starve branch and the lowest fed tier. NOT the `w.starving`
+// field — that's a one-shot toast latch, never a display state.
 export function wallStarving(w) {
   return wallGarrisonTotal(w) > 0 && (w.garrFood || 0) <= 0.0001;
 }
 
-// Ticks the larder lasts at the current garrison's eating rate, ignoring
-// any inflow. Infinity with no mouths to feed — never format that.
+// Ticks before the garrison actually starts starving with no resupply:
+// bellies PLUS stash at the current eating rate. Infinity with no mouths
+// to feed — never format that.
 export function wallRationTicks(w) {
   const g = wallGarrisonTotal(w);
   if (g <= 0) return Infinity;
-  return (w.garrFood || 0) / (g * C.EAT_PER_SEC * C.DT);
+  return ((w.garrFood || 0) + (w.stock || 0)) / (g * C.EAT_PER_SEC * C.DT);
 }
 
 // Drop a COMPLETED, optionally garrisoned wall onto a tile — the same
 // record tickWallBuild finishes, minus the build. Used by the
 // screenshot-state deep link (#200) to reach a garrisoned-wall panel
 // deterministically; the caller is responsible for tile legality
-// (canPlaceWall). Returns the wall, or null if the tile is taken.
+// (canPlaceWall). `food` is total provisions: bellies fill first, the
+// remainder lands in the stash — one knob for the shot links. Returns
+// the wall, or null if the tile is taken.
 export function placeFinishedWall(game, owner, x, y, garrison, food) {
   const i = y * game.map.w + x;
   if (game.wallAt[i]) return null;
   const g = garrison || { deploy: 0, supply: 0, farm: 0 };
+  const garr = { deploy: g.deploy || 0, supply: g.supply || 0, farm: g.farm || 0 };
+  const gcap = (garr.deploy + garr.supply + garr.farm) * C.FOOD_PER_UNIT;
+  const supply = Math.max(0, food != null ? food : 0);
+  const bellies = Math.min(gcap, supply);
   const w = {
     id: game.nextId++, owner, x, y, hp: C.WALL_HP, building: false,
-    garrison: { deploy: g.deploy || 0, supply: g.supply || 0, farm: g.farm || 0 },
-    garrFood: food != null ? food : 0,
+    garrison: garr,
+    garrFood: bellies,
+    stock: Math.min(C.WALL_FOOD_CAP, supply - bellies),
     garrLoss: 0, lastHitT: -999, starving: false, convert: null,
   };
   game.walls.push(w);
@@ -943,8 +975,10 @@ export function opBuildWalls(game, b, tiles) {
 }
 
 // Field a wall's whole garrison as one blob beside the tile. The units
-// march out with what they can carry from the tile's stockpile; the
-// rest stays in the larder for the next garrison.
+// march out with their own rations (#200), then top up from the tile's
+// supplies if there's room left in their bellies; whatever the stash
+// still holds stays behind for the next garrison. Mirrors
+// opFieldGarrison's bellies-then-stockpile handoff for settlements.
 export function opFieldWall(game, wallId) {
   const w = game.walls.find(x => x.id === wallId);
   if (!w) return { err: 'No such wall' };
@@ -953,9 +987,10 @@ export function opFieldWall(game, wallId) {
   const i = w.y * game.map.w + w.x;
   const spot = nearestPassable(game.map, w.x, w.y, 4, null, new Set([i])) || { x: w.x, y: w.y };
   const b = makeBlob(game, w.owner, spot.x + 0.5, spot.y + 0.5, w.garrison);
-  const take = Math.min(foodCap(b), Math.max(0, w.garrFood || 0));
-  b.food = take;
-  w.garrFood = Math.max(0, (w.garrFood || 0) - take);
+  b.food = Math.min(foodCap(b), Math.max(0, w.garrFood || 0));
+  w.garrFood = 0;
+  const give = Math.min(Math.max(0, w.stock || 0), foodCap(b) - b.food);
+  if (give > 0) { w.stock -= give; b.food += give; }
   w.garrison = { deploy: 0, supply: 0, farm: 0 };
   return { ok: true, blob: b };
 }
@@ -1021,7 +1056,7 @@ function tickWallOrder(game, b, o) {
   if (!game.wallAt[i]) {
     const w = {
       id: game.nextId++, owner: b.owner, x: t.x, y: t.y, hp: 0, building: true,
-      garrison: { deploy: 0, supply: 0, farm: 0 }, garrFood: 0,
+      garrison: { deploy: 0, supply: 0, farm: 0 }, garrFood: 0, stock: 0,
       garrLoss: 0, lastHitT: -999, starving: false, convert: null,
     };
     game.walls.push(w);
@@ -1073,8 +1108,10 @@ function tickWallBuild(game) {
 }
 
 // Per-wall upkeep: slow self-repair out of combat (same rate as
-// settlements), pending garrison arm-ups, and the tile's food
-// stockpile — a flat WALL_FOOD_CAP larder the garrison eats from.
+// settlements), pending garrison arm-ups, and the tile's TWO food pools
+// (#200) — the garrison eats its own rations and refills them from the
+// supplies stash, exactly the sequence tickSettlement runs for a
+// settlement garrison against its stockpile.
 function tickWalls(game) {
   for (const w of [...game.walls]) {
     if (w.building) continue;
@@ -1092,18 +1129,35 @@ function tickWalls(game) {
       w.convert = null;
     }
     const g = wallGarrisonTotal(w);
-    w.garrFood = Math.min(w.garrFood || 0, C.WALL_FOOD_CAP);
+    const gcap = g * C.FOOD_PER_UNIT;
+    w.stock = Math.max(0, Math.min(w.stock || 0, C.WALL_FOOD_CAP));
     if (g > 0) {
+      // eat from bellies, then refill them from the stash — starvation
+      // begins only once BOTH are dry (the top-up precedes the check)
+      w.garrFood = Math.max(0, w.garrFood || 0);
+      if (w.garrFood > gcap) {
+        // bellies over capacity (the garrison shrank, or a migrated save):
+        // the surplus goes back to the stash rather than evaporating
+        w.stock = Math.min(C.WALL_FOOD_CAP, w.stock + (w.garrFood - gcap));
+        w.garrFood = gcap;
+      }
       w.garrFood = Math.max(0, w.garrFood - g * C.EAT_PER_SEC * C.DT);
+      const topup = Math.min(gcap - w.garrFood, w.stock, g * 0.1);
+      if (topup > 0) { w.stock -= topup; w.garrFood += topup; }
       if (w.garrFood <= 0.0001) {
         if (!w.starving) {
           w.starving = true;
           game.events.push({ owner: w.owner, msg: '💀 Your wall garrison is starving!', x: w.x + 0.5, y: w.y + 0.5 });
         }
         applyGarrisonLosses(game, w, g * C.STARVE_FRAC, true, w.x + 0.5, w.y + 0.5);
-      } else if (w.starving && w.garrFood >= 0.25 * g * C.FOOD_PER_UNIT) {
+      } else if (w.starving && w.garrFood >= 0.25 * gcap) {
         w.starving = false;
       }
+    } else if (w.garrFood > 0) {
+      // no mouths left: rations fold back into the stash (up to cap) so
+      // fielding can never strand belly-food on an empty wall
+      w.stock = Math.min(C.WALL_FOOD_CAP, w.stock + w.garrFood);
+      w.garrFood = 0;
     }
   }
 }
@@ -1967,7 +2021,13 @@ function tickOrder(game, b) {
             }
             recount(b);
             b.food = Math.max(0, b.food - foodShare);
-            w.garrFood = Math.min(C.WALL_FOOD_CAP, (w.garrFood || 0) + foodShare);
+            // the arrivals keep their rations in their bellies (#200);
+            // only the spare spills into the tile's supplies — the same
+            // split the settlement absorb below does with its stockpile
+            const gcap = wallGarrisonTotal(w) * C.FOOD_PER_UNIT;
+            const toMeter = Math.max(0, Math.min(foodShare, gcap - (w.garrFood || 0)));
+            w.garrFood = (w.garrFood || 0) + toMeter;
+            w.stock = Math.min(C.WALL_FOOD_CAP, (w.stock || 0) + (foodShare - toMeter));
             if (b.units.length === 0) b.dead = true;
             else b.food = Math.min(b.food, foodCap(b));
             game.events.push({ owner: b.owner, msg: `🧱 +${take} garrisoned on the wall`, x: w.x + 0.5, y: w.y + 0.5 });
@@ -2169,10 +2229,11 @@ function tickCarrier(game, b) {
       taken = Math.min(give, room);
       tgt.food += taken;
     } else if (route.targetKind === 'wall') {
-      // deliveries fill the wall tile's flat food stockpile (#187)
-      const room = Math.max(0, C.WALL_FOOD_CAP - (tgt.garrFood || 0));
+      // deliveries fill the wall tile's supplies stash (#187, #200) — the
+      // garrison refeeds from it in tickWalls, never straight off the cart
+      const room = Math.max(0, C.WALL_FOOD_CAP - (tgt.stock || 0));
       taken = Math.min(give, room);
-      tgt.garrFood = (tgt.garrFood || 0) + taken;
+      tgt.stock = (tgt.stock || 0) + taken;
     } else {
       const room = C.STOCK_CAP - tgt.stockpile;
       taken = Math.min(give, room);
@@ -2410,8 +2471,13 @@ function tickCombat(game) {
         + C.MILITIA_SUPPLY * s.garrison.supply
         + C.MILITIA_FARM * s.garrison.farm;
       if (garrisonTotal(s) > 0) {
-        // garrison defends first; fed from stockpile
-        const gMult = s.stockpile > 0 ? 1.25 : 0.5;
+        // garrison defends first, hitting as hard as its own hunger
+        // allows (#200): the same fedMult tiers a field blob gets, read
+        // off the garrison's rations meter. The stockpile still feeds
+        // that meter every tick in tickSettlement — it just no longer
+        // decides combat strength, so an emptied granary tapers the
+        // defence over the bellies' runway instead of halving it at once.
+        const gMult = fedMult(settFedMeter(s));
         dmg.set(b, (dmg.get(b) || 0) + gEff * gMult * C.WALL_DEF * C.K_COMBAT);
         applyGarrisonLosses(game, s, attack * C.K_COMBAT / C.WALL_PROT);
       } else {
@@ -2449,7 +2515,8 @@ function tickCombat(game) {
         const gEff = w.garrison.deploy
           + C.MILITIA_SUPPLY * w.garrison.supply
           + C.MILITIA_FARM * w.garrison.farm;
-        const gMult = (w.garrFood || 0) > 0 ? 1.25 : 0.5;
+        // same one hunger rule as blobs and settlement garrisons (#200)
+        const gMult = fedMult(wallFedMeter(w));
         dmg.set(b, (dmg.get(b) || 0) + gEff * gMult * C.WALL_DEF * C.K_COMBAT);
         applyGarrisonLosses(game, w, attack * C.K_COMBAT / C.WALL_PROT, false, w.x + 0.5, w.y + 0.5);
       } else {
@@ -3136,12 +3203,14 @@ function tickSettlement(game, s) {
       if (w.owner !== s.owner || w.building) continue;
       const gw = wallGarrisonTotal(w);
       if (gw <= 0 || !inTerritory(game, s, w.x + 0.5, w.y + 0.5)) continue;
-      const give = Math.min(C.WALL_FOOD_CAP - (w.garrFood || 0), s.stockpile, gw * 0.1);
+      // tops up the tile's supplies stash (#200); tickWalls moves it from
+      // there into the garrison's bellies
+      const give = Math.min(C.WALL_FOOD_CAP - (w.stock || 0), s.stockpile, gw * 0.1);
       if (give <= 0) continue;
       s.stockpile -= give;
       s.flowAcc -= give;
       s.parts.upkeep -= give;
-      w.garrFood = (w.garrFood || 0) + give;
+      w.stock = (w.stock || 0) + give;
     }
   }
   // reserve food for docked supply carriers loading here (#193): a
@@ -3496,6 +3565,7 @@ export function serialize(game) {
     walls: game.walls.map(w => ({
       id: w.id, owner: w.owner, x: w.x, y: w.y, hp: w.hp,
       building: !!w.building, garrison: w.garrison, garrFood: w.garrFood || 0,
+      stock: w.stock || 0,
       convert: w.convert || null,
     })),
     ruins: game.ruins,
@@ -3573,11 +3643,20 @@ export function deserialize(data, prev) {
   // walls load BEFORE the settlements re-till below, so previewFields
   // sees wallAt and reproduces the live land division exactly (#187)
   for (const wd of data.walls || []) {
+    const garr = wd.garrison || { deploy: 0, supply: 0, farm: 0 };
+    // pre-#200 saves stored ONE flat larder in garrFood. Split it into the
+    // two pools without losing a grain: bellies first (up to the
+    // garrison's capacity), the rest becomes the supplies stash — so an
+    // old fed wall stays fed and its starvation runway is unchanged.
+    const gcap = (garr.deploy + garr.supply + garr.farm) * C.FOOD_PER_UNIT;
+    const oldFood = Math.max(0, wd.garrFood || 0);
+    const bellies = Math.min(gcap, oldFood);
     const w = {
       id: wd.id, owner: wd.owner, x: wd.x, y: wd.y, hp: wd.hp,
       building: !!wd.building,
-      garrison: wd.garrison || { deploy: 0, supply: 0, farm: 0 },
-      garrFood: wd.garrFood || 0,
+      garrison: garr,
+      garrFood: bellies,
+      stock: wd.stock != null ? wd.stock : Math.min(C.WALL_FOOD_CAP, oldFood - bellies),
       garrLoss: 0, lastHitT: -999, starving: false,
       convert: wd.convert || null,
     };

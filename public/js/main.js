@@ -2651,13 +2651,14 @@ function renderPanelInner(force) {
     const barCol = w.building ? 'bg-amber-500' : pct >= 75 ? 'bg-emerald-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
     const prot = S.wallProtected(game, w);
     if (w.owner === me) {
-      // wall rations (#200): ONE pool, named once. The larder fraction
-      // drives the bar; hunger is the binary state the sim actually uses
-      // (grain ⇒ full strength, empty ⇒ half strength + losses), never a
-      // four-tier fed palette — that language belongs to real per-unit
-      // hunger (blobs, settlement garrisons).
+      // wall food (#200): TWO pools, each named for what it is. The
+      // garrison's own hunger takes the four-tier fed word every army
+      // uses (it drives the same fedMult now); the supplies stash it
+      // refeeds from gets the wheat number + bar.
       const starving = S.wallStarving(w);
-      const rFrac = S.wallRationsFrac(w);
+      const fedM = S.wallFedMeter(w);
+      const fedCol = fedM >= 0.75 ? 'text-emerald-400' : fedM >= 0.5 ? 'text-lime-400' : fedM >= 0.25 ? 'text-amber-400' : 'text-red-400';
+      const stockFrac = S.wallStockFrac(w);
       const runway = fmtRunway(S.wallRationTicks(w));
       const feeder = S.wallFeeder(game, w);
       const inW = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'wall' && r2.targetId === w.id);
@@ -2671,25 +2672,25 @@ function renderPanelInner(force) {
           ? '<div class="text-xs text-zinc-400">Builders raise it while standing beside the tile — more hands build faster. It can be attacked the whole time.</div>'
           : `<div class="text-xs mb-1 ${prot ? 'text-emerald-400' : 'text-amber-400'}">${prot ? '🛡️ Protected — a garrison holds within 1 tile' : '⚠️ Unprotected — falls fast under attack'}</div>
         <div class="text-xs text-zinc-500 mb-1">Garrison: ⚔️${w.garrison.deploy} 🚚${w.garrison.supply} 🌱${w.garrison.farm} / ${S.C.WALL_GARRISON_CAP}${gTot > 0
-          ? ` · <span class="${starving ? 'text-red-400' : 'text-emerald-400'}">${starving ? 'Starving' : 'Fed'}</span>` : ''}</div>
-        <div class="text-xs text-zinc-400">Rations <b class="${starving ? 'text-red-400' : 'text-amber-300'}">🌾 ${Math.floor(w.garrFood || 0)}</b> / ${S.C.WALL_FOOD_CAP}${gTot > 0
-          ? `${runway && !starving ? ` · ${runway} left` : ''} · ${gTot} mouth${gTot === 1 ? '' : 's'}` : ' · no mouths to feed'}</div>
-        <div class="h-0.5 rounded bg-zinc-800 overflow-hidden mb-1"><div class="h-full ${starving ? 'bg-red-500' : 'bg-amber-300'}" style="width:${Math.round(rFrac * 100)}%"></div></div>
-        ${starving ? '<div class="text-xs text-red-400 mb-1">💀 Starving — the garrison is dying, and fights at half strength.</div>' : ''}
-        ${gTot > 0 ? '<div class="text-xs text-zinc-500 mb-1">One pool — the garrison eats straight from this larder. There is no separate hunger meter.</div>' : ''}
+          ? ` · <span class="${fedCol}">${S.fedLabel(fedM)}</span>` : ''}</div>
+        <div class="text-xs text-zinc-400">Supplies <b class="text-amber-300">🌾 ${Math.floor(w.stock || 0)}</b> / ${S.C.WALL_FOOD_CAP}${gTot > 0
+          ? `${runway && !starving ? ` · ${runway} of food` : ''} · ${gTot} mouth${gTot === 1 ? '' : 's'}` : ' · no mouths to feed'}</div>
+        <div class="h-0.5 rounded bg-zinc-800 overflow-hidden mb-1"><div class="h-full bg-amber-300" style="width:${Math.round(stockFrac * 100)}%"></div></div>
+        ${starving ? '<div class="text-xs text-red-400 mb-1">💀 Starving — rations and supplies are empty; the garrison is dying and fights at half strength.</div>' : ''}
+        ${gTot > 0 ? '<div class="text-xs text-zinc-500 mb-1">The garrison keeps its own rations and refills them from these supplies automatically.</div>' : ''}
         ${inW.length
           ? '<div class="text-xs text-sky-300 mb-1">🚚 Supplied by ' + (inW.length === 1 ? 'a supply route' : inW.length + ' supply routes') + '</div>'
           : feeder
             ? `<div class="text-xs text-sky-300 mb-1">🏠 Topped up from ${feeder.name || 'a settlement'}'s stores</div>`
-            : gTot > 0 ? '<div class="text-xs text-amber-400 mb-1">⚠️ No supply — the larder only drains</div>' : ''}
+            : gTot > 0 ? '<div class="text-xs text-amber-400 mb-1">⚠️ No supply — the stash only drains</div>' : ''}
         ${gTot > 0
           ? `<div class="flex gap-1 mb-1">
               ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
             </div>
             ${w.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(w.convert)}s (fielding cancels)</div>` : ''}
             <button data-act="fieldwall" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>
-            <div class="text-xs text-zinc-600 mt-1">Fielding marches them out with up to ${S.C.FOOD_PER_UNIT}🌾 each; the rest stays in the larder.</div>`.replaceAll('data-act="role"', 'data-act="wrole"')
-          : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '). A garrisoned wall attacks enemies within 1 tile; a supply route can keep it fed.</div>'}`}`);
+            <div class="text-xs text-zinc-600 mt-1">Fielding marches them out with their rations, topping up from the supplies; the rest stays on the wall.</div>`.replaceAll('data-act="role"', 'data-act="wrole"')
+          : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '). A garrisoned wall attacks enemies within 1 tile, and its units refeed from these supplies; a route keeps them stocked.</div>'}`}`);
     } else {
       const vis = S.isVisible(game, w.x + 0.5, w.y + 0.5);
       if (vis) {
@@ -2882,10 +2883,12 @@ function renderPanelInner(force) {
     const inbound = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'settlement' && r2.targetId === st.id);
     const siegeRunOn = inbound.length > 0 && inbound.every(r2 => r2.runSiege);
     const siegeBanner = sieged ? `
-      <div class="text-xs text-amber-400 mb-1">⏳ <b>Besieged</b> — no farm income or deliveries; the garrison eats the stockpile.</div>
+      <div class="text-xs text-amber-400 mb-1">⏳ <b>Besieged</b> — no farm income or deliveries; the garrison eats the stockpile, and weakens as its rations run down.</div>
       ${inbound.length ? `<button data-act="siegerun" class="btn w-full rounded mb-1 ${siegeRunOn ? 'bg-amber-600 text-white hover:bg-amber-500' : 'bg-zinc-800 hover:bg-zinc-700'}">🚚 Run the siege: ${siegeRunOn ? 'ON' : 'OFF'}</button>` : ''}` : '';
-    // garrison fed state (#180): the meter fielded units emerge at
-    const gMeter = gTot > 0 ? Math.max(0, Math.min(1, (st.garrFood || 0) / (gTot * S.C.FOOD_PER_UNIT))) : 0;
+    // garrison fed state (#180): the meter fielded units emerge at, and
+    // (#200) the one definition shared with the combat multiplier — so
+    // this word now predicts exactly how hard the garrison hits
+    const gMeter = S.settFedMeter(st);
     const gFedColor = gMeter >= 0.75 ? 'text-emerald-400' : gMeter >= 0.5 ? 'text-lime-400' : gMeter >= 0.25 ? 'text-amber-400' : 'text-red-400';
     if (mob) {
       // phone sheet (#189): garrison controls first (they're the reason to
@@ -3158,11 +3161,14 @@ if (!params.get('shot')) startAttract();
 // garrisoned wall in home territory, that wall selected, sim paused so the
 // readouts hold still. Pure UI state — nothing persists (the save is
 // cleared, not written), so it works in every environment.
+// `food` is TOTAL provisions: bellies fill first (garrison × 10), the rest
+// becomes the supplies stash — so 79 with 4 units reads Well-fed on 40
+// rations plus 🌾39 of supplies, showing both pools at once.
 const SHOTS = {
-  // a fed wall garrison: rations mid-larder, the runway, the topped-up
-  // supply line, and the role/field controls all on screen at once
-  'wall-panel': { food: 39, garrison: { deploy: 3, supply: 1, farm: 0 } },
-  // the same panel with an empty larder: Starving + the half-strength note
+  // a fed wall garrison: the fed word, a part-full stash, the runway, the
+  // topped-up supply line and the role/field controls, all on screen
+  'wall-panel': { food: 79, garrison: { deploy: 3, supply: 1, farm: 0 } },
+  // both pools empty: Famished + the starving half-strength note
   'wall-panel-starving': { food: 0, garrison: { deploy: 3, supply: 1, farm: 0 } },
 };
 function bootShot(name) {

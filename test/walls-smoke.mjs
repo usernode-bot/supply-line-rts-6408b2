@@ -1,10 +1,20 @@
-// Headless smoke test for walls (#187). Run manually:
+// Headless smoke test for walls (#187) and the unified garrison hunger
+// rule (#200). Run manually:
 //   node test/walls-smoke.mjs
 // Exercises the sim only (no DOM): build orders + crew-size scaling,
-// enemy pathing block + breach fallback, the three damage tiers,
-// garrison feeding/starvation, and save/load round-tripping.
+// enemy pathing block + breach fallback, the three damage tiers, the
+// wall's two food pools (bellies + supplies stash) with their auto-refeed
+// and starvation, settlement garrison defence scaling with its own
+// rations, and save/load round-tripping incl. the pre-#200 migration.
 
 import * as S from '../public/js/sim.js';
+import * as SUP from '../public/js/supply.js';
+
+// routeHealth treats a topped-off destination as "keeping up" (#143) — for
+// a wall that means the SUPPLIES stash, not the garrison's bellies (#200).
+function SUPHealthOk(game, route) {
+  return SUP.routeHealth(game, route) >= 1;
+}
 
 let failures = 0;
 function check(name, cond, detail) {
@@ -64,12 +74,21 @@ function spawnBlob(game, owner, x, y, deploy, supply) {
   return b;
 }
 
-// Inject a COMPLETED wall (test-only), as if it had been built.
-function injectWall(game, owner, x, y, garrison) {
+// Inject a COMPLETED wall (test-only), as if it had been built. Two food
+// pools (#200): bellies default to FULL (garrison × FOOD_PER_UNIT) and the
+// supplies stash to empty; both overridable.
+function injectWall(game, owner, x, y, garrison, opts) {
+  const src = garrison || { deploy: 0, supply: 0, farm: 0 };
+  // COPY the counts: callers reuse one literal across several walls, and
+  // the sim mutates garrison objects in place (starvation, fielding)
+  const g = { deploy: src.deploy || 0, supply: src.supply || 0, farm: src.farm || 0 };
+  const gcap = (g.deploy + g.supply + g.farm) * S.C.FOOD_PER_UNIT;
+  const o = opts || {};
   const w = {
     id: game.nextId++, owner, x, y, hp: S.C.WALL_HP, building: false,
-    garrison: garrison || { deploy: 0, supply: 0, farm: 0 },
-    garrFood: garrison ? (garrison.deploy + garrison.supply + garrison.farm) * S.C.FOOD_PER_UNIT : 0,
+    garrison: g,
+    garrFood: o.garrFood != null ? o.garrFood : gcap,
+    stock: o.stock != null ? o.stock : 0,
     garrLoss: 0, lastHitT: -999, starving: false, convert: null,
   };
   game.walls.push(w);
@@ -78,6 +97,7 @@ function injectWall(game, owner, x, y, garrison) {
 }
 
 function run(game, ticks) {
+  if (!isFinite(ticks)) throw new Error(`run() got a non-finite tick count: ${ticks}`);
   for (let i = 0; i < ticks; i++) S.step(game);
 }
 
@@ -228,18 +248,21 @@ function run(game, ticks) {
     }
   }
   check('found in/out spots', !!inSpot && !!outSpot);
-  const wIn = injectWall(g, 0, inSpot.x, inSpot.y, { deploy: 2, supply: 0, farm: 0 });
-  const wOut = injectWall(g, 0, outSpot.x, outSpot.y, { deploy: 2, supply: 0, farm: 0 });
-  wIn.garrFood = 5; wOut.garrFood = 5;
+  // both start on near-empty pools so the drip's effect is unmistakable
+  const wIn = injectWall(g, 0, inSpot.x, inSpot.y, { deploy: 2, supply: 0, farm: 0 }, { garrFood: 5, stock: 0 });
+  const wOut = injectWall(g, 0, outSpot.x, outSpot.y, { deploy: 2, supply: 0, farm: 0 }, { garrFood: 5, stock: 0 });
   run(g, 600);
-  check('in-territory garrison got fed', wIn.garrFood > 5, `garrFood=${wIn.garrFood.toFixed(1)}`);
+  check('in-territory garrison got fed (bellies full)',
+    wIn.garrFood > 5, `garrFood=${wIn.garrFood.toFixed(1)}`);
   check('out-of-territory garrison ran down', wOut.garrFood < 5, `garrFood=${wOut.garrFood.toFixed(1)}`);
   run(g, 3000);
   check('starving remote garrison loses units',
     wOut.garrison.deploy + wOut.garrison.supply + wOut.garrison.farm < 2,
     `left=${JSON.stringify(wOut.garrison)}`);
-  check(`in-territory larder stockpiles past the old garrison×10 cap (${wIn.garrFood.toFixed(0)}/${S.C.WALL_FOOD_CAP})`,
-    wIn.garrFood > 50, `garrFood=${wIn.garrFood.toFixed(1)}`);
+  check(`in-territory stash fills past the old garrison×10 cap (${(wIn.stock || 0).toFixed(0)}/${S.C.WALL_FOOD_CAP})`,
+    wIn.stock > 50, `stock=${(wIn.stock || 0).toFixed(1)}`);
+  check('in-territory bellies sit at capacity, not in the stash',
+    Math.abs(wIn.garrFood - 2 * S.C.FOOD_PER_UNIT) < 0.5, `garrFood=${wIn.garrFood.toFixed(2)}`);
   // panel readout (#200): the wall names the settlement whose drip is
   // actually feeding it, and nothing at all when it's on its own
   home.stockpile = 100; // deterministic: the drip needs stock to give
@@ -248,74 +271,291 @@ function run(game, ticks) {
   check('wallFeeder is null for the remote wall', S.wallFeeder(g, wOut) === null);
 }
 
-// ------------------------------------------------- 5b. rations readouts (#200)
+// ---------------------------------- 5b. two pools: bellies + supplies (#200)
+
+// A wall-legal tile far from every settlement — no territory drip, so the
+// pools only move the way the test moves them.
+function findRemoteTile(game) {
+  for (let y = 1; y < game.map.h - 1; y++) {
+    for (let x = 1; x < game.map.w - 1; x++) {
+      if (S.canPlaceWall(game, 0, x, y).err) continue;
+      if (game.settlements.every(s => Math.hypot(s.x + 1 - x, s.y + 1 - y) > 12)) return { x, y };
+    }
+  }
+  return null;
+}
 
 {
-  console.log('wall rations readouts derive from the one larder:');
+  console.log('wall garrison hunger and the supplies stash are separate pools:');
   const g = fresh();
   const spot = findClearPair(g);
+  const GARR4 = { deploy: 4, supply: 0, farm: 0 };
+  const CAP4 = 4 * S.C.FOOD_PER_UNIT;
 
-  // the exact case that used to render amber "hungry": 4 mouths with
-  // 39🌾 stored — nearly full bellies, and fighting at full strength
-  const w4 = injectWall(g, 0, spot.x, spot.y, { deploy: 4, supply: 0, farm: 0 });
-  w4.garrFood = 39;
-  check('4 units on 39🌾 are Fed, not starving', S.wallStarving(w4) === false);
-  check('39/100 larder reads as 39% full',
-    Math.abs(S.wallRationsFrac(w4) - 0.39) < 1e-9, `frac=${S.wallRationsFrac(w4)}`);
+  // hunger is per-unit: 39🌾 of BELLIES for 4 units is nearly full, and
+  // the stash is a different number entirely
+  const w4 = injectWall(g, 0, spot.x, spot.y, GARR4, { garrFood: 39, stock: 25 });
+  check('4 units on 39🌾 rations read Well-fed', S.fedLabel(S.wallFedMeter(w4)) === 'Well-fed',
+    `meter=${S.wallFedMeter(w4).toFixed(3)}`);
+  check('bellies of 39/40 read as ~98% hunger',
+    Math.abs(S.wallFedMeter(w4) - 39 / CAP4) < 1e-9, `meter=${S.wallFedMeter(w4)}`);
+  check('the stash reads its own fraction, not the hunger one',
+    Math.abs(S.wallStockFrac(w4) - 0.25) < 1e-9, `stock=${S.wallStockFrac(w4)}`);
+  check('full bellies are not starving', S.wallStarving(w4) === false);
 
   // the starving state is derived, never the one-shot toast latch
   w4.starving = true;
   check('a stale starving latch does not fake the display state', S.wallStarving(w4) === false);
   w4.starving = false;
 
-  // empty larder: starving only while there are mouths on the tile
-  const wEmpty = injectWall(g, 0, spot.x + 1, spot.y, { deploy: 2, supply: 0, farm: 0 });
-  wEmpty.garrFood = 0;
-  check('empty larder with a garrison is starving', S.wallStarving(wEmpty) === true);
-  const wBare = injectWall(g, 0, spot.x + 2, spot.y, { deploy: 0, supply: 0, farm: 0 });
-  wBare.garrFood = 0;
-  check('empty larder with no garrison is not starving', S.wallStarving(wBare) === false);
+  // starving needs empty bellies AND a garrison
+  const wEmpty = injectWall(g, 0, spot.x + 1, spot.y, { deploy: 2, supply: 0, farm: 0 }, { garrFood: 0 });
+  check('empty bellies with a garrison is starving', S.wallStarving(wEmpty) === true);
+  const wBare = injectWall(g, 0, spot.x + 2, spot.y, null, { garrFood: 0, stock: 0 });
+  check('empty bellies with no garrison is not starving', S.wallStarving(wBare) === false);
 
-  // clamps: undefined, zero, and over-cap all land inside 0..1
-  delete wBare.garrFood;
-  check('missing garrFood clamps to 0', S.wallRationsFrac(wBare) === 0);
-  wBare.garrFood = 0;
-  check('zero garrFood clamps to 0', S.wallRationsFrac(wBare) === 0);
-  wBare.garrFood = S.C.WALL_FOOD_CAP * 3;
-  check('over-cap garrFood clamps to 1', S.wallRationsFrac(wBare) === 1);
+  // clamps on both pools
+  delete wBare.garrFood; delete wBare.stock;
+  check('missing pools clamp to 0', S.wallFedMeter(wBare) === 0 && S.wallStockFrac(wBare) === 0);
+  wBare.stock = S.C.WALL_FOOD_CAP * 3;
+  check('over-cap stash clamps to 1', S.wallStockFrac(wBare) === 1);
+  const wOver = injectWall(g, 0, spot.x, spot.y + 1, { deploy: 1, supply: 0, farm: 0 }, { garrFood: 999 });
+  check('over-cap bellies clamp to 1', S.wallFedMeter(wOver) === 1);
 
-  // runway: no mouths ⇒ Infinity (the panel must never format it);
-  // more mouths on the same larder ⇒ strictly shorter
-  wBare.garrFood = 50;
+  // runway counts BOTH pools, and scales with mouths
   check('no mouths ⇒ infinite runway', S.wallRationTicks(wBare) === Infinity);
-  const w1 = injectWall(g, 0, spot.x, spot.y + 1, { deploy: 1, supply: 0, farm: 0 });
-  const w8 = injectWall(g, 0, spot.x + 1, spot.y + 1, { deploy: 8, supply: 0, farm: 0 });
-  w1.garrFood = 50; w8.garrFood = 50;
-  check('runway is finite with a garrison', isFinite(S.wallRationTicks(w1)));
-  check('8 mouths drain the same larder faster than 1',
+  const w1 = injectWall(g, 0, spot.x + 1, spot.y + 1, { deploy: 1, supply: 0, farm: 0 }, { garrFood: 10, stock: 40 });
+  const w8 = injectWall(g, 0, spot.x + 2, spot.y + 1, { deploy: 8, supply: 0, farm: 0 }, { garrFood: 10, stock: 40 });
+  check('runway includes the stash, not just bellies',
+    Math.abs(S.wallRationTicks(w1) - 50 / (1 * S.C.EAT_PER_SEC * S.C.DT)) < 1e-6,
+    `ticks=${S.wallRationTicks(w1)}`);
+  check('8 mouths drain the same provisions faster than 1',
     S.wallRationTicks(w8) < S.wallRationTicks(w1),
     `8→${S.wallRationTicks(w8).toFixed(0)} vs 1→${S.wallRationTicks(w1).toFixed(0)}`);
 
-  // and the prediction matches the real drain: a remote wall (no drip,
-  // no route) must empty within a tick of where wallRationTicks says
-  const g2 = fresh();
-  let far = null;
-  for (let y = 1; y < g2.map.h - 1 && !far; y++) {
-    for (let x = 1; x < g2.map.w - 1 && !far; x++) {
-      if (S.canPlaceWall(g2, 0, x, y).err) continue;
-      if (g2.settlements.every(s => Math.hypot(s.x + 1 - x, s.y + 1 - y) > 12)) far = { x, y };
-    }
+  // fed tiers map exactly like a blob's
+  for (const [m, mult] of [[1, 1.25], [0.6, 1.0], [0.3, 0.75], [0, 0.5]]) {
+    const wt = injectWall(g, 0, spot.x, spot.y + 2 + Math.round(m * 10), { deploy: 2, supply: 0, farm: 0 },
+      { garrFood: m * 2 * S.C.FOOD_PER_UNIT });
+    if (!wt) continue;
+    check(`wall hunger ${m} ⇒ ${mult}× strength`, S.fedMult(S.wallFedMeter(wt)) === mult);
   }
-  check('found a remote tile for the drain check', !!far);
-  const wd = injectWall(g2, 0, far.x, far.y, { deploy: 2, supply: 0, farm: 0 });
-  wd.garrFood = 6;
+}
+
+{
+  console.log('the garrison refeeds from the stash, and starves only when both run dry:');
+  const g = fresh();
+  const far = findRemoteTile(g);
+  check('found a remote tile', !!far);
+  const GARR = { deploy: 2, supply: 0, farm: 0 };
+  const CAP = 2 * S.C.FOOD_PER_UNIT;
+
+  // hungry bellies + a stocked stash: bellies climb, stash drains
+  const w = injectWall(g, 0, far.x, far.y, GARR, { garrFood: 0.2 * CAP, stock: 50 });
+  const before = w.garrFood + w.stock;
+  run(g, 100);
+  check('bellies refilled from the stash', w.garrFood > 0.2 * CAP,
+    `garrFood=${w.garrFood.toFixed(2)}`);
+  check('the stash paid for it', w.stock < 50, `stock=${w.stock.toFixed(2)}`);
+  check('total food only fell by what was eaten',
+    Math.abs((before - (w.garrFood + w.stock)) - 2 * S.C.EAT_PER_SEC * S.C.DT * 100) < 0.5,
+    `delta=${(before - (w.garrFood + w.stock)).toFixed(3)}`);
+  check('a refed garrison never starves', S.wallStarving(w) === false);
+  check('garrison intact while supplied',
+    S.wallGarrisonTotal(w) === 2, `left=${JSON.stringify(w.garrison)}`);
+}
+
+{
+  console.log('starvation waits for both pools:');
+  const g = fresh();
+  const far = findRemoteTile(g);
+  const GARR = { deploy: 2, supply: 0, farm: 0 };
+
+  // empty bellies but a little stash left: the refeed saves them
+  const wSaved = injectWall(g, 0, far.x, far.y, GARR, { garrFood: 0, stock: 5 });
+  run(g, 20);
+  check('empty bellies + stocked stash loses no units',
+    S.wallGarrisonTotal(wSaved) === 2, `left=${JSON.stringify(wSaved.garrison)}`);
+  check('and it is no longer starving', S.wallStarving(wSaved) === false);
+
+  // both empty: units die
+  const g2 = fresh();
+  const far2 = findRemoteTile(g2);
+  const wDoomed = injectWall(g2, 0, far2.x, far2.y, GARR, { garrFood: 0, stock: 0 });
+  check('both pools empty reads starving', S.wallStarving(wDoomed) === true);
+  run(g2, 2000);
+  check('both pools empty kills the garrison',
+    S.wallGarrisonTotal(wDoomed) < 2, `left=${JSON.stringify(wDoomed.garrison)}`);
+
+  // and the runway prediction matches the real drain of both pools
+  const g3 = fresh();
+  const far3 = findRemoteTile(g3);
+  const wd = injectWall(g3, 0, far3.x, far3.y, GARR, { garrFood: 4, stock: 8 });
   const predicted = Math.ceil(S.wallRationTicks(wd));
-  run(g2, predicted - 1);
-  check('larder still has grain one tick before the predicted empty',
-    wd.garrFood > 0, `garrFood=${wd.garrFood.toFixed(3)} after ${predicted - 1} ticks`);
+  run(g3, predicted - 2);
+  check('provisions hold until just before the predicted empty',
+    wd.garrFood > 0, `garrFood=${wd.garrFood.toFixed(3)} after ${predicted - 2} ticks`);
+  run(g3, 3);
+  check('provisions are gone by the predicted tick',
+    wd.garrFood <= 0.0001 && wd.stock <= 0.0001 && S.wallStarving(wd),
+    `garrFood=${wd.garrFood.toFixed(3)} stock=${wd.stock.toFixed(3)}`);
+}
+
+{
+  console.log('units carry hunger onto the wall and back off it:');
+  const g = fresh();
+  const far = findRemoteTile(g);
+  // arrival: a full-bellied blob garrisons an EMPTY wall — bellies fill to
+  // capacity, the spare spills into the stash
+  const wA = injectWall(g, 0, far.x, far.y, null, { garrFood: 0, stock: 0 });
+  const b = spawnBlob(g, 0, far.x + 2.5, far.y + 0.5, 6, 0); // 6 units, 60🌾
+  b.food = 60;
+  S.opMove(g, b, far.x + 0.5, far.y + 0.5);
+  run(g, 400);
+  const gA = S.wallGarrisonTotal(wA);
+  check('arrivals garrisoned up to the cap', gA === S.C.WALL_GARRISON_CAP, `garrisoned=${gA}`);
+  check('their rations landed in bellies, capped',
+    wA.garrFood <= gA * S.C.FOOD_PER_UNIT + 1e-6 && wA.garrFood > 0,
+    `garrFood=${wA.garrFood.toFixed(2)} cap=${gA * S.C.FOOD_PER_UNIT}`);
+  // a blob can never carry more than FOOD_PER_UNIT per unit, so in normal
+  // play the arrivals' share fits their bellies exactly — what matters is
+  // that nothing is invented or lost across the handoff
+  const leftover = g.blobs.filter(x => !x.dead && x.owner === 0 && x.id === b.id)
+    .reduce((a, x) => a + x.food, 0);
+  check('no food invented or lost when garrisoning',
+    wA.garrFood + (wA.stock || 0) + leftover <= 60 + 1e-6,
+    `bellies=${wA.garrFood.toFixed(2)} stock=${(wA.stock || 0).toFixed(2)} blob=${leftover.toFixed(2)}`);
+
+  check('bellies never exceed the garrison capacity after an arrival',
+    wA.garrFood <= gA * S.C.FOOD_PER_UNIT + 1e-6, `garrFood=${wA.garrFood.toFixed(2)}`);
+
+  // over-capacity bellies (a shrunk garrison, or a migrated save) hand the
+  // surplus back to the stash instead of evaporating
+  const g0 = fresh();
+  const far0 = findRemoteTile(g0);
+  const wS = injectWall(g0, 0, far0.x, far0.y, { deploy: 1, supply: 0, farm: 0 },
+    { garrFood: 3 * S.C.FOOD_PER_UNIT, stock: 0 });
+  run(g0, 1);
+  check('over-capacity bellies spill into the stash, not into nothing',
+    (wS.stock || 0) > 0 && wS.garrFood <= S.C.FOOD_PER_UNIT + 1e-6,
+    `stock=${(wS.stock || 0).toFixed(2)} bellies=${wS.garrFood.toFixed(2)}`);
+
+  // fielding: bellies march out, topped up from the stash, remainder stays
+  const g2 = fresh();
+  const far2 = findRemoteTile(g2);
+  const wF = injectWall(g2, 0, far2.x, far2.y, { deploy: 2, supply: 0, farm: 0 },
+    { garrFood: 5, stock: 60 });
+  const r = S.opFieldWall(g2, wF.id);
+  check('fielding succeeded', !!r.ok, JSON.stringify(r));
+  const fb = r.blob;
+  check('fielded blob left with full bellies (topped up from the stash)',
+    Math.abs(fb.food - S.foodCap(fb)) < 1e-6, `food=${fb.food} cap=${S.foodCap(fb)}`);
+  check('the wall kept the rest of the stash',
+    Math.abs(wF.stock - (60 - (S.foodCap(fb) - 5))) < 1e-6, `stock=${wF.stock.toFixed(2)}`);
+  check('bellies emptied with the garrison', wF.garrFood === 0);
   run(g2, 2);
-  check('larder is empty by the predicted tick',
-    wd.garrFood <= 0.0001 && S.wallStarving(wd), `garrFood=${wd.garrFood.toFixed(3)}`);
+  check('leftover bellies never strand on an empty wall', wF.garrFood === 0);
+}
+
+// ------------------------------- 5c. settlement defence scales with rations (#200)
+
+{
+  console.log('settlement garrison defends at its own fed tier:');
+  const g = fresh();
+  const home = g.settlements.find(s => s.owner === 0);
+  home.garrison = { deploy: 6, supply: 0, farm: 0 };
+  const gcap = S.garrisonTotal(home) * S.C.FOOD_PER_UNIT;
+
+  // helper tiers, both structures, same function as blobs
+  home.garrFood = gcap;
+  check('full rations ⇒ 1.25×', S.fedMult(S.settFedMeter(home)) === 1.25);
+  home.garrFood = 0.6 * gcap;
+  check('0.6 rations ⇒ 1.0×', S.fedMult(S.settFedMeter(home)) === 1.0);
+  home.garrFood = 0.3 * gcap;
+  check('0.3 rations ⇒ 0.75×', S.fedMult(S.settFedMeter(home)) === 0.75);
+  home.garrFood = 0;
+  check('empty rations ⇒ 0.5×', S.fedMult(S.settFedMeter(home)) === 0.5);
+
+  // tick-order guard: combat runs before tickSettlement, so an
+  // uninitialised meter must read FULL, never 0
+  delete home.garrFood;
+  check('a missing rations meter reads full, not famished', S.settFedMeter(home) === 1);
+  home.garrFood = gcap;
+}
+
+// Damage a besieger takes from a settlement's garrison over `ticks`, with
+// BOTH the garrison's size and its rations pinned each tick, so the only
+// variable left is the fed multiplier. The besieger is deliberately huge
+// (and kept well-fed and in place) so it never dies inside the window —
+// a dead attacker would saturate the measurement at its total HP.
+function siegeReturnFire(frac, ticks) {
+  const g = fresh();
+  const home = g.settlements.find(s => s.owner === 0);
+  home.stockpile = 0;
+  // clear the field: the starting armies would brawl with the besieger and
+  // add a constant to the measurement, hiding the multiplier being tested
+  g.blobs.length = 0;
+  const GARR = 6;
+  const gcap = GARR * S.C.FOOD_PER_UNIT;
+  const att = spawnBlob(g, 1, home.x + 1 + 1.6, home.y + 1, 60, 0);
+  const hp0 = att.units.reduce((a, u) => a + u.hp, 0);
+  for (let i = 0; i < ticks; i++) {
+    home.garrison = { deploy: GARR, supply: 0, farm: 0 };
+    home.garrLoss = 0;
+    home.garrFood = frac * gcap;
+    att.food = S.foodCap(att); // attacker stays well-fed: isolate the defender
+    att.x = home.x + 1 + 1.6; att.y = home.y + 1;
+    S.step(g);
+    if (att.dead) break;
+  }
+  const hp1 = att.dead ? 0 : att.units.reduce((a, u) => a + u.hp, 0);
+  return { taken: hp0 - hp1, died: !!att.dead };
+}
+
+{
+  console.log('an emptied granary tapers the defence instead of halving it:');
+  const full = siegeReturnFire(1.0, 60);
+  const mid = siegeReturnFire(0.6, 60);
+  const low = siegeReturnFire(0.3, 60);
+  const none = siegeReturnFire(0.0, 60);
+  check('measurement never saturated (no besieger died)',
+    !full.died && !mid.died && !low.died && !none.died);
+  check(`well-fed garrison hits hardest (${full.taken.toFixed(1)})`, full.taken > 0);
+  // the inverse bug this change fixes: stockpile 0 with full bellies USED
+  // to mean half strength; now it's the top tier
+  check('full bellies + empty stockpile is NOT half strength',
+    full.taken > none.taken * 2 - 1e-6,
+    `full=${full.taken.toFixed(1)} none=${none.taken.toFixed(1)}`);
+  check(`return fire steps down as rations drain (${full.taken.toFixed(1)} > ${mid.taken.toFixed(1)} > ${low.taken.toFixed(1)} > ${none.taken.toFixed(1)})`,
+    full.taken > mid.taken && mid.taken > low.taken && low.taken > none.taken);
+  check('the tiers match fedMult exactly (1.25 / 1.0 / 0.75 / 0.5)',
+    Math.abs(full.taken / none.taken - 1.25 / 0.5) < 0.05
+    && Math.abs(mid.taken / none.taken - 1.0 / 0.5) < 0.05
+    && Math.abs(low.taken / none.taken - 0.75 / 0.5) < 0.05,
+    `ratios ${(full.taken / none.taken).toFixed(3)} / ${(mid.taken / none.taken).toFixed(3)} / ${(low.taken / none.taken).toFixed(3)}`);
+  check('a famished garrison still fights back (taper, not collapse)',
+    none.taken > 0, `none=${none.taken.toFixed(1)}`);
+}
+
+{
+  console.log('a well-supplied settlement defends exactly as before:');
+  const g = fresh();
+  const home = g.settlements.find(s => s.owner === 0);
+  home.garrison = { deploy: 6, supply: 0, farm: 0 };
+  home.stockpile = 400;
+  const gcap = S.garrisonTotal(home) * S.C.FOOD_PER_UNIT;
+  home.garrFood = gcap;
+  const att = spawnBlob(g, 1, home.x + 1 + 1.6, home.y + 1, 8, 0);
+  att.food = S.foodCap(att);
+  let minMeter = 1;
+  for (let i = 0; i < 300; i++) {
+    att.x = home.x + 1 + 1.6; att.y = home.y + 1;
+    S.step(g);
+    if (S.garrisonTotal(home) <= 0) break;
+    minMeter = Math.min(minMeter, S.settFedMeter(home));
+  }
+  check(`stocked garrison stays at the top tier through a siege (min meter ${minMeter.toFixed(2)})`,
+    S.fedMult(minMeter) === 1.25, `minMeter=${minMeter}`);
 }
 
 // ---------------------------------------------------------------- 4b. walls fence pillaging out
@@ -401,29 +641,38 @@ function run(game, ticks) {
     }
   }
   check('found a remote spot', !!outSpot);
-  const w = injectWall(g, 0, outSpot.x, outSpot.y, { deploy: 2, supply: 0, farm: 0 });
-  w.garrFood = 10; // draining — no territory feeding out here
+  // draining bellies, empty stash — no territory feeding out here
+  const w = injectWall(g, 0, outSpot.x, outSpot.y, { deploy: 2, supply: 0, farm: 0 },
+    { garrFood: 10, stock: 0 });
   const carrier = spawnBlob(g, 0, home.x + 2.5, home.y + 0.5, 0, 5);
   const r = S.opRoute(g, carrier, { kind: 'wall', id: w.id }, home.id);
   check('opRoute accepts a wall target', !r.err, JSON.stringify(r));
   check('route registered with wall targetKind',
     g.routes.some(x => x.targetKind === 'wall' && x.targetId === w.id));
-  let peak = w.garrFood, prevFood = w.garrFood, deliveredFar = false;
+  let peak = w.stock, prevStock = w.stock, deliveredFar = false, sawFull = false;
   for (let t = 0; t < 2500; t++) {
     S.step(g);
-    if (w.garrFood > prevFood + 1e-9) {
+    if (w.stock > prevStock + 1e-9) {
       // deliveries must land touching / next to the tile (dock range 1.5
       // from the tile center ⇒ on it or Chebyshev-adjacent)
       const c = g.blobs.find(x => x.id === carrier.id && !x.dead);
       if (c && Math.hypot(c.x - (w.x + 0.5), c.y - (w.y + 0.5)) > 1.55) deliveredFar = true;
     }
-    prevFood = w.garrFood;
-    peak = Math.max(peak, w.garrFood);
+    prevStock = w.stock;
+    peak = Math.max(peak, w.stock);
+    // routeHealth must read the STASH as the fill target (#200)
+    if (w.stock >= 0.95 * S.C.WALL_FOOD_CAP) {
+      sawFull = true;
+      const rt = g.routes.find(x => x.targetKind === 'wall' && x.targetId === w.id);
+      if (rt) check.once = check.once || SUPHealthOk(g, rt);
+    }
   }
   const gTot = w.garrison.deploy + w.garrison.supply + w.garrison.farm;
-  check(`caravan stockpiled past the old garrison×10 cap (peak ${peak.toFixed(1)})`, peak > 40, `peak=${peak.toFixed(1)}`);
+  check(`caravan filled the stash past the old garrison×10 cap (peak ${peak.toFixed(1)})`, peak > 40, `peak=${peak.toFixed(1)}`);
   check('deliveries only landed touching/next to the wall', !deliveredFar);
-  check(`rations still healthy at the end (${w.garrFood.toFixed(1)})`, w.garrFood > 5, `garrFood=${w.garrFood.toFixed(1)}`);
+  check('a topped-off stash reads as a healthy line', !sawFull || check.once === true);
+  check(`bellies stayed fed off the stash (${w.garrFood.toFixed(1)})`,
+    w.garrFood > 0.25 * gTot * S.C.FOOD_PER_UNIT, `garrFood=${w.garrFood.toFixed(1)}`);
   check('garrison survived on caravan rations', gTot === 2, `left=${JSON.stringify(w.garrison)}`);
   check('route still alive', g.routes.some(x => x.targetKind === 'wall' && x.targetId === w.id));
   // destroying the wall dissolves the line instead of stranding carriers
@@ -454,6 +703,28 @@ function run(game, ticks) {
   check('in-flight wall order survives', !!(b2 && b2.order && b2.order.type === 'wall'), b2 && JSON.stringify(b2.order));
   run(g2, 2000);
   check('resumed game finishes the walls', g2.walls.filter(w2 => w2.owner === 0 && !w2.building).length >= 2);
+
+  // pre-#200 saves stored ONE flat larder in garrFood: it must split into
+  // bellies + stash without losing a grain
+  const old = JSON.parse(JSON.stringify(d1));
+  old.walls = [{
+    id: 90001, owner: 0, x: spot.x, y: spot.y + 4, hp: S.C.WALL_HP, building: false,
+    garrison: { deploy: 2, supply: 0, farm: 0 }, garrFood: 100, convert: null,
+  }];
+  const g3 = S.deserialize(old);
+  const mw3 = g3.walls.find(x => x.id === 90001);
+  const cap3 = 2 * S.C.FOOD_PER_UNIT;
+  check('migrated wall exists', !!mw3);
+  check(`old larder fills bellies first (${mw3.garrFood} = ${cap3})`, mw3.garrFood === cap3);
+  check(`the remainder becomes the stash (${mw3.stock} = ${100 - cap3})`, mw3.stock === 100 - cap3);
+  check('migration loses no food', mw3.garrFood + mw3.stock === 100);
+  check('a migrated fed wall reads well-fed, not famished',
+    S.fedMult(S.wallFedMeter(mw3)) === 1.25);
+  // a small old larder (under bellies capacity) stays entirely in bellies
+  old.walls[0].garrFood = 6;
+  const g4 = S.deserialize(old);
+  const mw4 = g4.walls.find(x => x.id === 90001);
+  check('a small old larder stays in bellies', mw4.garrFood === 6 && mw4.stock === 0);
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall checks passed');
