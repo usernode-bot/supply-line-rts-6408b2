@@ -95,10 +95,16 @@ export const C = {
 //   rumors          — act on public founding rumors (hard)
 //   resupply        — replace lost supply caravans mid-campaign (hard)
 //   recencyTarget   — prefer freshly discovered (newest, weakest) targets (hard)
+//   wallCap         — max own wall tiles the AI will hold; 0/absent = never walls (#205)
+//   wallTicks       — minimum ticks between wall jobs (#205)
+//   wallSpan        — max tiles in one shield chain (#205)
+//   wallChoke       — seal narrow mountain passes on the approach (hard, #205)
+//   wallGarrison    — garrison and arm finished shield walls (hard, #205)
 export const DIFF = {
   easy:   { muster: 24, expandTicks: 950, scoutTicks: 550, carriers: false, memoryTicks: 3000, siteNoise: 0.4 },
-  normal: { muster: 18, expandTicks: 750, scoutTicks: 450 },
-  hard:   { muster: 13, expandTicks: 570, scoutTicks: 350, threats: true, rumors: true, resupply: true, recencyTarget: true },
+  normal: { muster: 18, expandTicks: 750, scoutTicks: 450, wallCap: 6, wallTicks: 900, wallSpan: 3 },
+  hard:   { muster: 13, expandTicks: 570, scoutTicks: 350, threats: true, rumors: true, resupply: true, recencyTarget: true,
+            wallCap: 14, wallTicks: 600, wallSpan: 5, wallChoke: true, wallGarrison: true },
 };
 
 // ---------------------------------------------------------------- helpers

@@ -175,7 +175,7 @@ function refreshMenu() {
 const DIFF_HINTS = {
   easy: 'A careless commander.',
   normal: 'The standard opponent.',
-  hard: 'Alert, well-supplied, and opportunistic.',
+  hard: 'Alert, well-supplied, opportunistic — and digs in behind walls.',
 };
 function refreshDifficultyHint() {
   $('difficulty-hint').textContent = DIFF_HINTS[$('sel-difficulty').value] || '';
