@@ -70,10 +70,23 @@ const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
     Number.isInteger(artifact.version) && typeof artifact.generated_at === 'string');
   check('anchors ai:normal at 1000',
     artifact.anchor.participant === 'ai:normal' && artifact.anchor.rating === 1000);
-  check('rates exactly ai:easy and ai:hard',
-    artifact.personas.length === 2
+  check('rates exactly ai:easy, ai:hard and ai:veryhard',
+    artifact.personas.length === 3
     && artifact.personas.some(p => p.participant === 'ai:easy')
-    && artifact.personas.some(p => p.participant === 'ai:hard'));
+    && artifact.personas.some(p => p.participant === 'ai:hard')
+    && artifact.personas.some(p => p.participant === 'ai:veryhard'));
+
+  const byId = Object.fromEntries(artifact.personas.map(p => [p.participant, p]));
+  check('the tiers are ordered easy < normal(1000) < hard < veryhard',
+    byId['ai:easy'] && byId['ai:hard'] && byId['ai:veryhard']
+    && byId['ai:easy'].rating < 1000
+    && byId['ai:hard'].rating > 1000
+    && byId['ai:veryhard'].rating > byId['ai:hard'].rating,
+    JSON.stringify({
+      easy: byId['ai:easy'] && byId['ai:easy'].rating,
+      hard: byId['ai:hard'] && byId['ai:hard'].rating,
+      veryhard: byId['ai:veryhard'] && byId['ai:veryhard'].rating,
+    }));
 
   for (const p of artifact.personas) {
     const refit = elo.ratingFromScoreRate(p.wins + p.draws * 0.5, p.matches);
@@ -113,16 +126,23 @@ const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
 {
   console.log('harness loop smoke run (2000 ticks, xsmall):');
   const g = S.newGame('calib-smoke', 'xsmall', 'normal');
-  const st0 = { diffKey: 'hard' }, st1 = { diffKey: 'normal' };
+  const st0 = { diffKey: 'veryhard' }, st1 = { diffKey: 'normal' };
+  const cad0 = S.aiCadence(st0.diffKey), cad1 = S.aiCadence(st1.diffKey);
   const t0 = Date.now();
+  let ticks0 = 0;
   while (g.tick < 2000 && !g.result) {
     S.step(g);
-    if (g.tick % 20 === 0) aiTick(g, S, 1, st1);
-    else if (g.tick % 20 === 10) aiTick(g, S, 0, st0);
+    if (g.tick % cad1 === 0) aiTick(g, S, 1, st1);
+    if (g.tick % cad0 === (cad0 >> 1)) { aiTick(g, S, 0, st0); ticks0++; }
     if (g.tick % 5 === 0) g.fog.fill(2);
     g.events.length = 0;
   }
   check('the sim advanced', g.tick >= 2000 || !!g.result);
+  check('veryhard is evaluated twice as often as normal',
+    S.aiCadence('veryhard') === 10 && S.aiCadence('normal') === 20
+    && S.aiCadence('hard') === 20 && S.aiCadence('easy') === 20);
+  check('the faster commander really did tick more often', ticks0 > 2000 / 20,
+    `${ticks0} evaluations`);
   check('fog is flooded so owner 0 is not handicapped', g.fog.every(v => v === 2));
   check('both commanders acted (state was written per owner)',
     !!st0.known && !!st1.known);

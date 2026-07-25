@@ -119,6 +119,22 @@ export const C = {
 //   breachWalls     — punch through a remembered wall ring on the way in (hard)
 //   foodLines       — run an internal caravan to a train-gated town (hard, #207)
 //   flank           — relieve a siege from behind the besieger for REAR_MULT (hard)
+//   evalTicks       — ticks between aiTick evaluations for this commander; absent
+//                     = the classic 20 (must divide 20 — see aiCadence) (veryhard)
+//   fieldThreats    — rank a town DOWN when a remembered enemy field army is
+//                     covering it, so the assault goes at the uncovered one
+//                     (ranking only — see rankTargets) (veryhard)
+//   massAssault     — stack a second army onto a target already under assault
+//                     when nothing else is takeable (veryhard)
+//   siegeRun        — order own caravans to run the ring into a besieged town
+//                     instead of holding outside it (#181) (veryhard)
+//   wallSupply      — caravan food out to garrisoned own walls, including choke
+//                     plugs outside territory, so they don't starve (veryhard)
+//   raidParties     — concurrent raiding parties; absent/1 = the classic single
+//                     party (veryhard)
+//   reroleSurplus   — arm farm hands beyond a town's worthwhile plots (veryhard)
+//   rotateHome      — 0..1 blob-health floor: a bled army with no takeable target
+//                     withdraws home to heal instead of grinding (veryhard)
 export const DIFF = {
   easy:   { muster: 24, expandTicks: 950, scoutTicks: 550, carriers: false, memoryTicks: 3000, siteNoise: 0.4 },
   normal: { muster: 18, expandTicks: 750, scoutTicks: 450, wallCap: 6, wallTicks: 900, wallSpan: 3,
@@ -131,7 +147,24 @@ export const DIFF = {
             guard: 8, guardRear: 5, commitTicks: 1800, settBonus: 2, scouts: 2, staleTicks: 900,
             reactiveArm: true, raid: true, raidTicks: 1200, breachWalls: true, foodLines: true,
             flank: true },
+  veryhard: { muster: 11, expandTicks: 480, scoutTicks: 260, threats: true, rumors: true, resupply: true, recencyTarget: true,
+            wallCap: 20, wallTicks: 450, wallSpan: 6, wallChoke: true, wallGarrison: true,
+            evalTargets: true, reinforce: true, threatTicks: 900, armies: 2,
+            guard: 8, guardRear: 6, commitTicks: 1500, settBonus: 2, scouts: 3, staleTicks: 600,
+            reactiveArm: true, raid: true, raidTicks: 800, breachWalls: true, foodLines: true,
+            flank: true,
+            evalTicks: 10, fieldThreats: true, massAssault: true, siegeRun: true,
+            wallSupply: true, raidParties: 2, reroleSurplus: true, rotateHome: 0.45 },
 };
+
+// How often this commander is evaluated, in ticks. Every aiTick call site
+// reads this instead of hard-coding 20 so a faster-thinking commander is
+// one table entry, not a scattered constant. Values must divide 20 so the
+// two-owner interleave in the harnesses stays clean.
+export function aiCadence(difficultyKey) {
+  const d = DIFF[difficultyKey];
+  return (d && d.evalTicks) || 20;
+}
 
 // ---------------------------------------------------------------- helpers
 
@@ -387,7 +420,7 @@ export function newGame(seedStr, sizeKey, difficulty, pvp) {
     pillageAlarmT: -999,                   // last "land stripped bare" toast (transient)
     supplyAlarmT: [-999, -999],            // last "low supplies" toast per owner (transient, #105)
     ruins: [],                             // destroyed settlements' footprints {id,x,y,owner,t} — cosmetic (#106)
-    ai: { known: {}, knownWalls: {}, threats: {}, prey: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, lastRaid: 0, attacking: false, armies: [], armyId: null, scoutIds: [], scoutId: null, scoutSeq: 0, raid: null, expand: null },
+    ai: { known: {}, knownWalls: {}, threats: {}, prey: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, lastRaid: 0, attacking: false, armies: [], armyId: null, scoutIds: [], scoutId: null, scoutSeq: 0, raid: null, raids: [], reroleT: {}, expand: null },
   };
   if (pvp) {
     game.pvp = true;
@@ -3737,7 +3770,7 @@ export function deserialize(data, prev) {
     pillageAlarmT: -999,
     supplyAlarmT: [-999, -999],
     ruins: data.ruins || [], // older saves have none
-    ai: data.ai || { known: {}, knownWalls: {}, threats: {}, prey: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, lastRaid: 0, attacking: false, armies: [], armyId: null, scoutIds: [], scoutId: null, scoutSeq: 0, raid: null, expand: null },
+    ai: data.ai || { known: {}, knownWalls: {}, threats: {}, prey: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, lastRaid: 0, attacking: false, armies: [], armyId: null, scoutIds: [], scoutId: null, scoutSeq: 0, raid: null, raids: [], reroleT: {}, expand: null },
   };
   if (data.pvp) {
     game.pvp = true;

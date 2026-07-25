@@ -87,7 +87,7 @@ async function loadHistory() {
       return;
     }
     const { mine, recent } = await res.json();
-    const tag = (m) => m.mode === 'pvp' ? `vs ${esc(m.opponent || '?')}` : esc(m.difficulty);
+    const tag = (m) => m.mode === 'pvp' ? `vs ${esc(m.opponent || '?')}` : esc(diffLabel(m.difficulty));
     mineEl.innerHTML = mine.length ? mine.map(m => `
       <div class="flex justify-between gap-2">
         <span class="${m.result === 'win' ? 'text-emerald-400' : 'text-red-400'}">${m.result === 'win' ? 'Victory' : m.result === 'surrender' ? 'Surrendered' : 'Defeat'}</span>
@@ -121,10 +121,15 @@ function deltaClass(d) {
   return r > 0 ? 'text-emerald-400' : r < 0 ? 'text-red-400' : 'text-zinc-600';
 }
 
+// Display name for a stored difficulty key. History rows store the raw
+// key ('veryhard'), which is not what a human should read.
+const DIFF_LABELS = { easy: 'Easy', normal: 'Normal', hard: 'Hard', veryhard: 'Very Hard' };
+function diffLabel(key) { return DIFF_LABELS[key] || String(key == null ? '' : key); }
+
 // Ratings panel + difficulty-hint Elo. The AI anchors are fixed, so
 // caching them for the menu session is safe; `myRating` is refreshed
 // whenever the menu reloads.
-let aiRatings = null;   // { easy: {...}, normal: {...}, hard: {...} }
+let aiRatings = null;   // { easy: {...}, normal: {...}, hard: {...}, veryhard: {...} }
 let myRating = null;
 
 // The commander anchors come from a public endpoint (committed
@@ -246,6 +251,7 @@ const DIFF_HINTS = {
   easy: 'A careless commander.',
   normal: 'The standard opponent.',
   hard: 'Alert, well-supplied and opportunistic — raids your supply lines, breaches your walls, and reinforces its sieges.',
+  veryhard: 'Relentless: weighs your armies before it commits, supplies its walls and chokepoints, hunts two caravan raids at once, and answers a siege in seconds.',
 };
 function refreshDifficultyHint() {
   const key = $('sel-difficulty').value;
@@ -3250,8 +3256,9 @@ function frame(ts) {
     while (acc >= 100 && iter++ < 40) {
       S.step(game);
       // tutorial (#185): the enemy commander is switched off — its camp
-      // sits passive until the player attacks (sim-side combat still runs)
-      if (!game.pvp && !game.tutorial && game.tick % 20 === 0) aiTick(game, S);
+      // sits passive until the player attacks (sim-side combat still runs).
+      // How often it thinks is a difficulty dial (evalTicks) — see aiCadence.
+      if (!game.pvp && !game.tutorial && game.tick % S.aiCadence(game.difficulty) === 0) aiTick(game, S);
       acc -= 100;
     }
     if (acc >= 100) acc = 0; // fell behind (background tab); drop the backlog

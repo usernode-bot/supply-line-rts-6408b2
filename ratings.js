@@ -14,13 +14,14 @@ const AI_LABELS = {
   'ai:easy': 'Easy commander',
   'ai:normal': 'Normal commander',
   'ai:hard': 'Hard commander',
+  'ai:veryhard': 'Very Hard commander',
 };
 
 const participantForUser = (userId) => `user:${userId}`;
 const participantForDifficulty = (difficulty) => `ai:${difficulty}`;
 
-// The three anchors as the artifact defines them: Normal is pinned at
-// 1000 by construction, Easy/Hard come from the measured fit.
+// The anchors as the artifact defines them: Normal is pinned at 1000 by
+// construction, every other persona comes from the measured fit.
 function aiSeeds() {
   const rows = [{
     participant: artifact.anchor.participant,

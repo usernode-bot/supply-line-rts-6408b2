@@ -21,10 +21,11 @@ function check(name, cond, detail) {
 function seedRandom(tag) { Math.random = mulberry32(hashSeed(tag)); }
 
 // Drive the sim + the owner-1 commander the way main.js does.
-function drive(g, ticks, onAi) {
+function drive(g, ticks, onAi, diffKey) {
+  const cad = S.aiCadence(diffKey || g.difficulty);
   for (let i = 0; i < ticks; i++) {
     S.step(g);
-    if (g.tick % 20 === 0) {
+    if (g.tick % cad === 0) {
       aiTick(g, S, 1, g.ai);
       if (onAi) onAi(g);
     }
@@ -77,11 +78,12 @@ function threatScenario(diffKey, seed, ticks) {
   return { g, plans, maxWalls };
 }
 
-// ------------------------------------------- 1/2/4/6. hard fortifies
+// -------------------------------- 1/2/4/6. hard + veryhard fortify
 
-{
-  console.log('hard fortifies a threatened settlement:');
-  const { g, plans, maxWalls } = threatScenario('hard', 'aiw-h1', 5000);
+for (const diffKey of ['hard', 'veryhard']) {
+  // both tiers face the same map, so the comparison is like for like
+  console.log(diffKey + ' fortifies a threatened settlement:');
+  const { g, plans, maxWalls } = threatScenario(diffKey, 'aiw-h1', 5000);
   const own = g.walls.filter(w => w.owner === 1);
   check('owner-1 walls were built', own.length >= 2, `got ${own.length}`);
   check('a shield plan was recorded', plans.some(p => p.kind === 'shield'), JSON.stringify(plans));
@@ -105,8 +107,8 @@ function threatScenario(diffKey, seed, ticks) {
   }
   check('shield tiles sit in the 3.2–4.4 band around the town', bandOk, JSON.stringify(bandBad));
 
-  check(`wall count never exceeded the cap (peak ${maxWalls} ≤ ${S.DIFF.hard.wallCap})`,
-    maxWalls <= S.DIFF.hard.wallCap);
+  check(`wall count never exceeded the cap (peak ${maxWalls} ≤ ${S.DIFF[diffKey].wallCap})`,
+    maxWalls <= S.DIFF[diffKey].wallCap);
 
   // no farm plot was denied: strip the walls from a save and every
   // owner-1 field ring keeps the same plot count
@@ -120,7 +122,7 @@ function threatScenario(diffKey, seed, ticks) {
   check('walls denied no farm plots', JSON.stringify(plots) === JSON.stringify(plots2),
     `${JSON.stringify(plots)} vs ${JSON.stringify(plots2)}`);
 
-  // hard garrisons and arms what it raises, fed by the territory drip
+  // both tiers garrison and arm what they raise, fed by the territory drip
   const manned = own.find(w => !w.building && S.wallGarrisonTotal(w) > 0);
   check('a finished wall ended the run garrisoned', !!manned,
     JSON.stringify(own.map(w => ({ b: w.building, g: w.garrison }))));
@@ -129,6 +131,48 @@ function threatScenario(diffKey, seed, ticks) {
       (manned.garrFood || 0) + (manned.stock || 0) > 0,
       `garrFood=${manned.garrFood} stock=${manned.stock}`);
   }
+}
+
+// ---------------------------- 2b. veryhard mans and feeds its walls
+
+{
+  // A finished own wall standing OUTSIDE any settlement's territory: the
+  // stockpile drip can never reach it, which is exactly why hard leaves
+  // its choke plugs bare. veryhard hauls food out to it by caravan.
+  function supplyRun(diffKey) {
+    seedRandom('aiw-sup-' + diffKey + ':rng');
+    const g = S.newGame('aiw-sup', 'small', diffKey);
+    const s1 = g.settlements.find(s => s.owner === 1);
+    s1.stockpile = 500;
+    s1.garrison = { deploy: 10, supply: 8, farm: 0 };
+    s1.garrFood = 40 * S.C.FOOD_PER_UNIT;
+    let wall = null;
+    for (let r = 9; r <= 14 && !wall; r++) {
+      for (let a = 0; a < 16 && !wall; a++) {
+        const th = a * Math.PI / 8;
+        const x = Math.round(s1.x + 1 + Math.cos(th) * r);
+        const y = Math.round(s1.y + 1 + Math.sin(th) * r);
+        if (x < 1 || y < 1 || x >= g.map.w - 1 || y >= g.map.h - 1) continue;
+        if (S.canPlaceWall(g, 1, x, y).err) continue;
+        wall = S.placeFinishedWall(g, 1, x, y, { deploy: 4, supply: 0, farm: 0 }, 0);
+      }
+    }
+    if (!wall) return { wall: null };
+    wall.food = 0;
+    drive(g, 400, null, diffKey);
+    const route = g.routes.find(r => r.owner === 1 && r.targetKind === 'wall' && r.targetId === wall.id);
+    return { g, wall, route };
+  }
+
+  console.log('veryhard caravans food out to a stranded wall garrison:');
+  const v = supplyRun('veryhard');
+  check('a manned wall was planted outside territory', !!v.wall);
+  check('a caravan route was sent out to it', !!v.route,
+    v.g && JSON.stringify(v.g.routes.map(r => [r.targetKind, r.targetId])));
+
+  console.log('hard leaves it to starve (no wall caravans):');
+  const h = supplyRun('hard');
+  check('hard never routes a caravan to a wall', !h.route);
 }
 
 // ------------------------------------------- 3. easy never walls

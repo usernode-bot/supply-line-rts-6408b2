@@ -28,7 +28,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..');
 
 export const CALIB_TICK_CAP = 36000;   // 2 h of 1×-scale play
-export const CHALLENGERS = ['easy', 'hard'];
+export const CHALLENGERS = ['easy', 'hard', 'veryhard'];
 export const SIZES = ['xsmall', 'small'];   // even rounds / odd rounds
 const DEFAULT_ROUNDS = 20;                  // 20 rounds = 40 matches per persona
 
@@ -81,10 +81,14 @@ export function playMatch({ challenger, seed, size, challengerOwner }, cap = CAL
   const d1 = challengerOwner === 0 ? 'normal' : challenger;
   const g = S.newGame(seed, size, 'normal');   // per-owner diffKey overrides this
   const st0 = { diffKey: d0 }, st1 = { diffKey: d1 };
+  // each side thinks at its own difficulty's cadence (evalTicks); the
+  // half-cadence offset on owner 0 keeps the two from resolving on the
+  // same tick, exactly as the fixed 20/10 pair used to
+  const cad0 = S.aiCadence(d0), cad1 = S.aiCadence(d1);
   while (g.tick < cap && !g.result) {
     S.step(g);
-    if (g.tick % 20 === 0) aiTick(g, S, 1, st1);
-    else if (g.tick % 20 === 10) aiTick(g, S, 0, st0);
+    if (g.tick % cad1 === 0) aiTick(g, S, 1, st1);
+    if (g.tick % cad0 === (cad0 >> 1)) aiTick(g, S, 0, st0);
     // owner 1 paths omnisciently in a solo game (pathFog returns null for
     // it); flooding the fog keeps owner 0 on equal footing — same trick
     // attract-pool.js uses.

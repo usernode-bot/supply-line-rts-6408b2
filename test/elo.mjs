@@ -27,8 +27,9 @@ const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
   check('equal ratings are a coin flip', near(elo.expectedScore(1000, 1000), 0.5));
   check('symmetric', near(elo.expectedScore(1200, 900) + elo.expectedScore(900, 1200), 1));
   check('+400 is ~0.909', near(elo.expectedScore(1400, 1000), 1 / (1 + Math.pow(10, -1))));
-  check('anchored predicate covers all three commanders',
-    ['ai:easy', 'ai:normal', 'ai:hard'].every(elo.isAnchored) && !elo.isAnchored('user:7'));
+  check('anchored predicate covers every commander',
+    ['ai:easy', 'ai:normal', 'ai:hard', 'ai:veryhard'].every(elo.isAnchored)
+    && !elo.isAnchored('user:7'));
 }
 
 // ------------------------------------- 2. AI immutability (all three)
