@@ -1264,15 +1264,42 @@ function findEnemyTargetAt(world) {
   if (wl && wl.owner !== me && wallKnown(wl)) {
     return { kind: 'wall', id: wl.id };
   }
-  const hitR = Math.max(1.5, 24 / view.scale);
-  const eb = S.blobAt(game, world.x, world.y, hitR);
+  // tight grab (#201): blobAt measures EDGE distance, so the old
+  // max(1.5, 24/scale) slack reached ~4 tiles past a big stack's centre
+  // and quietly turned retreat / garrison clicks into fresh attacks. A
+  // move only becomes an attack when the click lands on (or right at the
+  // edge of) the enemy itself; the touch popup keeps its generous pick
+  // because it asks the player which order they meant.
+  const eb = S.blobAt(game, world.x, world.y, 0.9);
   if (eb && eb.owner !== me && S.isVisible(game, eb.x, eb.y)) return { kind: 'blob', id: eb.id };
-  const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+  const st = S.settlementAt(game, world.x, world.y, 1.9);
   if (st && st.owner !== me && (S.settVisible(game, st) || known[st.id])) {
     return { kind: 'settlement', id: st.id };
   }
   return null;
 }
+
+// An own-entity destination under a world point (#201): one of the
+// player's finished wall tiles, or their own completed settlement's
+// grounds. A click here is unambiguously "march there and garrison", so
+// the move dispatch must NEVER let a nearby enemy steal it — an attacker
+// standing beside a wall used to outrank the wall itself. Mirrors the
+// own-entity-first precedence the route flows already use (#142, #187).
+function ownGarrisonTargetAt(world) {
+  const wl = wallAtPoint(world);
+  if (wl && wl.owner === me && !wl.building) return { kind: 'wall', id: wl.id };
+  const fp = settlementAtFootprint(world);
+  if (fp && fp.owner === me && !fp.building) return { kind: 'settlement', id: fp.id };
+  const st = S.settlementAt(game, world.x, world.y, 1.9);
+  if (st && st.owner === me && !st.building) return { kind: 'settlement', id: st.id };
+  return null;
+}
+
+// Blobs that are in contact right now — drives the panel's combat lines
+// (same 5-tick window the renderer uses). Breaking off needs no special
+// affordance: an ordinary move order given during a fight IS the
+// withdrawal (opMove flags it, and tickOrder honours the flag).
+function inCombat(b) { return !!b && game.tick - b.engagedT < 5; }
 
 function onRightClick(world) {
   if (!game || game.result) return;
@@ -1310,7 +1337,9 @@ function onRightClick(world) {
       return;
     }
   }
-  orderMove(blobs, world, findEnemyTargetAt(world));
+  // own wall / own settlement under the cursor is a garrison march, never
+  // an attack on whatever enemy happens to stand beside it (#201)
+  orderMove(blobs, world, ownGarrisonTargetAt(world) ? null : findEnemyTargetAt(world));
 }
 
 // Shared move dispatch: issue the order to every selected blob, ping the
@@ -2186,7 +2215,9 @@ function resolvePending(world, pointerType, screen) {
   const blobs = selectedBlobs();
   if (pending === 'move') {
     if (!blobs.length) return;
-    orderMove(blobs, world, findEnemyTargetAt(world)); // tapping an enemy targets it
+    // tapping an enemy targets it; an own wall/settlement is a garrison
+    // march that a neighbouring enemy can never steal (#201)
+    orderMove(blobs, world, ownGarrisonTargetAt(world) ? null : findEnemyTargetAt(world));
   } else if (pending === 'route') {
     // supply routes take two taps (#131): first the source settlement the
     // caravans load from, then the destination. All selected pure-supply
@@ -2690,8 +2721,9 @@ function renderPanelInner(force) {
             </div>
             ${w.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(w.convert)}s (fielding cancels)</div>` : ''}
             <button data-act="fieldwall" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>
-            <div class="text-xs text-zinc-600 mt-1">Fielding marches them out with their rations, topping up from the supplies; the rest stays on the wall.</div>`.replaceAll('data-act="role"', 'data-act="wrole"')
-          : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '). A garrisoned wall attacks enemies within 1 tile, and its units refeed from these supplies; a route keeps them stocked.</div>'}`}`);
+            <div class="text-xs text-zinc-600 mt-1">Fielding marches them out with their rations, topping up from the supplies; the rest stays on the wall.</div>
+            <div class="text-xs text-zinc-600 mt-1">Reinforcements can march in even while the wall is under attack, up to ${S.C.WALL_GARRISON_CAP} units per tile.</div>`.replaceAll('data-act="role"', 'data-act="wrole"')
+          : '<div class="text-xs text-zinc-600">No units garrisoned — move a blob onto the wall (up to ' + S.C.WALL_GARRISON_CAP + '), which works even while the wall is under attack. A garrisoned wall attacks enemies within 1 tile, and its units refeed from these supplies; a route keeps them stocked.</div>'}`}`);
     } else {
       const vis = S.isVisible(game, w.x + 0.5, w.y + 0.5);
       if (vis) {
@@ -3017,6 +3049,11 @@ function renderPanelInner(force) {
   }
   // group build (#130): an under-strength founding party holding its site
   const waitingBuild = blobs.some(b => b.order && b.order.type === 'move' && b.order.build && b.order.waiting);
+  // combat state (#201): "is my army actually in a fight?" and "why is
+  // its HP draining so fast?" are both answerable from the panel. rearT
+  // marks the same event the map's thick orange attack link draws.
+  const fighting = blobs.some(inCombat);
+  const rearHit = blobs.some(b => game.tick - b.rearT < 5);
   const hpSum = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + u.hp, 0), 0);
   const hpMax = blobs.reduce((s2, b) => s2 + b.units.reduce((a, u) => a + S.unitMaxHP(u.role), 0), 0);
   const hpPct = Math.round(100 * hpSum / Math.max(1, hpMax));
@@ -3041,7 +3078,8 @@ function renderPanelInner(force) {
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
     <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
-
+    ${fighting ? `<div class="text-xs text-red-400 ${rearHit ? 'mb-1' : 'mb-2'}">⚔️ In combat</div>` : ''}
+    ${rearHit ? '<div class="text-xs text-orange-400 mb-2">⚠️ Rear attack — taking extra damage from behind</div>' : ''}
     `;
   const convertLine = blobs.some(b => b.convert) ? `<div class="text-xs text-amber-400 mb-2">⚔️ Arming… ready in ~${convertEta(blobs.filter(b => b.convert).reduce((a, b) => (a.convert.done >= b.convert.done ? a : b)).convert)}s — units fight as their old role until then; picking another role cancels</div>` : '';
 
@@ -3182,6 +3220,48 @@ function shotWallGarrison() {
   renderPanel(true);
 }
 
+// The in-combat / rear-attack panel lines (#201) exist only while a
+// selected group is actually under fire, which no plain URL can reach —
+// so `?shot=in-combat` boots a solo match on a FIXED seed and stages a
+// pursuit: the enemy's opening war party is placed 1 tile from the
+// player's, the melee registers, then the player's group is ordered away
+// (a plain move — opMove flags it as a disengagement because contact is
+// live) while the enemy holds an attack order on it. A few more ticks and
+// the pursuer is landing REAR_MULT hits from directly behind, so BOTH
+// status lines render off honest sim output. The group is selected and
+// the sim paused, freezing the < 5-tick windows. Pure local UI state —
+// no DB writes — so it works in every environment.
+function shotInCombat() {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot201', 'xsmall', 'normal');
+  const mine = g.blobs.find(b => b.owner === 0 && b.count.deploy > 0);
+  const foe = g.blobs.find(b => b.owner === 1 && b.count.deploy > 0);
+  if (!mine || !foe) return;
+  // one tile to the player's right — outside the home settlement's siege
+  // ring, so the shot reads as a clean field engagement
+  foe.x = mine.x + 1; foe.y = mine.y;
+  foe.prevX = foe.x; foe.prevY = foe.y;
+  foe.order = null; foe.path = null; foe.pathGoal = null;
+  startMatch(g);
+  for (let i = 0; i < 3; i++) S.step(g); // registers the melee (meleeT / engagedT)
+  ui.selected = { kind: 'blob', id: mine.id };
+  // the pursuit: enemy locks onto the player's group (direct sim call —
+  // it's the AI's side), the player's group breaks off with a plain move
+  // exactly like a right-click; running with its back turned puts the
+  // pursuer in its rear arc, and pass 2 refreshes rearT every tick
+  S.opMove(g, foe, mine.x, mine.y, { kind: 'blob', id: mine.id });
+  const home = g.settlements.find(s => s.owner === 0);
+  if (home) doMove(mine, home.x + 1, home.y + 1, null);
+  for (let i = 0; i < 5; i++) S.step(g);
+  view.cx = mine.x; view.cy = mine.y; view.scale = 26;
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+}
+
 // ---------------------------------------------------------------- boot
 
 refreshMenu();
@@ -3194,6 +3274,9 @@ startMenuPolling();
 if (!params.get('shot')) startAttract();
 if (SHOT === 'wall-garrison') {
   try { shotWallGarrison(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'in-combat') {
+  try { shotInCombat(); } catch (e) { console.warn('shot link failed', e); }
 }
 
 // Screenshot-state deep links (#200): the wall-garrison panel only exists
