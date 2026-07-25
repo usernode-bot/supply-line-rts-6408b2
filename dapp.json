@@ -44,6 +44,15 @@
     { "name": "Wall garrison panel fields all 8 garrisoned units", "path": "/?shot=wall-garrison&demo=1", "expectText": "Field garrison (8)" },
     { "name": "Engaged army panel reads In combat", "path": "/?shot=in-combat&demo=1", "expectText": "In combat" },
     { "name": "Rear-attacked army panel reads Rear attack", "path": "/?shot=in-combat&demo=1", "expectText": "Rear attack" },
-    { "name": "Wall panel says reinforcements can march in under attack", "path": "/?shot=wall-panel&demo=1", "expectText": "while the wall is under attack" }
+    { "name": "Wall panel says reinforcements can march in under attack", "path": "/?shot=wall-panel&demo=1", "expectText": "while the wall is under attack" },
+    { "name": "Ratings panel renders on the menu", "path": "/?demo=1", "expectSelector": "#ratings-panel" },
+    { "name": "Ratings panel lists rows", "path": "/?demo=1", "expectSelector": "#ratings-rows" },
+    { "name": "Ratings panel explains the AI ceiling rule", "path": "/?demo=1", "expectText": "never past it" },
+    { "name": "Ratings panel lists the Normal commander anchor", "path": "/?demo=1", "expectText": "Normal commander" },
+    { "name": "AI rows cite their sparring calibration", "path": "/?demo=1", "expectText": "sparring matches" },
+    { "name": "Ratings panel names the pinned Normal anchor", "path": "/?demo=1", "expectText": "pinned at 1000" },
+    { "name": "Your rating line renders above the match history", "path": "/?demo=1", "expectSelector": "#my-rating" },
+    { "name": "Difficulty hint carries the commander's Elo", "path": "/?demo=1", "expectText": "Elo 1000" },
+    { "name": "End-of-match rating line element present", "path": "/?demo=1", "expectSelector": "#end-rating" }
   ]
 }

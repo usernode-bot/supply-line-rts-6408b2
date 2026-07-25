@@ -92,6 +92,7 @@ async function loadHistory() {
       <div class="flex justify-between gap-2">
         <span class="${m.result === 'win' ? 'text-emerald-400' : 'text-red-400'}">${m.result === 'win' ? 'Victory' : m.result === 'surrender' ? 'Surrendered' : 'Defeat'}</span>
         <span class="text-zinc-500 truncate">${tag(m)}</span>
+        <span class="font-mono ${deltaClass(m.rating_delta)} w-10 text-right">${fmtDelta(m.rating_delta)}</span>
         <span class="font-mono text-zinc-500">${fmtDur(m.duration_seconds)}</span>
       </div>`).join('') : '<span class="text-zinc-600">No matches yet — start one above!</span>';
     recentEl.innerHTML = recent.length ? recent.map(m => `
@@ -104,6 +105,75 @@ async function loadHistory() {
     mineEl.textContent = 'Could not load match history.';
     recentEl.textContent = '—';
   }
+}
+
+// Per-row Elo change: a stored 0 (the ceiling zeroed the gain) reads
+// "—", an unrated row (null) shows nothing at all.
+function fmtDelta(d) {
+  if (d == null) return '';
+  const r = Math.round(d);
+  if (r === 0) return '—';
+  return (r > 0 ? '+' : '') + r;
+}
+function deltaClass(d) {
+  if (d == null) return 'text-zinc-600';
+  const r = Math.round(d);
+  return r > 0 ? 'text-emerald-400' : r < 0 ? 'text-red-400' : 'text-zinc-600';
+}
+
+// Ratings panel + difficulty-hint Elo. The AI anchors are fixed, so
+// caching them for the menu session is safe; `myRating` is refreshed
+// whenever the menu reloads.
+let aiRatings = null;   // { easy: {...}, normal: {...}, hard: {...} }
+let myRating = null;
+
+// The commander anchors come from a public endpoint (committed
+// constants), the player rows from the authenticated one — so the panel
+// and the difficulty hint still say something useful without an account.
+async function loadRatings() {
+  const rowsEl = $('ratings-rows'), mineEl = $('my-rating');
+  let ai = [], me = null, top = [], signedIn = false;
+  try {
+    ai = (await (await fetch('/api/ai-ratings')).json()).ai || [];
+    aiRatings = {};
+    for (const a of ai) aiRatings[a.participant.replace('ai:', '')] = a;
+  } catch { aiRatings = null; }
+  try {
+    const res = await fetch('/api/ratings', { headers: apiHeaders });
+    if (res.ok) {
+      const data = await res.json();
+      me = data.me; top = data.top || []; signedIn = true;
+      if (data.ai && data.ai.length) ai = data.ai;
+    }
+  } catch { /* menu never blocks on ratings */ }
+
+  myRating = me ? me.rating : null;
+  mineEl.textContent = me ? `Your rating: ${me.rating}`
+    : signedIn ? 'Your rating: 1000 (unrated)' : 'Your rating: —';
+
+  const rows = ai.map(a => ({
+    name: a.username, rating: a.rating, ai: true,
+    note: a.calib_matches ? `calibrated over ${a.calib_matches} sparring matches` : 'the anchor — pinned at 1000',
+  })).concat(top.map(t => ({
+    name: t.username, rating: t.rating, ai: false,
+    note: `${t.rated_matches} rated match${t.rated_matches === 1 ? '' : 'es'}`,
+    me: !!(me && t.username === me.username),
+  })));
+  rows.sort((a, b) => b.rating - a.rating);
+  if (me && !rows.some(r => r.me)) {
+    rows.push({ name: me.username, rating: me.rating, ai: false, me: true,
+      note: `${me.rated_matches} rated match${me.rated_matches === 1 ? '' : 'es'}` });
+  }
+  rowsEl.innerHTML = rows.length ? rows.map(r => `
+      <div class="flex items-baseline justify-between gap-2 ${r.me ? 'bg-zinc-800/60 -mx-1 px-1 rounded' : ''}">
+        <span class="truncate ${r.ai ? 'text-sky-300' : r.me ? 'text-zinc-100 font-semibold' : 'text-zinc-300'}">
+          ${r.ai ? '🤖 ' : ''}${esc(r.name)}${r.me ? ' (you)' : ''}
+        </span>
+        <span class="text-zinc-600 text-xs truncate flex-1 text-right">${esc(r.note)}</span>
+        <span class="font-mono text-zinc-300 w-12 text-right">${r.rating}</span>
+      </div>`).join('')
+    : '<span class="text-zinc-600">Ratings unavailable.</span>';
+  refreshDifficultyHint();
 }
 
 function esc(s) {
@@ -178,7 +248,18 @@ const DIFF_HINTS = {
   hard: 'Alert, well-supplied and opportunistic — raids your supply lines, breaches your walls, and reinforces its sieges.',
 };
 function refreshDifficultyHint() {
-  $('difficulty-hint').textContent = DIFF_HINTS[$('sel-difficulty').value] || '';
+  const key = $('sel-difficulty').value;
+  let text = DIFF_HINTS[key] || '';
+  // Every rating embellishment is additive: with no /api/ratings data the
+  // hint stays exactly what it has always been.
+  const ai = aiRatings && aiRatings[key];
+  if (ai) {
+    text += ` · Elo ${ai.rating}`;
+    if (myRating != null && myRating >= ai.rating) {
+      text += " — you're rated above this commander, so a win won't raise your rating.";
+    }
+  }
+  $('difficulty-hint').textContent = text;
 }
 $('sel-difficulty').addEventListener('change', refreshDifficultyHint);
 refreshDifficultyHint();
@@ -900,6 +981,7 @@ function backToMenu() {
   refreshTutorialButton();
   refreshServerSave();
   loadHistory();
+  loadRatings();
   startMenuPolling();
   startAttract();
 }
@@ -940,6 +1022,7 @@ function showEndModal(win, reason) {
       : reason === 'surrender'
         ? `You surrendered to ${opp} after ${dur}.`
         : `${opp} destroyed your war effort after ${dur}.`);
+  $('end-rating').classList.add('hidden');   // filled in once the post answers
   $('end-modal').classList.remove('hidden');
 }
 
@@ -958,9 +1041,11 @@ function endMatch(result) {
   $('end-detail').textContent = win
     ? `Enemy settlements razed and their last forces scattered in ${fmtDur(S.gameSeconds(game.tick))}.`
     : `Your war effort collapsed after ${fmtDur(S.gameSeconds(game.tick))}.`;
+  $('end-rating').classList.add('hidden');   // filled in once the post answers
   $('end-modal').classList.remove('hidden');
   if (game.sandbox) return;
-  // fire-and-forget record
+  // fire-and-forget record; the response carries this match's Elo change
+  // (the modal is already up — the line just arrives a moment later)
   fetch('/api/match-result', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...apiHeaders },
@@ -970,7 +1055,20 @@ function endMatch(result) {
       duration_seconds: Math.round(S.gameSeconds(game.tick)),
       map_seed: game.seed,
     }),
-  }).catch(() => { });
+  }).then(r => r.ok ? r.json() : null).then(showRatingLine).catch(() => { });
+}
+
+// Appends "Rating: R (+D)" to the end modal, spelling out the ceiling
+// case so a zeroed gain never reads as a bug.
+function showRatingLine(data) {
+  if (!data || data.rating == null) return;
+  const d = data.rating_delta;
+  const el = $('end-rating');
+  if (d > 0) el.textContent = `Rating: ${data.rating} (+${d})`;
+  else if (d < 0) el.textContent = `Rating: ${data.rating} (${d})`;
+  else el.textContent = `Rating: ${data.rating} (no change — you're rated above this commander)`;
+  el.classList.remove('hidden');
+  myRating = data.rating;
 }
 
 $('btn-end-menu').addEventListener('click', backToMenu);
@@ -3268,6 +3366,7 @@ refreshMenu();
 refreshTutorialButton();
 refreshServerSave();
 loadHistory();
+loadRatings();
 startMenuPolling();
 // a `?shot=` boot goes straight into a match — the menu backdrop would
 // only fetch a snapshot for a screen nobody sees

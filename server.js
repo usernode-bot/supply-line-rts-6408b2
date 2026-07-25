@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 
 const attractPool = require('./attract-pool');
 const matchRunner = require('./match-runner');
+const ratings = require('./ratings');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -15,7 +16,7 @@ const IS_STAGING = process.env.USERNODE_ENV === 'staging';
 // Paths that stay open without authentication. Add a path here (and add it
 // with `app.get`/`app.post` below) if you deliberately want it public.
 // Everything else requires a valid platform-issued JWT.
-const PUBLIC_API_PATHS = new Set(['/health', '/api/attract-snapshot']);
+const PUBLIC_API_PATHS = new Set(['/health', '/api/attract-snapshot', '/api/ai-ratings']);
 
 // PvP snapshots are full serialized game states (~40-80 KB on a medium
 // map), well past express.json's 100 kb default.
@@ -72,18 +73,60 @@ const DEMO_NAMES = ['Staging demo Quartermaster', 'Staging demo Forager', 'Stagi
 const isDemoReq = (req) => IS_STAGING && req.query.demo === '1';
 
 // Record a finished match. Fire-and-forget from the client at match end.
+// The rating update rides along in the same transaction: only the
+// player's row moves — the AI commander is a fixed anchor, and a
+// win/draw can only carry the player *up to* its rating, never past it.
 app.post('/api/match-result', async (req, res) => {
+  const client = await pool.connect();
   try {
     const { result, difficulty, duration_seconds, map_seed } = req.body || {};
     if (!RESULTS.has(result)) return res.status(400).json({ error: 'Bad result' });
     if (!DIFFICULTIES.has(difficulty) || difficulty === 'pvp') return res.status(400).json({ error: 'Bad difficulty' });
     const duration = Math.max(0, Math.min(86400, parseInt(duration_seconds, 10) || 0));
     const seed = typeof map_seed === 'string' ? map_seed.slice(0, 64) : null;
-    await pool.query(`
-      INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `, [req.user.id, req.user.username, result, difficulty, duration, seed]);
-    res.json({ ok: true });
+
+    await client.query('BEGIN');
+    const rated = ratings.soloRatable(req.user.id, result, duration);
+    const out = rated
+      ? await ratings.applySolo(client, {
+        userId: req.user.id, username: req.user.username, difficulty, result,
+      })
+      : null;
+    await client.query(`
+      INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, rating_delta, rating_after)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `, [req.user.id, req.user.username, result, difficulty, duration, seed,
+      out ? out.delta : null, out ? out.after : null]);
+    await client.query('COMMIT');
+
+    res.json({
+      ok: true,
+      rating: out ? Math.round(out.after) : null,
+      rating_delta: out ? Math.round(out.delta) : null,
+      ai_rating: out ? Math.round(out.aiRating) : null,
+    });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch {}
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// The three commander ratings. Public — they're committed constants
+// from calibration/ai-ratings.json with no user data in them (same
+// reasoning as the attract snapshot), and the difficulty picker should
+// be able to say what you're up against even before the account data
+// loads. Player ratings stay behind /api/ratings.
+app.get('/api/ai-ratings', (_req, res) => {
+  res.json({ ai: ratings.aiPublic() });
+});
+
+// Ratings panel on the menu: the three fixed AI anchors, the top rated
+// players, and the caller's own row.
+app.get('/api/ratings', async (req, res) => {
+  try {
+    res.json(await ratings.leaderboard(pool, req.user.id));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -94,7 +137,7 @@ app.post('/api/match-result', async (req, res) => {
 app.get('/api/matches', async (req, res) => {
   try {
     const mine = await pool.query(`
-      SELECT result, difficulty, duration_seconds, map_seed, created_at, mode, opponent
+      SELECT result, difficulty, duration_seconds, map_seed, created_at, mode, opponent, rating_delta
       FROM matches WHERE user_id = $1
       ORDER BY created_at DESC LIMIT 10
     `, [req.user.id]);
@@ -473,6 +516,16 @@ async function start() {
     )
   `);
 
+  // Elo (#207 follow-up): the ratings table, the three fixed AI anchors
+  // seeded from the committed calibration artifact, then a one-time
+  // replay of pre-Elo match history to seed player ratings.
+  await ratings.migrate(pool);
+  await ratings.seedAi(pool);
+  const filled = await ratings.backfill(pool);
+  if (!filled.skipped) {
+    console.log(`ratings backfill: ${filled.players} player(s) from ${filled.rated} rated match row(s)`);
+  }
+
   // Staging-only demo rows so the menu's match-history panel and the
   // multiplayer lobby list have content in previews. Obviously-fake
   // identities, idempotent, strictly a no-op in production.
@@ -503,6 +556,25 @@ async function start() {
         (900101, -1, 'Staging demo Quartermaster', 'open', 'small',  'staging-demo-a', NOW()),
         (900102, -2, 'Staging demo Forager',       'open', 'medium', 'staging-demo-b', NOW())
       ON CONFLICT (id) DO UPDATE SET status = 'open', host_seen_at = NOW()
+    `);
+    // Demo players for the Ratings panel: one above the Hard commander
+    // (only reachable via PvP — solo caps at Hard), one below Normal.
+    // The AI rows come from the calibration artifact in every env.
+    await pool.query(`
+      INSERT INTO ratings (participant, username, rating, rated_matches, calib_matches, calib_version)
+      VALUES
+        ('user:-1', 'Staging demo Quartermaster', 1285, 24, 0, 0),
+        ('user:-2', 'Staging demo Forager',        968, 11, 0, 0),
+        ('user:-3', 'Staging demo Warden',        1012,  7, 0, 0)
+      ON CONFLICT (participant) DO NOTHING
+    `);
+    // Give the seeded history rows plausible deltas so the "Yours" list
+    // shows the +/- column in previews (ids from the block above).
+    await pool.query(`
+      UPDATE matches SET rating_delta = v.d, rating_after = v.a
+      FROM (VALUES (900001, 12.0, 1012.0), (900002, -9.0, 991.0), (900003, 0.0, 1012.0),
+                   (900004, -14.0, 998.0), (900005, 11.0, 1009.0)) AS v(id, d, a)
+      WHERE matches.id = v.id AND matches.rating_delta IS NULL
     `);
   }
 

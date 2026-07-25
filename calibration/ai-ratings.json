@@ -1,0 +1,761 @@
+{
+  "version": 1,
+  "generated_at": "2026-07-25T12:27:50.076Z",
+  "harness": "test/calibrate-ai.mjs",
+  "tick_cap": 36000,
+  "rounds": 20,
+  "sizes": [
+    "xsmall",
+    "small"
+  ],
+  "anchor": {
+    "participant": "ai:normal",
+    "rating": 1000
+  },
+  "personas": [
+    {
+      "participant": "ai:easy",
+      "rating": 725,
+      "matches": 40,
+      "wins": 6,
+      "draws": 1,
+      "losses": 33,
+      "score_rate": 0.1707,
+      "raw_fit": 725,
+      "clamped": false
+    },
+    {
+      "participant": "ai:hard",
+      "rating": 1105,
+      "matches": 40,
+      "wins": 26,
+      "draws": 0,
+      "losses": 14,
+      "score_rate": 0.6463,
+      "raw_fit": 1105,
+      "clamped": false
+    }
+  ],
+  "log": [
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-0",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 9020,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-0",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-1",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-1",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-2",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 7490,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-2",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 12890,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-3",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 8120,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-3",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 0.5,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-4",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 7970,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-4",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-5",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-5",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-6",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 8730,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-6",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 21230,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-7",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 19440,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-7",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-8",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 7390,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-8",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 9520,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-9",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-9",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-10",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 9720,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-10",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-11",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 17600,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-11",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-12",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 7970,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-12",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 16150,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-13",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 11370,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-13",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-14",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-14",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 23290,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-15",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 8340,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-15",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-16",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 21300,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-16",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 10830,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-17",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 13170,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-17",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-18",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 5230,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-18",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-19",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 33270,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:easy",
+      "seed": "calib-19",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-0",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 20570,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-0",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 11200,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-1",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-1",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-2",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 12590,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-2",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 10300,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-3",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 16030,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-3",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-4",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 12330,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-4",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 9050,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-5",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-5",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-6",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 16160,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-6",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 14890,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-7",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 29150,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-7",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 7900,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-8",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 18230,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-8",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 16130,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-9",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-9",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-10",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 15370,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-10",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 15740,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-11",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-11",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 33670,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-12",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 14960,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-12",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 10870,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-13",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-13",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 27220,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-14",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 14260,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-14",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 8750,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-15",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 16360,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-15",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 8880,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-16",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 13430,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-16",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 16730,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-17",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-17",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-18",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 8320,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-18",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 13370,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-19",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 20320,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "seed": "calib-19",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 20450,
+      "decided_by": "elimination"
+    }
+  ]
+}

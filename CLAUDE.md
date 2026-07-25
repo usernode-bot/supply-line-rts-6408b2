@@ -53,5 +53,12 @@ backdrop — it runs the same sim/AI modules via dynamic `import()`.
   keep sim state JSON-serializable.
 - Input is pointer-first: every action must be reachable by tap alone;
   mouse/keyboard bindings are shortcuts, never the only path.
+- The three AI commanders carry **fixed Elo ratings** measured offline by
+  `npm run calibrate` (Easy/Hard sparring vs the 1000-pinned Normal) and
+  committed to `calibration/ai-ratings.json`, which is the single source
+  of truth the server seeds from. Nothing at runtime ever moves an AI
+  rating. **If you retune `DIFF` in `public/js/sim.js`, re-run
+  `npm run calibrate`, bump the artifact's `version`, and commit it** —
+  otherwise the published commander ratings describe the old AI.
 - No build step and no new runtime dependencies — plain ES modules
   served from `public/`.
