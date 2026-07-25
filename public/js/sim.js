@@ -135,6 +135,9 @@ export const C = {
 //   reroleSurplus   — arm farm hands beyond a town's worthwhile plots (veryhard)
 //   rotateHome      — 0..1 blob-health floor: a bled army with no takeable target
 //                     withdraws home to heal instead of grinding (veryhard)
+//   commitRatio     — force demanded to storm a town, as a multiple of the
+//                     remembered garrison; absent = the shared 2.4. Lower
+//                     commits sooner with the army in hand (veryhard)
 export const DIFF = {
   easy:   { muster: 24, expandTicks: 950, scoutTicks: 550, carriers: false, memoryTicks: 3000, siteNoise: 0.4 },
   normal: { muster: 18, expandTicks: 750, scoutTicks: 450, wallCap: 6, wallTicks: 900, wallSpan: 3,
@@ -147,14 +150,28 @@ export const DIFF = {
             guard: 8, guardRear: 5, commitTicks: 1800, settBonus: 2, scouts: 2, staleTicks: 900,
             reactiveArm: true, raid: true, raidTicks: 1200, breachWalls: true, foodLines: true,
             flank: true },
+  // The aggression dials here are measured head to head against hard, not
+  // guessed: a leaner home guard (6/4) frees troops, commitTicks 900 and
+  // commitRatio 1.8 spend them sooner. 1.8 sits just under the ~2.12
+  // break-even of the garrison-behind-cover math on purpose — this
+  // commander accepts thinner odds and leans on its other advantages.
+  //
+  // muster stays at 11 on purpose. Dropping it to 10 or 9 duels BETTER
+  // in isolation but falls off a cliff elsewhere: expand() needs 9 deploy
+  // banked in a garrison to field a founder party, and a commander that
+  // launches at 9 never banks that much, so it stalls at 3 towns instead
+  // of 6, keeps no hands spare, and stops building walls entirely
+  // (ai-walls goes from 19 wall tiles to 0). Raw duel score is not worth
+  // trading a shipped behaviour for.
   veryhard: { muster: 11, expandTicks: 480, scoutTicks: 260, threats: true, rumors: true, resupply: true, recencyTarget: true,
             wallCap: 20, wallTicks: 450, wallSpan: 6, wallChoke: true, wallGarrison: true,
             evalTargets: true, reinforce: true, threatTicks: 900, armies: 2,
-            guard: 8, guardRear: 6, commitTicks: 1500, settBonus: 2, scouts: 3, staleTicks: 600,
+            guard: 6, guardRear: 4, commitTicks: 900, settBonus: 2, scouts: 3, staleTicks: 600,
             reactiveArm: true, raid: true, raidTicks: 800, breachWalls: true, foodLines: true,
             flank: true,
             evalTicks: 10, fieldThreats: true, massAssault: true, siegeRun: true,
-            wallSupply: true, raidParties: 2, reroleSurplus: true, rotateHome: 0.45 },
+            wallSupply: true, raidParties: 2, reroleSurplus: true, rotateHome: 0.45,
+            commitRatio: 1.8 },
 };
 
 // How often this commander is evaluated, in ticks. Every aiTick call site

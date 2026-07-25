@@ -108,7 +108,7 @@ function placeAt(g, b, cx, cy, r, a0 = 0) {
       flank: true,
     }), JSON.stringify(S.DIFF.hard));
   for (const flag of ['evalTicks', 'fieldThreats', 'massAssault', 'siegeRun', 'wallSupply',
-    'raidParties', 'reroleSurplus', 'rotateHome']) {
+    'raidParties', 'reroleSurplus', 'rotateHome', 'commitRatio']) {
     for (const key of ['easy', 'normal', 'hard']) {
       if (S.DIFF[key][flag] !== undefined) {
         failures++; console.error(`  FAIL ${key} must not carry ${flag}`);
@@ -1008,14 +1008,28 @@ function driveAt(g, ticks, diffKey, onAi, owner = 1, state = null) {
   check('the hard commander is not behind on manpower', r.men[1] >= r.men[0] * 0.9,
     JSON.stringify(r.men));
 
-  // owner 1 plays veryhard, owner 0 plays hard
-  console.log('veryhard holds its own against hard head to head:');
-  const v = duel('ais-duel2', 'hard', 'veryhard');
-  console.log(`    setts ${JSON.stringify(v.setts)}  men ${JSON.stringify(v.men)}  result ${v.result || 'ongoing'}`);
-  check('the veryhard commander is not behind on settlements', v.setts[1] >= v.setts[0],
-    JSON.stringify(v.setts));
-  check('the veryhard commander is not behind on manpower', v.men[1] >= v.men[0] * 0.9,
-    JSON.stringify(v.men));
+  // veryhard vs hard, over SEVERAL maps rather than one.
+  //
+  // A strict inequality on a single seed is not a test of "is stronger":
+  // the tuned veryhard measures ~0.71 head to head over 80 matches, so it
+  // still drops ~3 maps in 10 and any one seed can go either way. Scoring
+  // a set and asserting the majority is what the claim actually says. The
+  // suite seeds Math.random per duel, so this is deterministic, not flaky.
+  console.log('veryhard beats hard across a set of maps:');
+  let vhWins = 0, played = 0;
+  const lines = [];
+  for (const tag of ['ais-duel2', 'ais-duel3', 'ais-duel4', 'ais-duel5', 'ais-duel6']) {
+    const d = duel(tag, 'hard', 'veryhard');
+    played++;
+    // ahead on towns, or level on towns and ahead on manpower
+    const win = d.setts[1] > d.setts[0]
+      || (d.setts[1] === d.setts[0] && d.men[1] > d.men[0]);
+    if (win) vhWins++;
+    lines.push(`${tag}: setts ${JSON.stringify(d.setts)} men ${JSON.stringify(d.men)} ${win ? 'VH' : 'hard'}`);
+  }
+  for (const l of lines) console.log('    ' + l);
+  check(`the veryhard commander takes the majority of maps (${vhWins}/${played})`,
+    vhWins * 2 > played, lines.join(' | '));
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall checks passed');

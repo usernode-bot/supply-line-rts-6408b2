@@ -41,6 +41,15 @@ const SETT_TARGETS = { small: 3, medium: 4, large: 5 };
 // storm actually resolves instead of grinding.
 const COMMIT_RATIO = 2.4;
 
+// How much force this commander demands before it storms a town, as a
+// multiple of the garrison it remembers. Lower = commits sooner with the
+// army it already has, closer to the ~2.12 break-even. Only a commander
+// carrying `commitRatio` moves off the shared 2.4 (veryhard), so every
+// other tier keeps the exact behaviour it was calibrated with.
+function commitRatio(diff) {
+  return diff.commitRatio || COMMIT_RATIO;
+}
+
 export function aiTick(game, S, owner = 1, state = game.ai) {
   if (game.result) return;
   // state.diffKey lets a harness (or attract variant) pit difficulties
@@ -298,7 +307,7 @@ function rankTargets(game, state, x, y, size, diff) {
         field += (t.size || 0) * Math.max(0.4, 1 - tAge / 1800);
       }
     }
-    const need = Math.max(2, g * COMMIT_RATIO);
+    const need = Math.max(2, g * commitRatio(diff));
     const d = dist(x, y, k.x + 1, k.y + 1);
     let score = 100 - d * 1.2 - need * 3 - field * 2.5;
     // an opportunist (hard) leans toward freshly discovered settlements —
@@ -976,7 +985,7 @@ function reinforce(game, S, setts, mine, state, diff) {
     if (!rec.order) continue;
     const army = mine.find(b => b.id === rec.id);
     if (!army) continue;
-    const want = Math.ceil(Math.max(2, estGarrison(state, rec.targetId) * COMMIT_RATIO)) + 2;
+    const want = Math.ceil(Math.max(2, estGarrison(state, rec.targetId) * commitRatio(diff))) + 2;
     if (army.count.deploy >= want) continue;
     let sent = 0;
     for (const b of mine) {
