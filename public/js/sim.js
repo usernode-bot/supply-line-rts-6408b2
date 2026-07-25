@@ -100,11 +100,37 @@ export const C = {
 //   wallSpan        — max tiles in one shield chain (#205)
 //   wallChoke       — seal narrow mountain passes on the approach (hard, #205)
 //   wallGarrison    — garrison and arm finished shield walls (hard, #205)
+//   evalTargets     — score remembered towns on force-needed/distance/freshness
+//                     instead of marching at the nearest one (#207)
+//   reinforce       — feed idle strength into a live siege by re-issuing the
+//                     same order, which is what tickMerge folds together (#207)
+//   threatTicks     — how long a sighted war party stays remembered (#207)
+//   armies          — how many offensives may run at once (#207)
+//   guard           — home guard held back by a town under remembered threat
+//   guardRear       — home guard held by the frontier town when it is quiet
+//                     (quiet rear towns keep the classic 4 either way)
+//   commitTicks     — attack the best available odds after this long idle (#207)
+//   settBonus       — extra settlements wanted over the base size target (#207)
+//   scouts          — concurrent scouts, and a deterministic probe rotation (#207)
+//   staleTicks      — intel older than this is worth re-scouting (#207)
+//   reactiveArm     — arm a besieged town's garrison the moment it is hit (#207)
+//   raid            — hunt remembered caravans and field hands (hard, #207)
+//   raidTicks       — minimum ticks between raids (hard, #207)
+//   breachWalls     — punch through a remembered wall ring on the way in (hard)
+//   foodLines       — run an internal caravan to a train-gated town (hard, #207)
+//   flank           — relieve a siege from behind the besieger for REAR_MULT (hard)
 export const DIFF = {
   easy:   { muster: 24, expandTicks: 950, scoutTicks: 550, carriers: false, memoryTicks: 3000, siteNoise: 0.4 },
-  normal: { muster: 18, expandTicks: 750, scoutTicks: 450, wallCap: 6, wallTicks: 900, wallSpan: 3 },
+  normal: { muster: 18, expandTicks: 750, scoutTicks: 450, wallCap: 6, wallTicks: 900, wallSpan: 3,
+            evalTargets: true, reinforce: true, threats: true, threatTicks: 200, armies: 1,
+            guard: 6, guardRear: 4, commitTicks: 2400, settBonus: 1, scouts: 1, staleTicks: 900,
+            reactiveArm: true },
   hard:   { muster: 13, expandTicks: 570, scoutTicks: 350, threats: true, rumors: true, resupply: true, recencyTarget: true,
-            wallCap: 14, wallTicks: 600, wallSpan: 5, wallChoke: true, wallGarrison: true },
+            wallCap: 14, wallTicks: 600, wallSpan: 5, wallChoke: true, wallGarrison: true,
+            evalTargets: true, reinforce: true, threatTicks: 600, armies: 2,
+            guard: 8, guardRear: 5, commitTicks: 1800, settBonus: 2, scouts: 2, staleTicks: 900,
+            reactiveArm: true, raid: true, raidTicks: 1200, breachWalls: true, foodLines: true,
+            flank: true },
 };
 
 // ---------------------------------------------------------------- helpers
@@ -361,7 +387,7 @@ export function newGame(seedStr, sizeKey, difficulty, pvp) {
     pillageAlarmT: -999,                   // last "land stripped bare" toast (transient)
     supplyAlarmT: [-999, -999],            // last "low supplies" toast per owner (transient, #105)
     ruins: [],                             // destroyed settlements' footprints {id,x,y,owner,t} — cosmetic (#106)
-    ai: { known: {}, knownWalls: {}, threats: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
+    ai: { known: {}, knownWalls: {}, threats: {}, prey: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, lastRaid: 0, attacking: false, armies: [], armyId: null, scoutIds: [], scoutId: null, scoutSeq: 0, raid: null, expand: null },
   };
   if (pvp) {
     game.pvp = true;
@@ -3711,7 +3737,7 @@ export function deserialize(data, prev) {
     pillageAlarmT: -999,
     supplyAlarmT: [-999, -999],
     ruins: data.ruins || [], // older saves have none
-    ai: data.ai || { known: {}, threats: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, attacking: false, armyId: null, scoutId: null, expand: null },
+    ai: data.ai || { known: {}, knownWalls: {}, threats: {}, prey: {}, rumors: [], lastExpand: 0, lastScout: 0, lastAttack: 0, lastRaid: 0, attacking: false, armies: [], armyId: null, scoutIds: [], scoutId: null, scoutSeq: 0, raid: null, expand: null },
   };
   if (data.pvp) {
     game.pvp = true;
@@ -3725,6 +3751,21 @@ export function deserialize(data, prev) {
     game.wallMemo = game.wallMemos[game.me];
   }
   if (game.ai && !game.ai.knownWalls) game.ai.knownWalls = {}; // pre-#187 saves
+  if (game.ai && !game.ai.prey) game.ai.prey = {};             // pre-#207 saves
+  if (game.ai && !Array.isArray(game.ai.armies)) {
+    // pre-#207 saves ran a single campaign off armyId/siege — carry the
+    // in-flight offensive over as the first entry of the army list
+    game.ai.armies = game.ai.armyId != null
+      ? [{ id: game.ai.armyId, targetId: null, order: null, reinf: [],
+           siege: game.ai.siege || null, t: game.ai.lastAttack || 0, start: 0 }]
+      : [];
+  }
+  if (game.ai && !Array.isArray(game.ai.scoutIds)) {
+    game.ai.scoutIds = game.ai.scoutId != null ? [game.ai.scoutId] : [];
+  }
+  if (game.ai && game.ai.scoutSeq == null) game.ai.scoutSeq = 0;
+  if (game.ai && game.ai.raid === undefined) game.ai.raid = null;
+  if (game.ai && game.ai.lastRaid == null) game.ai.lastRaid = 0;
   // walls load BEFORE the settlements re-till below, so previewFields
   // sees wallAt and reproduces the live land division exactly (#187)
   for (const wd of data.walls || []) {

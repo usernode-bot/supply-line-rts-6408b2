@@ -415,10 +415,10 @@ function findRemoteTile(game) {
   S.opMove(g, b, far.x + 0.5, far.y + 0.5);
   run(g, 400);
   const gA = S.wallGarrisonTotal(wA);
-  // 6 arrivals fit under the 8-unit cap (#199/#202), so ALL of them get in
-  // — the stale pre-#202 expectation here was the cap itself
-  check('every arrival garrisoned (under the cap)',
-    gA === 6 && gA <= S.C.WALL_GARRISON_CAP, `garrisoned=${gA}`);
+  // 10 arrivals against the 8-unit cap (#199/#202): the tile fills to the
+  // cap and the surplus stays outside
+  check('the arrivals filled the tile to the cap',
+    gA === S.C.WALL_GARRISON_CAP, `garrisoned=${gA} cap=${S.C.WALL_GARRISON_CAP}`);
   check('their rations landed in bellies, capped',
     wA.garrFood <= gA * S.C.FOOD_PER_UNIT + 1e-6 && wA.garrFood > 0,
     `garrFood=${wA.garrFood.toFixed(2)} cap=${gA * S.C.FOOD_PER_UNIT}`);
