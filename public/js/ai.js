@@ -15,6 +15,13 @@
 //     the *same* order, which is exactly what tickMerge folds together.
 //   * raiding (hard) — a small party sent after remembered caravans and
 //     field hands, the cheapest damage on the board.
+// Very Hard layers on top of Hard again (#208 follow-up): it is evaluated
+// twice as often (evalTicks), ranks a town down when a remembered enemy
+// field army is covering it (fieldThreats), stacks a second army onto a
+// stalled assault (massAssault), runs its caravans through a siege ring
+// and out to its walls (siegeRun / wallSupply), raids with two parties,
+// arms farm hands the land can't pay for (reroleSurplus) and rotates a
+// bled army home to heal (rotateHome). Still zero hidden information.
 // Easy is untouched: it holds none of the new flags, so every new branch
 // falls through to the original code path.
 //
@@ -34,11 +41,22 @@ const SETT_TARGETS = { small: 3, medium: 4, large: 5 };
 // storm actually resolves instead of grinding.
 const COMMIT_RATIO = 2.4;
 
+// How much force this commander demands before it storms a town, as a
+// multiple of the garrison it remembers. Lower = commits sooner with the
+// army it already has, closer to the ~2.12 break-even. Only a commander
+// carrying `commitRatio` moves off the shared 2.4 (veryhard), so every
+// other tier keeps the exact behaviour it was calibrated with.
+function commitRatio(diff) {
+  return diff.commitRatio || COMMIT_RATIO;
+}
+
 export function aiTick(game, S, owner = 1, state = game.ai) {
   if (game.result) return;
   // state.diffKey lets a harness (or attract variant) pit difficulties
-  // against each other per-owner; real matches fall through to the game's
-  const diff = S.DIFF[state.diffKey || game.difficulty];
+  // against each other per-owner; real matches fall through to the game's.
+  // An unknown key (a save from a newer build) degrades to normal rather
+  // than throwing on the first flag read.
+  const diff = S.DIFF[state.diffKey || game.difficulty] || S.DIFF.normal;
   ensureState(state);
   const mine = game.blobs.filter(b => !b.dead && b.owner === owner);
   const setts = game.settlements.filter(s => s.owner === owner);
@@ -49,6 +67,7 @@ export function aiTick(game, S, owner = 1, state = game.ai) {
   develop(game, S, setts, mine, state, diff, frontier);
   defend(game, S, setts, mine, state, diff, frontier);
   walls(game, S, setts, mine, state, diff, owner);
+  wallSupply(game, S, setts, state, diff, owner);
   expand(game, S, setts, mine, state, diff);
   scout(game, S, setts, mine, state, diff, owner);
   attack(game, S, setts, mine, state, diff);
@@ -57,10 +76,11 @@ export function aiTick(game, S, owner = 1, state = game.ai) {
   muster(game, S, setts, mine, state, diff);
 
   // legacy mirrors: older saves, the attract pool and anything else
-  // reading state.armyId / scoutId / attacking keep seeing sane values
+  // reading state.armyId / scoutId / attacking / raid keep seeing sane values
   state.armyId = state.armies.length ? state.armies[0].id : null;
   state.scoutId = state.scoutIds.length ? state.scoutIds[0] : null;
   state.attacking = state.armies.length > 0;
+  state.raid = state.raids.length ? state.raids[0] : null;
 }
 
 // Fill in fields a save (or an attract-mode caller) predates. Keeps every
@@ -85,13 +105,17 @@ function ensureState(state) {
   }
   if (state.scoutSeq == null) state.scoutSeq = 0;
   if (state.raid === undefined) state.raid = null;
+  // one raid slot became many (veryhard): migrate the legacy single
+  // record, and keep mirroring raids[0] back onto state.raid each tick
+  if (!Array.isArray(state.raids)) state.raids = state.raid ? [state.raid] : [];
+  if (!state.reroleT) state.reroleT = {};
 }
 
 // Is this blob already spoken for by another pass?
 function isTasked(state, id) {
   if (state.expand && state.expand.blobId === id) return true;
   if (state.wallPlan && state.wallPlan.blobId === id) return true;
-  if (state.raid && state.raid.blobId === id) return true;
+  for (const r of state.raids) if (r.blobId === id) return true;
   if (state.scoutIds.includes(id)) return true;
   for (const a of state.armies) if (a.id === id) return true;
   return false;
@@ -102,6 +126,7 @@ function clearTask(state, id) {
   state.armies = state.armies.filter(a => a.id !== id);
   state.scoutIds = state.scoutIds.filter(x => x !== id);
   if (state.wallPlan && state.wallPlan.blobId === id) state.wallPlan = null;
+  state.raids = state.raids.filter(r => r.blobId !== id);
   if (state.raid && state.raid.blobId === id) state.raid = null;
 }
 
@@ -262,9 +287,29 @@ function rankTargets(game, state, x, y, size, diff) {
       walls++; wallG += (w.g || 0);
     }
     g += diff.breachWalls ? wallG * 0.5 : wallG;
-    const need = Math.max(2, g * COMMIT_RATIO);
+    // remembered enemy FIELD armies near the town (veryhard): a relief
+    // force fights in the open, so it counts at 1× rather than the
+    // garrison's ~4.5×, but ignoring it entirely is how an assault walks
+    // into two defences at once. Memory-only, like everything else here.
+    //
+    // It steers WHICH town, and only that — measured, not assumed. An
+    // enemy's own muster loiters beside its capital, so folding a sighted
+    // relief force into the commit bar roughly doubles it on the one town
+    // that matters, and the commander dithers until commitTicks instead
+    // of fighting: head-to-head against Hard that cost ~0.19 of the score
+    // rate. As a pure ranking penalty it does the useful half — take the
+    // town they left uncovered — and none of the paralysis.
+    let field = 0;
+    if (diff.fieldThreats) {
+      for (const t of Object.values(state.threats || {})) {
+        if (dist(t.x, t.y, k.x + 1, k.y + 1) > 10) continue;
+        const tAge = t.t == null ? 0 : Math.max(0, game.tick - t.t);
+        field += (t.size || 0) * Math.max(0.4, 1 - tAge / 1800);
+      }
+    }
+    const need = Math.max(2, g * commitRatio(diff));
     const d = dist(x, y, k.x + 1, k.y + 1);
-    let score = 100 - d * 1.2 - need * 3;
+    let score = 100 - d * 1.2 - need * 3 - field * 2.5;
     // an opportunist (hard) leans toward freshly discovered settlements —
     // typically the enemy's newest, weakest outposts
     if (diff.recencyTarget && age < 1500) score += 15 * (1 - age / 1500);
@@ -337,8 +382,66 @@ function develop(game, S, setts, mine, state, diff, frontier) {
       const r = S.opFieldRole(game, s, 'deploy', s.garrison.deploy - guard);
       if (r.ok) sendToRally(game, S, setts, state, diff, r.blob);
     }
+    reroleSurplus(game, S, setts, state, diff, s);
   }
   foodLines(game, S, setts, diff);
+}
+
+// Total mobilization (veryhard): hands beyond the plots a town can
+// actually pay for earn NOTHING — farmYield only pays for cells a farmer
+// is actually standing on, and growth stops adding hands at
+// worthwhileCells but never removes the ones a returning field crew left
+// behind. Those hands are worth more as fighters. Same two ops a player
+// would use: arm them (CONVERT_TICKS) and march them to the rally.
+// Garrisoned hands go first (fielded as one group, split so only the
+// surplus leaves); after that the surplus is taken off the plots.
+//
+// The armed group is deliberately NOT marched anywhere: while it is
+// still farm-role, any move onto own tilled land runs fieldAssign, which
+// cancels the pending arm-up and puts the hands straight back on the
+// plots. They wait out CONVERT_TICKS where they stand, and muster()
+// walks them to the rally on a later pass — once they are fighters.
+const REROLE_COOLDOWN = 900;
+
+function reroleSurplus(game, S, setts, state, diff, s) {
+  if (!diff.reroleSurplus) return;
+  if (s.building || s.convert) return;
+  if (S.besieged(game, s) || game.tick - s.lastHitT < 600) return;
+  const last = state.reroleT[s.id] || -Infinity;
+  if (game.tick - last < REROLE_COOLDOWN) return;
+  const y = S.farmYield(game, s);
+  let surplus = S.workingCount(game, s) + s.garrison.farm - y.worthwhileCells;
+  if (surplus < 3) return;
+
+  if (s.garrison.farm >= 3) {
+    const r = S.opFieldFarmerGroup(game, s);
+    if (!r.ok) return;
+    state.reroleT[s.id] = game.tick;
+    const group = r.blob;
+    if (surplus >= S.total(group)) {
+      if (!S.opSetRole(game, group, 'deploy').ok) S.opSetRole(game, group, 'farm');
+      return;
+    }
+    const split = S.opSplit(game, group, surplus);
+    if (!split.ok) { S.opSetRole(game, group, 'farm'); return; }
+    if (!S.opSetRole(game, split.blob, 'deploy').ok) S.opSetRole(game, split.blob, 'farm');
+    S.opSetRole(game, group, 'farm'); // the rest disperses back onto the plots
+    return;
+  }
+
+  // the hands are already out on the fields — arm the surplus where it
+  // stands, lowest id first so the choice stays deterministic
+  const hands = game.blobs
+    .filter(b => !b.dead && b.owner === s.owner && b.working === s.id
+      && !b.order && !b.convert && b.count.farm === S.total(b))
+    .sort((a, b) => a.id - b.id);
+  if (!hands.length) return;
+  state.reroleT[s.id] = game.tick;
+  for (const b of hands) {
+    if (surplus <= 0) break;
+    if (!S.opSetRole(game, b, 'deploy').ok) continue;
+    surplus -= S.total(b);
+  }
 }
 
 // Internal food lines (hard, #207): a town whose flow can't even feed its
@@ -492,7 +595,7 @@ function rebuild(game, S, mine, state, diff) {
   if (alive < S.C.SETT_COST) return; // truly beaten — checkResult ends it
   if (diff.evalTargets) {
     // nothing left to campaign from: every survivor belongs to the refound
-    state.armies = []; state.raid = null; state.wallPlan = null; state.scoutIds = [];
+    state.armies = []; state.raid = null; state.raids = []; state.wallPlan = null; state.scoutIds = [];
   }
   if (state.expand) {
     const b = mine.find(x => x.id === state.expand.blobId);
@@ -668,15 +771,20 @@ function attack(game, S, setts, mine, state, diff) {
     for (const s of setts) pool += s.garrison.deploy;
     if (pool < 2 * diff.muster + (diff.guard || 4)) return;
   }
-  const ranked = rankTargets(game, state, army.x, army.y, army.count.deploy, diff)
-    .filter(r => !busy.has(r.id));
-  if (!ranked.length) return;
+  const all = rankTargets(game, state, army.x, army.y, army.count.deploy, diff);
+  const ranked = all.filter(r => !busy.has(r.id));
   let pick = ranked.find(r => r.takeable);
   // if nothing is takeable for far too long, take the best odds anyway —
   // a commander that never commits loses on the economy
   if (!pick && diff.commitTicks && game.tick - (state.lastAttack || 0) > diff.commitTicks) pick = ranked[0];
+  // mass assault (veryhard): with no fresh target worth taking, join the
+  // assault already running rather than idling at the rally. Issuing the
+  // identical order is what tickMerge folds together, so the two columns
+  // arrive as one army instead of two half-strength ones.
+  if (!pick && diff.massAssault) pick = pickMassTarget(game, mine, state, all);
   if (!pick) return;
-  const need = pick.takeable ? Math.max(diff.muster, Math.ceil(pick.need)) : diff.muster;
+  const need = pick.mass ? diff.muster
+    : pick.takeable ? Math.max(diff.muster, Math.ceil(pick.need)) : diff.muster;
   if (army.count.deploy < need) return; // keep massing
 
   const rec = {
@@ -687,6 +795,21 @@ function attack(game, S, setts, mine, state, diff) {
   state.armies.push(rec);
   state.lastAttack = game.tick;
   if (diff.carriers !== false) attachCarriers(game, S, setts, mine, army, pick.d);
+}
+
+// The busiest target still short of the force it needs (veryhard). Only
+// targets whose assigned army is genuinely undersized qualify — piling
+// onto a siege that is already winning wastes the second column.
+function pickMassTarget(game, mine, state, ranked) {
+  for (const rec of state.armies) {
+    if (rec.targetId == null) continue;
+    const cur = mine.find(b => b.id === rec.id);
+    if (!cur) continue;
+    const t = ranked.find(r => r.id === rec.targetId);
+    if (!t || cur.count.deploy >= t.need) continue;
+    return { ...t, mass: true };
+  }
+  return null;
 }
 
 // March on the town — through a remembered wall tile first when this
@@ -781,6 +904,13 @@ function manageArmy(game, S, setts, mine, state, diff, rec) {
   // staying on the current target is the default: a breach that just
   // finished should be followed straight into the town behind it
   const pick = ranked.find(r => r.id === rec.targetId) || ranked.find(r => r.takeable);
+  // rotate home (veryhard): a bled column with nothing it can actually
+  // take heals at home (tickHeal only mends units inside own territory)
+  // instead of loitering in the field at half HP
+  if (diff.rotateHome && (!pick || !pick.takeable) && S.blobHealth(army) < diff.rotateHome) {
+    goHome(game, S, setts, diff, army);
+    return false;
+  }
   if (!pick) return false;
   if (!issueArmyOrder(game, S, state, diff, army, rec, pick)) return false;
   rec.targetId = pick.id;
@@ -855,7 +985,7 @@ function reinforce(game, S, setts, mine, state, diff) {
     if (!rec.order) continue;
     const army = mine.find(b => b.id === rec.id);
     if (!army) continue;
-    const want = Math.ceil(Math.max(2, estGarrison(state, rec.targetId) * COMMIT_RATIO)) + 2;
+    const want = Math.ceil(Math.max(2, estGarrison(state, rec.targetId) * commitRatio(diff))) + 2;
     if (army.count.deploy >= want) continue;
     let sent = 0;
     for (const b of mine) {
@@ -886,28 +1016,43 @@ function estGarrison(state, id) {
 function raid(game, S, setts, mine, state, diff) {
   if (!diff.raid) return;
   const every = diff.raidTicks || 1200;
-  if (state.raid) {
-    const b = mine.find(x => x.id === state.raid.blobId);
-    if (!b) { state.raid = null; return; }
-    if (game.tick - state.raid.t > every * 2 || S.fedMeter(b) < 0.45) {
-      goHome(game, S, setts, diff, b);
-      state.raid = null;
-      return;
+  // -- steer the parties already out (one slot on hard, two on veryhard) --
+  const taken = new Set();
+  for (let i = state.raids.length - 1; i >= 0; i--) {
+    const rec = state.raids[i];
+    let b = mine.find(x => x.id === rec.blobId);
+    if (!b) {
+      // absorbed by another group — follow the merge log (#141) instead of
+      // declaring the party lost, exactly as manageArmy does
+      let cur = rec.blobId, hops = 0;
+      while (hops++ < 10 && game.mergeLog && game.mergeLog[cur] != null) {
+        cur = game.mergeLog[cur];
+        const m = mine.find(x => x.id === cur);
+        if (m) { b = m; break; }
+      }
+      if (!b) { state.raids.splice(i, 1); continue; }
+      rec.blobId = b.id;
     }
-    if (b.order) return;
-    const p = pickPrey(game, state, b.x, b.y);
+    if (game.tick - rec.t > every * 2 || S.fedMeter(b) < 0.45) {
+      goHome(game, S, setts, diff, b);
+      state.raids.splice(i, 1);
+      continue;
+    }
+    if (b.order) { if (rec.preyId != null) taken.add(rec.preyId); continue; }
+    const p = pickPrey(game, state, b.x, b.y, taken);
     if (p && S.opMove(game, b, p.x, p.y, { kind: 'blob', id: p.id }).ok) {
-      state.raid.preyId = p.id;
+      rec.preyId = p.id;
+      taken.add(p.id);
     } else {
       goHome(game, S, setts, diff, b);
-      state.raid = null;
+      state.raids.splice(i, 1);
     }
-    return;
   }
+  if (state.raids.length >= (diff.raidParties || 1)) return;
   if (game.tick - (state.lastRaid || 0) < every) return;
   for (const s of setts) if (S.besieged(game, s)) return;  // no raiding under siege
   const seed = setts[0];
-  if (!pickPrey(game, state, seed.x + 1, seed.y + 1)) return;
+  if (!pickPrey(game, state, seed.x + 1, seed.y + 1, taken)) return;
   // a small fast party: spare hands if any are loose, else four off a
   // garrison that can lose them without dropping below its guard
   let b = mine.find(x =>
@@ -921,18 +1066,20 @@ function raid(game, S, setts, mine, state, diff) {
     if (!r.ok) return;
     b = r.blob;
   }
-  const p = pickPrey(game, state, b.x, b.y);
+  const p = pickPrey(game, state, b.x, b.y, taken);
   if (!p || !S.opMove(game, b, p.x, p.y, { kind: 'blob', id: p.id }).ok) return;
   S.opPillage(game, b, true); // raiders live off the land they cross
-  state.raid = { blobId: b.id, preyId: p.id, t: game.tick };
+  state.raids.push({ blobId: b.id, preyId: p.id, t: game.tick });
   state.lastRaid = game.tick;
 }
 
 // Best remembered soft target: caravans over field hands, fat over thin,
-// close over far, fresh over stale.
-function pickPrey(game, state, x, y) {
+// close over far, fresh over stale. `taken` keeps two parties (veryhard)
+// off the same caravan.
+function pickPrey(game, state, x, y, taken) {
   let best = null, bs = -Infinity;
   for (const [idStr, k] of Object.entries(state.prey)) {
+    if (taken && taken.has(+idStr)) continue;
     const age = game.tick - (k.t || 0);
     const s = (k.kind === 'carrier' ? 20 : 10) + (k.n || 1) * 2
       - dist(x, y, k.x, k.y) * 0.8 - age * 0.01;
@@ -943,7 +1090,48 @@ function pickPrey(game, state, x, y) {
 
 // -- defend -------------------------------------------------------------
 
+// Run the siege line (veryhard, #181): a caravan bound for a surrounded
+// town holds outside the ring by default and the town starves. Ordering
+// the route to run it is the player's own toggle — carriers can die
+// doing it, which is exactly the trade a besieged town wants. The flag
+// is cleared again the moment the ring lifts, so ordinary hauls go back
+// to waiting the fight out.
+function siegeRuns(game, S, setts, diff) {
+  if (!diff.siegeRun) return;
+  for (const r of game.routes) {
+    if (r.targetKind !== 'settlement') continue;
+    const tgt = setts.find(s => s.id === r.targetId);
+    if (!tgt || r.owner !== tgt.owner) continue;
+    const want = S.besieged(game, tgt);
+    if (!!r.runSiege !== want) S.opSiegeRun(game, r.id, want);
+  }
+}
+
+// Provision the walls (veryhard, #200): a wall garrison eats out of the
+// tile's own stash, refilled by a settlement drip only inside territory —
+// which is why hard leaves its choke plugs unmanned. A caravan reaches
+// anywhere, so a supplied plug can actually hold the pass. One route per
+// evaluation so this can never strip a town of its carriers.
+function wallSupply(game, S, setts, state, diff, owner) {
+  if (!diff.wallSupply || !game.walls || !game.walls.length) return;
+  for (const w of game.walls) {
+    if (w.owner !== owner || w.building || w.convert) continue;
+    if (S.wallGarrisonTotal(w) <= 0) continue;
+    if (S.wallStockFrac(w) > 0.35 && !S.wallStarving(w)) continue;
+    const fed = game.routes.some(r =>
+      r.owner === owner && r.targetKind === 'wall' && r.targetId === w.id
+      && (r.carrierIds || []).some(id => game.blobs.some(b => !b.dead && b.id === id)));
+    if (fed) continue;
+    const rich = setts.find(s =>
+      !s.building && !s.convert && s.stockpile > 250 && s.garrison.supply >= 3);
+    if (!rich) return;
+    S.opSupplyRoute(game, rich, { kind: 'wall', id: w.id });
+    return;
+  }
+}
+
 function defend(game, S, setts, mine, state, diff, frontier) {
+  siegeRuns(game, S, setts, diff);
   // proactive (hard): a remembered enemy war party bearing down on one of
   // our settlements arms its garrison NOW (arming takes ~10 s, so waiting
   // for the first hit is too late) and vectors an intercept
@@ -990,9 +1178,15 @@ function defend(game, S, setts, mine, state, diff, frontier) {
           if (dist(k.x, k.y, w.x + 0.5, w.y + 0.5) <= range) { close = true; break; }
         }
         if (!close) continue;
-        // only walls a settlement's drip can feed get a fresh garrison
+        // only walls a settlement's drip can feed get a fresh garrison —
+        // unless this commander runs caravans out to its walls (veryhard),
+        // in which case any nearby town can man it and wallSupply feeds it
         const home = setts.find(x => !x.building && S.garrisonTotal(x) >= 8 &&
-          S.inTerritory(game, x, w.x + 0.5, w.y + 0.5));
+          S.inTerritory(game, x, w.x + 0.5, w.y + 0.5))
+          || (diff.wallSupply
+            ? setts.find(x => !x.building && S.garrisonTotal(x) >= 8
+              && dist(x.x + 1, x.y + 1, w.x + 0.5, w.y + 0.5) <= 16)
+            : null);
         if (!home) continue;
         const role = home.garrison.supply >= 4 ? 'supply'
           : home.garrison.farm >= 4 ? 'farm'
@@ -1120,8 +1314,10 @@ function walls(game, S, setts, mine, state, diff, owner) {
       return;
     }
     if (!b.order) {
-      // run finished (or was cancelled by the sim)
-      if (diff.wallGarrison && plan.kind === 'shield') {
+      // run finished (or was cancelled by the sim). A choke plug is manned
+      // too once this commander can caravan food out to it (veryhard) —
+      // otherwise it sits outside territory where a garrison would starve.
+      if (diff.wallGarrison && (plan.kind === 'shield' || (diff.wallSupply && plan.kind === 'choke'))) {
         const done = plan.tiles.filter(t => {
           const wid = game.wallAt[t.y * game.map.w + t.x];
           const w = wid && game.walls.find(x => x.id === wid);

@@ -53,12 +53,23 @@ backdrop — it runs the same sim/AI modules via dynamic `import()`.
   keep sim state JSON-serializable.
 - Input is pointer-first: every action must be reachable by tap alone;
   mouse/keyboard bindings are shortcuts, never the only path.
-- The three AI commanders carry **fixed Elo ratings** measured offline by
-  `npm run calibrate` (Easy/Hard sparring vs the 1000-pinned Normal) and
-  committed to `calibration/ai-ratings.json`, which is the single source
-  of truth the server seeds from. Nothing at runtime ever moves an AI
-  rating. **If you retune `DIFF` in `public/js/sim.js`, re-run
-  `npm run calibrate`, bump the artifact's `version`, and commit it** —
-  otherwise the published commander ratings describe the old AI.
+- The AI commanders carry **fixed Elo ratings** measured offline by
+  `npm run calibrate` and committed to `calibration/ai-ratings.json`,
+  which is the single source of truth the server seeds from. Nothing at
+  runtime ever moves an AI rating. **If you retune `DIFF` in
+  `public/js/sim.js`, re-run `npm run calibrate`, bump the artifact's
+  `version`, and commit it** — otherwise the published commander ratings
+  describe the old AI.
+- **Not every persona is measured against Normal.** Each one spars the
+  strongest opponent that can still resolve it, and the fits chain in
+  that order (`OPPONENT_OF` in `test/calibrate-ai.mjs`): Easy and Hard vs
+  the 1000-pinned Normal, **Very Hard vs Hard**, with its fit anchored on
+  Hard's rating from the same run. Very Hard is chained because the
+  anchor saturates — it and Hard beat Normal on the same maps, so a
+  40-match sample against Normal fitted them to an identical rating
+  twice running. If you add a tier, pick its opponent the same way, list
+  it in `CHALLENGERS` *after* whatever it chains onto, and expect the
+  artifact to record `opponent` / `opponent_rating` per persona and per
+  log row so the arithmetic stays auditable.
 - No build step and no new runtime dependencies — plain ES modules
   served from `public/`.

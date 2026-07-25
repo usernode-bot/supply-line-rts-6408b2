@@ -40,10 +40,13 @@ async function generateOne() {
     const ai0 = freshAiState();
     while (g.tick < WARMUP_TICKS && !g.result) {
       const sliceEnd = Math.min(WARMUP_TICKS, g.tick + TICKS_PER_SLICE);
+      // both sides run the Normal commander, so the cadence is the classic
+      // 20 either way — read from the table so there is one definition
+      const cad = S.aiCadence(g.difficulty);
       while (g.tick < sliceEnd && !g.result) {
         S.step(g);
-        if (g.tick % 20 === 0) aiTick(g, S, 1, g.ai);
-        else if (g.tick % 20 === 10) aiTick(g, S, 0, ai0);
+        if (g.tick % cad === 0) aiTick(g, S, 1, g.ai);
+        else if (g.tick % cad === (cad >> 1)) aiTick(g, S, 0, ai0);
         // keep owner 0's pathing omniscient, matching the solo AI's
         // rules (updateVision rewrites fog every 5 ticks)
         if (g.tick % 5 === 0) g.fog.fill(2);

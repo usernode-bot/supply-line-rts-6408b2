@@ -63,7 +63,7 @@ app.get('/api/attract-snapshot', (_req, res) => {
 });
 
 const RESULTS = new Set(['win', 'loss', 'surrender']);
-const DIFFICULTIES = new Set(['easy', 'normal', 'hard', 'pvp']);
+const DIFFICULTIES = new Set(['easy', 'normal', 'hard', 'veryhard', 'pvp']);
 const MAP_SIZES = new Set(['xsmall', 'small', 'medium', 'large']);
 
 // Staging demo rows use negative user ids / ids in the 9001xx range so
@@ -537,7 +537,9 @@ async function start() {
         (900002, -2, 'Staging demo Forager',       'loss',      'hard',   2210, 'staging-demo-2'),
         (900003, -3, 'Staging demo Warden',        'win',       'easy',   1385, 'staging-demo-3'),
         (900004, -1, 'Staging demo Quartermaster', 'surrender', 'normal', 940,  'staging-demo-4'),
-        (900005, -2, 'Staging demo Forager',       'win',       'normal', 1990, 'staging-demo-5')
+        (900005, -2, 'Staging demo Forager',       'win',       'normal', 1990, 'staging-demo-5'),
+        (900008, -1, 'Staging demo Quartermaster', 'loss',      'veryhard', 2480, 'staging-demo-8'),
+        (900009, -3, 'Staging demo Warden',        'win',       'veryhard', 3310, 'staging-demo-9')
       ON CONFLICT (id) DO NOTHING
     `);
     await pool.query(`
@@ -557,15 +559,17 @@ async function start() {
         (900102, -2, 'Staging demo Forager',       'open', 'medium', 'staging-demo-b', NOW())
       ON CONFLICT (id) DO UPDATE SET status = 'open', host_seen_at = NOW()
     `);
-    // Demo players for the Ratings panel: one above the Hard commander
-    // (only reachable via PvP — solo caps at Hard), one below Normal.
-    // The AI rows come from the calibration artifact in every env.
+    // Demo players for the Ratings panel: one above every commander
+    // (only reachable via PvP — solo caps at Very Hard), one between the
+    // tiers, one below Normal. The AI rows come from the calibration
+    // artifact in every env.
     await pool.query(`
       INSERT INTO ratings (participant, username, rating, rated_matches, calib_matches, calib_version)
       VALUES
         ('user:-1', 'Staging demo Quartermaster', 1285, 24, 0, 0),
         ('user:-2', 'Staging demo Forager',        968, 11, 0, 0),
-        ('user:-3', 'Staging demo Warden',        1012,  7, 0, 0)
+        ('user:-3', 'Staging demo Warden',        1012,  7, 0, 0),
+        ('user:-4', 'Staging demo Marshal',       1340, 31, 0, 0)
       ON CONFLICT (participant) DO NOTHING
     `);
     // Give the seeded history rows plausible deltas so the "Yours" list
@@ -573,7 +577,7 @@ async function start() {
     await pool.query(`
       UPDATE matches SET rating_delta = v.d, rating_after = v.a
       FROM (VALUES (900001, 12.0, 1012.0), (900002, -9.0, 991.0), (900003, 0.0, 1012.0),
-                   (900004, -14.0, 998.0), (900005, 11.0, 1009.0)) AS v(id, d, a)
+                   (900004, -14.0, 998.0), (900005, 11.0, 1009.0), (900008, -16.0, 993.0)) AS v(id, d, a)
       WHERE matches.id = v.id AND matches.rating_delta IS NULL
     `);
   }

@@ -8,7 +8,10 @@
 import { createRequire } from 'node:module';
 import * as S from '../public/js/sim.js';
 import { aiTick } from '../public/js/ai.js';
-import { adjudicate, scoreForChallenger, rounds, totals, SIZES, CALIB_TICK_CAP } from './calibrate-ai.mjs';
+import {
+  adjudicate, scoreForChallenger, rounds, totals, SIZES, CALIB_TICK_CAP,
+  CHALLENGERS, OPPONENT_OF, ANCHOR_PERSONA,
+} from './calibrate-ai.mjs';
 
 const require = createRequire(import.meta.url);
 const elo = require('../elo.js');
@@ -60,6 +63,17 @@ const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
   check('seeds are distinct per round', new Set(rs.map(r => r.seed)).size === 4);
   check('the challenger never faces itself', rs.every(r => r.challenger === 'hard'));
   check('the tick cap is 2h of 1x play', CALIB_TICK_CAP === 36000);
+  check('every round names the reference opponent',
+    rs.every(r => r.opponent === OPPONENT_OF.hard));
+  check('easy and hard spar the pinned anchor, veryhard spars hard',
+    OPPONENT_OF.easy === ANCHOR_PERSONA && OPPONENT_OF.hard === ANCHOR_PERSONA
+    && OPPONENT_OF.veryhard === 'hard', JSON.stringify(OPPONENT_OF));
+  check('no persona is measured against itself',
+    Object.entries(OPPONENT_OF).every(([c, o]) => c !== o));
+  check('a chained persona is fitted after the opponent it chains onto',
+    Object.entries(OPPONENT_OF).every(([c, o]) =>
+      o === ANCHOR_PERSONA || CHALLENGERS.indexOf(o) < CHALLENGERS.indexOf(c)),
+    JSON.stringify(CHALLENGERS));
 }
 
 // ------------------------------------------- 4. the committed artifact
@@ -70,21 +84,66 @@ const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
     Number.isInteger(artifact.version) && typeof artifact.generated_at === 'string');
   check('anchors ai:normal at 1000',
     artifact.anchor.participant === 'ai:normal' && artifact.anchor.rating === 1000);
-  check('rates exactly ai:easy and ai:hard',
-    artifact.personas.length === 2
+  check('rates exactly ai:easy, ai:hard and ai:veryhard',
+    artifact.personas.length === 3
     && artifact.personas.some(p => p.participant === 'ai:easy')
-    && artifact.personas.some(p => p.participant === 'ai:hard'));
+    && artifact.personas.some(p => p.participant === 'ai:hard')
+    && artifact.personas.some(p => p.participant === 'ai:veryhard'));
+
+  const byId = Object.fromEntries(artifact.personas.map(p => [p.participant, p]));
+  check('the tiers are ordered easy < normal(1000) < hard < veryhard',
+    byId['ai:easy'] && byId['ai:hard'] && byId['ai:veryhard']
+    && byId['ai:easy'].rating < 1000
+    && byId['ai:hard'].rating > 1000
+    && byId['ai:veryhard'].rating > byId['ai:hard'].rating,
+    JSON.stringify({
+      easy: byId['ai:easy'] && byId['ai:easy'].rating,
+      hard: byId['ai:hard'] && byId['ai:hard'].rating,
+      veryhard: byId['ai:veryhard'] && byId['ai:veryhard'].rating,
+    }));
+
+  // -- provenance: the chain has to be auditable from the artifact alone --
+  check('every persona records the opponent it was measured against',
+    artifact.personas.every(p => typeof p.opponent === 'string'
+      && Number.isFinite(p.opponent_rating)),
+    JSON.stringify(artifact.personas.map(p => [p.participant, p.opponent, p.opponent_rating])));
+  check('each opponent is the pinned anchor or another rated persona',
+    artifact.personas.every(p =>
+      p.opponent === artifact.anchor.participant || !!byId[p.opponent]));
+  check('an anchor-measured persona is anchored at exactly 1000',
+    artifact.personas.filter(p => p.opponent === artifact.anchor.participant)
+      .every(p => p.opponent_rating === artifact.anchor.rating));
+  check('a chained persona is anchored on its opponent\'s OWN fitted rating',
+    artifact.personas.filter(p => p.opponent !== artifact.anchor.participant)
+      .every(p => p.opponent_rating === byId[p.opponent].rating),
+    JSON.stringify(artifact.personas
+      .filter(p => p.opponent !== artifact.anchor.participant)
+      .map(p => [p.participant, p.opponent_rating, byId[p.opponent] && byId[p.opponent].rating])));
+  check('veryhard is measured against hard, not the saturated anchor',
+    byId['ai:veryhard'] && byId['ai:veryhard'].opponent === 'ai:hard',
+    byId['ai:veryhard'] && byId['ai:veryhard'].opponent);
+  check('the opponents map agrees with the per-persona records',
+    !!artifact.opponents && artifact.personas.every(p => artifact.opponents[p.participant] === p.opponent),
+    JSON.stringify(artifact.opponents));
 
   for (const p of artifact.personas) {
-    const refit = elo.ratingFromScoreRate(p.wins + p.draws * 0.5, p.matches);
-    check(`${p.participant} rating matches a re-fit of its own W/D/L`,
+    // re-fit against the SAME anchor the harness used, so the published
+    // number is reproducible arithmetic rather than a stored assertion
+    const refit = elo.ratingFromScoreRate(p.wins + p.draws * 0.5, p.matches, p.opponent_rating);
+    check(`${p.participant} rating matches a re-fit of its own W/D/L vs ${p.opponent}`,
       Math.round(refit.rating) === p.rating, `stored ${p.rating}, refit ${Math.round(refit.rating)}`);
     check(`${p.participant} W+D+L equals its match count`,
       p.wins + p.draws + p.losses === p.matches);
-    check(`${p.participant} sits inside the ±400 clamp`,
-      p.rating >= 600 && p.rating <= 1400, `${p.rating}`);
+    check(`${p.participant} sits inside the ±400 clamp around its opponent`,
+      p.rating >= p.opponent_rating - elo.CALIB_CLAMP
+      && p.rating <= p.opponent_rating + elo.CALIB_CLAMP,
+      `${p.rating} vs anchor ${p.opponent_rating}`);
     check(`${p.participant} clamped flag agrees with the fit`, p.clamped === refit.clamped);
   }
+
+  check('every log record names the opponent its persona faced',
+    artifact.log.every(r => r.opponent === (byId[r.challenger] || {}).opponent),
+    JSON.stringify([...new Set(artifact.log.map(r => r.challenger + '->' + r.opponent))]));
 
   const logged = artifact.log.length;
   const summed = artifact.personas.reduce((a, p) => a + p.matches, 0);
@@ -113,16 +172,23 @@ const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
 {
   console.log('harness loop smoke run (2000 ticks, xsmall):');
   const g = S.newGame('calib-smoke', 'xsmall', 'normal');
-  const st0 = { diffKey: 'hard' }, st1 = { diffKey: 'normal' };
+  const st0 = { diffKey: 'veryhard' }, st1 = { diffKey: 'normal' };
+  const cad0 = S.aiCadence(st0.diffKey), cad1 = S.aiCadence(st1.diffKey);
   const t0 = Date.now();
+  let ticks0 = 0;
   while (g.tick < 2000 && !g.result) {
     S.step(g);
-    if (g.tick % 20 === 0) aiTick(g, S, 1, st1);
-    else if (g.tick % 20 === 10) aiTick(g, S, 0, st0);
+    if (g.tick % cad1 === 0) aiTick(g, S, 1, st1);
+    if (g.tick % cad0 === (cad0 >> 1)) { aiTick(g, S, 0, st0); ticks0++; }
     if (g.tick % 5 === 0) g.fog.fill(2);
     g.events.length = 0;
   }
   check('the sim advanced', g.tick >= 2000 || !!g.result);
+  check('veryhard is evaluated twice as often as normal',
+    S.aiCadence('veryhard') === 10 && S.aiCadence('normal') === 20
+    && S.aiCadence('hard') === 20 && S.aiCadence('easy') === 20);
+  check('the faster commander really did tick more often', ticks0 > 2000 / 20,
+    `${ticks0} evaluations`);
   check('fog is flooded so owner 0 is not handicapped', g.fog.every(v => v === 2));
   check('both commanders acted (state was written per owner)',
     !!st0.known && !!st1.known);

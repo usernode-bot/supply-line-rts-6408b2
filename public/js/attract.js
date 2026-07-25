@@ -150,8 +150,11 @@ function reveal() {
 
 function stepOnce() {
   S.step(game);
-  if (game.tick % 20 === 0) aiTick(game, S, 1, ai1);
-  else if (game.tick % 20 === 10) aiTick(game, S, 0, ai0);
+  // both sides run the Normal commander here, so this is the classic 20
+  // either way — routed through aiCadence so there is one definition
+  const cad = S.aiCadence(game.difficulty);
+  if (game.tick % cad === 0) aiTick(game, S, 1, ai1);
+  else if (game.tick % cad === (cad >> 1)) aiTick(game, S, 0, ai0);
 }
 
 function frame(ts) {
