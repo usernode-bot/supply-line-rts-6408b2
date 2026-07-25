@@ -12,6 +12,8 @@
 // a few seconds of match progress, not the match: the first sync that
 // touches an active lobby with no runner lazily revives it.
 
+const ratings = require('./ratings');
+
 const TICK_MS = 200;            // 1 sim tick / 200 ms = PvP's 5 ticks/s
 const MAX_TICKS_PER_BEAT = 15;  // catch-up bound per scheduler beat
 const SNAP_TICKS = 5;           // rebuild the snapshot at least every ~1 s
@@ -129,14 +131,36 @@ async function finalize(r, winnerOwner, reason) {
       // durations use the 1×-real-time scale (#172), same as the client
       const duration = Math.max(0, Math.min(86400, Math.round(S.gameSeconds(r.game.tick))));
       const rowResult = (owner) => owner === winnerOwner ? 'win' : (reason === 'surrender' ? 'surrender' : 'loss');
-      await pool.query(`
-        INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, mode, opponent)
-        VALUES ($1, $2, $3, 'pvp', $4, $5, 'pvp', $6),
-               ($7, $8, $9, 'pvp', $4, $5, 'pvp', $10)
-      `, [
-        r.hostUserId, r.hostUsername, rowResult(0), duration, r.seed, r.guestUsername,
-        r.guestUserId, r.guestUsername, rowResult(1), r.hostUsername,
-      ]);
+      // PvP Elo is ordinary symmetric Elo — no AI anchors involved, so
+      // no ceiling rule here. Both rows carry their own player's delta.
+      const client = await pool.connect();
+      let host = null, guest = null;
+      try {
+        await client.query('BEGIN');
+        if (r.hostUserId > 0 && r.guestUserId > 0) {
+          const out = await ratings.applyPvpPair(client,
+            { userId: r.hostUserId, username: r.hostUsername },
+            { userId: r.guestUserId, username: r.guestUsername },
+            winnerOwner === 0 ? 1 : 0);
+          host = out.a; guest = out.b;
+        }
+        await client.query(`
+          INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, mode, opponent, rating_delta, rating_after)
+          VALUES ($1, $2, $3, 'pvp', $4, $5, 'pvp', $6, $11, $12),
+                 ($7, $8, $9, 'pvp', $4, $5, 'pvp', $10, $13, $14)
+        `, [
+          r.hostUserId, r.hostUsername, rowResult(0), duration, r.seed, r.guestUsername,
+          r.guestUserId, r.guestUsername, rowResult(1), r.hostUsername,
+          host ? host.delta : null, host ? host.after : null,
+          guest ? guest.delta : null, guest ? guest.after : null,
+        ]);
+        await client.query('COMMIT');
+      } catch (err) {
+        try { await client.query('ROLLBACK'); } catch {}
+        throw err;
+      } finally {
+        client.release();
+      }
     }
   } catch (err) {
     console.error(`match-runner finalize failed (lobby ${r.lobbyId}):`, err.message);
