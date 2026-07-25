@@ -21,7 +21,11 @@ const participantForUser = (userId) => `user:${userId}`;
 const participantForDifficulty = (difficulty) => `ai:${difficulty}`;
 
 // The anchors as the artifact defines them: Normal is pinned at 1000 by
-// construction, every other persona comes from the measured fit.
+// construction, every other persona comes from the measured fit. Note the
+// personas are NOT all measured against Normal — Very Hard is fitted
+// against Hard and chained onto its rating (see test/calibrate-ai.mjs);
+// the artifact records each persona's `opponent` / `opponent_rating`.
+// Either way the ratings land on one scale, which is all this file needs.
 function aiSeeds() {
   const rows = [{
     participant: artifact.anchor.participant,

@@ -8,7 +8,10 @@
 import { createRequire } from 'node:module';
 import * as S from '../public/js/sim.js';
 import { aiTick } from '../public/js/ai.js';
-import { adjudicate, scoreForChallenger, rounds, totals, SIZES, CALIB_TICK_CAP } from './calibrate-ai.mjs';
+import {
+  adjudicate, scoreForChallenger, rounds, totals, SIZES, CALIB_TICK_CAP,
+  CHALLENGERS, OPPONENT_OF, ANCHOR_PERSONA,
+} from './calibrate-ai.mjs';
 
 const require = createRequire(import.meta.url);
 const elo = require('../elo.js');
@@ -60,6 +63,17 @@ const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
   check('seeds are distinct per round', new Set(rs.map(r => r.seed)).size === 4);
   check('the challenger never faces itself', rs.every(r => r.challenger === 'hard'));
   check('the tick cap is 2h of 1x play', CALIB_TICK_CAP === 36000);
+  check('every round names the reference opponent',
+    rs.every(r => r.opponent === OPPONENT_OF.hard));
+  check('easy and hard spar the pinned anchor, veryhard spars hard',
+    OPPONENT_OF.easy === ANCHOR_PERSONA && OPPONENT_OF.hard === ANCHOR_PERSONA
+    && OPPONENT_OF.veryhard === 'hard', JSON.stringify(OPPONENT_OF));
+  check('no persona is measured against itself',
+    Object.entries(OPPONENT_OF).every(([c, o]) => c !== o));
+  check('a chained persona is fitted after the opponent it chains onto',
+    Object.entries(OPPONENT_OF).every(([c, o]) =>
+      o === ANCHOR_PERSONA || CHALLENGERS.indexOf(o) < CHALLENGERS.indexOf(c)),
+    JSON.stringify(CHALLENGERS));
 }
 
 // ------------------------------------------- 4. the committed artifact
@@ -88,16 +102,48 @@ const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
       veryhard: byId['ai:veryhard'] && byId['ai:veryhard'].rating,
     }));
 
+  // -- provenance: the chain has to be auditable from the artifact alone --
+  check('every persona records the opponent it was measured against',
+    artifact.personas.every(p => typeof p.opponent === 'string'
+      && Number.isFinite(p.opponent_rating)),
+    JSON.stringify(artifact.personas.map(p => [p.participant, p.opponent, p.opponent_rating])));
+  check('each opponent is the pinned anchor or another rated persona',
+    artifact.personas.every(p =>
+      p.opponent === artifact.anchor.participant || !!byId[p.opponent]));
+  check('an anchor-measured persona is anchored at exactly 1000',
+    artifact.personas.filter(p => p.opponent === artifact.anchor.participant)
+      .every(p => p.opponent_rating === artifact.anchor.rating));
+  check('a chained persona is anchored on its opponent\'s OWN fitted rating',
+    artifact.personas.filter(p => p.opponent !== artifact.anchor.participant)
+      .every(p => p.opponent_rating === byId[p.opponent].rating),
+    JSON.stringify(artifact.personas
+      .filter(p => p.opponent !== artifact.anchor.participant)
+      .map(p => [p.participant, p.opponent_rating, byId[p.opponent] && byId[p.opponent].rating])));
+  check('veryhard is measured against hard, not the saturated anchor',
+    byId['ai:veryhard'] && byId['ai:veryhard'].opponent === 'ai:hard',
+    byId['ai:veryhard'] && byId['ai:veryhard'].opponent);
+  check('the opponents map agrees with the per-persona records',
+    !!artifact.opponents && artifact.personas.every(p => artifact.opponents[p.participant] === p.opponent),
+    JSON.stringify(artifact.opponents));
+
   for (const p of artifact.personas) {
-    const refit = elo.ratingFromScoreRate(p.wins + p.draws * 0.5, p.matches);
-    check(`${p.participant} rating matches a re-fit of its own W/D/L`,
+    // re-fit against the SAME anchor the harness used, so the published
+    // number is reproducible arithmetic rather than a stored assertion
+    const refit = elo.ratingFromScoreRate(p.wins + p.draws * 0.5, p.matches, p.opponent_rating);
+    check(`${p.participant} rating matches a re-fit of its own W/D/L vs ${p.opponent}`,
       Math.round(refit.rating) === p.rating, `stored ${p.rating}, refit ${Math.round(refit.rating)}`);
     check(`${p.participant} W+D+L equals its match count`,
       p.wins + p.draws + p.losses === p.matches);
-    check(`${p.participant} sits inside the ±400 clamp`,
-      p.rating >= 600 && p.rating <= 1400, `${p.rating}`);
+    check(`${p.participant} sits inside the ±400 clamp around its opponent`,
+      p.rating >= p.opponent_rating - elo.CALIB_CLAMP
+      && p.rating <= p.opponent_rating + elo.CALIB_CLAMP,
+      `${p.rating} vs anchor ${p.opponent_rating}`);
     check(`${p.participant} clamped flag agrees with the fit`, p.clamped === refit.clamped);
   }
+
+  check('every log record names the opponent its persona faced',
+    artifact.log.every(r => r.opponent === (byId[r.challenger] || {}).opponent),
+    JSON.stringify([...new Set(artifact.log.map(r => r.challenger + '->' + r.opponent))]));
 
   const logged = artifact.log.length;
   const summed = artifact.personas.reduce((a, p) => a + p.matches, 0);
