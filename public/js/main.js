@@ -10,6 +10,7 @@ import { createRenderer } from './render.js';
 import { createInput } from './input.js';
 import { startAttract, stopAttract } from './attract.js';
 import * as TUT from './tutorial.js';
+import * as CT from './controls-tour.js';
 import { dist, fertTier, FERT_TIERS } from './mapgen.js';
 
 const $ = (id) => document.getElementById(id);
@@ -34,6 +35,9 @@ function isMobile() { return !mqDesktop.matches; }
 mqDesktop.addEventListener('change', () => {
   lastPanelHTML = ''; // panel markup differs per breakpoint — force re-render
   if (game) { renderPanel(true); }
+  // the tour keeps whichever page set is already open — rotating a phone
+  // across the 640px line must not swap the content mid-read
+  if (CT.active()) CT.tick(view, ui);
 });
 let renderer = null, input = null;
 let groups = {};                      // control groups (#69): n -> {kind:'blobs', ids} | {kind:'settlement', id}
@@ -381,6 +385,49 @@ function tutorialOver(result) {
       { label: '🏠 Back to menu', cls: 'bg-zinc-700 hover:bg-zinc-600 text-zinc-100', fn: () => { TUT.end(); backToMenu(); } },
     ]);
 }
+
+// ---------------------------------------------------------------- controls tour (#212)
+// A first-run touch-controls card, and the 🕹️ button that re-opens it as a
+// reference. Unlike the guided tutorial it gates nothing and runs over any
+// match — see controls-tour.js.
+
+let tourPausedBefore = null; // the paused value to restore when the tour closes
+
+function openControlsTour(opts) {
+  const o = opts || {};
+  if (o.mode !== 'reference' && game) {
+    // hold the match still while the player reads. Set directly, not via
+    // togglePause — that no-ops for pvp/result and would desync the glyph.
+    tourPausedBefore = paused;
+    paused = true;
+    $('btn-pause').textContent = '▶';
+  }
+  CT.open({ ...o, onClose: onTourClose });
+}
+
+function onTourClose() {
+  if (tourPausedBefore !== null) {
+    paused = tourPausedBefore;
+    tourPausedBefore = null;
+    $('btn-pause').textContent = paused ? '▶' : '⏸';
+  }
+}
+
+// Force-close without marking seen — a player whose match ends mid-tour
+// still gets it next time.
+function closeControlsTour() {
+  if (CT.active()) CT.close({ seen: false });
+  tourPausedBefore = null;
+}
+
+$('btn-help').addEventListener('click', () => {
+  if (CT.active()) { CT.close({ seen: false }); return; }
+  CT.open({ mode: 'reference', set: isMobile() ? 'touch' : 'desktop' });
+});
+$('btn-controls').addEventListener('click', () => {
+  if (CT.active()) { CT.close({ seen: false }); return; }
+  CT.open({ mode: 'reference', set: isMobile() ? 'touch' : 'desktop' });
+});
 
 // In-app confirm dialog — native confirm() is blocked inside the sandboxed
 // platform iframe (it silently returns false), so never use it.
@@ -970,10 +1017,19 @@ function startMatch(g) {
   renderer.resize();
   renderPanel(true);
   updateGroupsBar();
+
+  // first-run controls tour (#212): phone widths only, and never on top of
+  // the guided tutorial's own card, a PvP match (no pausing, an opponent is
+  // waiting) or a ?shot= screenshot boot (those open it explicitly).
+  closeControlsTour();
+  if (isMobile() && !SHOT && !g.pvp && !g.tutorial && !CT.seen()) {
+    openControlsTour({ mode: 'tour', set: 'touch' });
+  }
 }
 
 function backToMenu() {
   TUT.end(); // no-op unless a tutorial session is live
+  closeControlsTour();
   stopMpTimers();
   mp = null;
   me = 0;
@@ -3266,6 +3322,7 @@ function frame(ts) {
 
   input.update(dt);
   if (game.tutorial) TUT.tick(game, ui); // markers/card before this frame draws
+  if (CT.active()) CT.tick(view, ui);    // practice gates / ring / anchor (#212)
   // desktop build/wall-placement preview follows the mouse (#94, #187)
   ui.hover = (ui.pending === 'build' || ui.pending === 'wall') ? input.mouseWorld : null;
   renderer.draw(game, view, ui, Math.max(0, Math.min(1, acc / 100)));
@@ -3280,6 +3337,7 @@ function frame(ts) {
     saveGame(true);
   }
   if (game.result && !resultPosted && !game.pvp) {
+    closeControlsTour(); // the match is over — the card has nothing to teach
     if (game.tutorial) { resultPosted = true; tutorialOver(game.result); }
     else endMatch(game.result);
   }
@@ -3367,6 +3425,31 @@ function shotInCombat() {
   updateHUD();
 }
 
+// The controls tour (#212) only exists over a live match on a phone-sized
+// screen, so no plain URL reaches it — before/after screenshots and the
+// dapp.json tests would only ever see the main menu. `?shot=controls-tour…`
+// boots a solo match on a FIXED seed, pauses it, and opens the tour at a
+// given step with the touch page set forced (so a desktop-width screenshot
+// harness still renders the phone content). It never marks the tour seen.
+// Pure local UI state — no DB writes, so it works in every environment.
+const TOUR_SHOTS = {
+  'controls-tour': 0,          // step 1 — one-finger pan
+  'controls-tour-actions': 3,  // step 4 — the tap-again action list
+  'controls-tour-modes': 5,    // step 6 — Select vs Drag
+};
+function shotControlsTour(step) {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot212', 'xsmall', 'normal');
+  startMatch(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+  CT.open({ mode: 'tour', set: 'touch', step, force: true });
+}
+
 // ---------------------------------------------------------------- boot
 
 refreshMenu();
@@ -3383,6 +3466,9 @@ if (SHOT === 'wall-garrison') {
 }
 if (SHOT === 'in-combat') {
   try { shotInCombat(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (TOUR_SHOTS[SHOT] != null) {
+  try { shotControlsTour(TOUR_SHOTS[SHOT]); } catch (e) { console.warn('shot link failed', e); }
 }
 
 // Screenshot-state deep links (#200): the wall-garrison panel only exists

@@ -56,6 +56,16 @@
     { "name": "Ratings panel names the pinned Normal anchor", "path": "/?demo=1", "expectText": "pinned at 1000" },
     { "name": "Your rating line renders above the match history", "path": "/?demo=1", "expectSelector": "#my-rating" },
     { "name": "Difficulty hint carries the commander's Elo", "path": "/?demo=1", "expectText": "Elo 1000" },
-    { "name": "End-of-match rating line element present", "path": "/?demo=1", "expectSelector": "#end-rating" }
+    { "name": "End-of-match rating line element present", "path": "/?demo=1", "expectSelector": "#end-rating" },
+    { "name": "Controls tour overlay container present", "path": "/?demo=1", "expectSelector": "#controls-tour" },
+    { "name": "Controls help button in the game top bar", "path": "/?demo=1", "expectSelector": "#btn-help" },
+    { "name": "Controls button on the main menu", "path": "/?demo=1", "expectSelector": "#btn-controls" },
+    { "name": "Controls tour deep link renders the card", "path": "/?shot=controls-tour&demo=1", "expectSelector": "#controls-tour-card" },
+    { "name": "Controls tour counts its steps", "path": "/?shot=controls-tour&demo=1", "expectText": "Step 1 of 8" },
+    { "name": "Controls tour teaches one-finger pan", "path": "/?shot=controls-tour&demo=1", "expectText": "Drag with one finger" },
+    { "name": "Controls tour can be skipped", "path": "/?shot=controls-tour&demo=1", "expectSelector": "#ct-skip" },
+    { "name": "Controls tour explains the tap-again action list", "path": "/?shot=controls-tour-actions&demo=1", "expectText": "Tap your selection again" },
+    { "name": "Controls tour explains Drag-mode box select", "path": "/?shot=controls-tour-modes&demo=1", "expectText": "draws a selection box" },
+    { "name": "Controls tour offers the mouse & keyboard set", "path": "/?shot=controls-tour&demo=1", "expectSelector": "#ct-swap" }
   ]
 }
