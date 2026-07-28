@@ -15,7 +15,10 @@ const SEEN_KEY = 'supply-line-controls-tour-v1';
 export function seen() {
   try { return localStorage.getItem(SEEN_KEY) === '1'; } catch { return false; }
 }
-function markSeen() {
+// Exported so main.js can mark the tour delivered on a path that doesn't run
+// through close({ seen: true }) — the phone tutorial prelude marks seen the
+// moment it actually hands over to the scenario, whichever way it was closed.
+export function markSeen() {
   try { localStorage.setItem(SEEN_KEY, '1'); } catch { }
 }
 
@@ -251,8 +254,10 @@ function render() {
   const back = $('ct-back');
   back.disabled = st.idx === 0;
   back.classList.toggle('opacity-40', st.idx === 0);
-  $('ct-next').textContent = last ? '✓ Got it' : 'Next';
-  $('ct-skip').classList.toggle('hidden', st.mode !== 'tour');
+  $('ct-next').textContent = last ? (st.finishLabel || '✓ Got it') : 'Next';
+  const skip = $('ct-skip');
+  skip.textContent = st.skipLabel || 'Skip tour';
+  skip.classList.toggle('hidden', st.mode !== 'tour');
   $('ct-swap').textContent = st.set === 'desktop'
     ? 'Show touch controls' : 'Show mouse & keyboard controls';
   // reference mode is modal (scrim + centred card); tour mode leaves the map
@@ -307,11 +312,16 @@ function wire() {
 
 // -- API ------------------------------------------------------------------
 
-// open({ mode, set, step, force, onClose })
-//   mode  'tour' (non-modal, over a live match) | 'reference' (modal card)
-//   set   'touch' | 'desktop' — which page set to show
-//   step  0-based starting index
-//   force screenshot deep links: ignore the seen flag / viewport width
+// open({ mode, set, step, force, finishLabel, skipLabel, onClose })
+//   mode        'tour' (non-modal, over a live match) | 'reference' (modal card)
+//   set         'touch' | 'desktop' — which page set to show
+//   step        0-based starting index
+//   force       screenshot deep links: ignore the seen flag / viewport width
+//   finishLabel replaces '✓ Got it' on the last step
+//   skipLabel   replaces 'Skip tour'
+// The two labels are plain overrides on purpose: the caller (main.js's phone
+// tutorial prelude) owns the wording, so this module needs to know nothing
+// about tutorials.
 export function open(opts) {
   const o = opts || {};
   wire();
@@ -320,6 +330,8 @@ export function open(opts) {
     mode: o.mode === 'reference' ? 'reference' : 'tour',
     set: o.set === 'desktop' ? 'desktop' : 'touch',
     idx: Math.max(0, o.step || 0),
+    finishLabel: o.finishLabel || null,
+    skipLabel: o.skipLabel || null,
     flashUntil: 0,
     camStart: null,
     zoomStart: null,

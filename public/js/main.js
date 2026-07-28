@@ -328,12 +328,28 @@ function refreshTutorialButton() {
   $('btn-tutorial').textContent = done ? '📖 Replay tutorial' : '📖 Tutorial';
 }
 
+function beginTutorial(g) {
+  TUT.begin(g, { ui, view, isMobile, onExit: confirmExitTutorial, onFinish: finishTutorial, onKeepPlaying: keepPlayingTutorial });
+}
+
 function startTutorial() {
   try {
     me = 0;
     const g = S.newTutorialGame();
     startMatch(g);
-    TUT.begin(g, { ui, view, isMobile, onExit: confirmExitTutorial, onFinish: finishTutorial, onKeepPlaying: keepPlayingTutorial });
+    // On phones the controls tour runs FIRST, as step 0 of onboarding: the
+    // gestures it asks the player to try (pan, pinch, tap a unit) only work
+    // while the scenario's per-step input gating is still inert, i.e. before
+    // TUT.begin. So arm a handoff and defer the begin into the tour's close.
+    if (isMobile() && !SHOT) {
+      pendingTutorialBegin = { game: g, persist: true };
+      openControlsTour({
+        mode: 'tour', set: 'touch',
+        finishLabel: '✓ Start the tutorial', skipLabel: 'Skip to tutorial',
+      });
+    } else {
+      beginTutorial(g);
+    }
   } catch (e) {
     showMenuError('Could not start the tutorial: ' + (e && e.message || e));
   }
@@ -393,6 +409,23 @@ function tutorialOver(result) {
 
 let tourPausedBefore = null; // the paused value to restore when the tour closes
 
+// { game, persist } while the tour is fronting 📖 Tutorial on a phone: the
+// guided scenario to begin once the player finishes or skips the tour.
+let pendingTutorialBegin = null;
+
+// Runs on EVERY close path of a prelude tour — ✓ Start the tutorial, Skip to
+// tutorial, or the 🕹️ toggle — so "the scenario started" and "the tour counts
+// as delivered" stay in lockstep. Force-closes (match over, back to menu)
+// clear the pending entry first and so never land here.
+function runPendingTutorialBegin() {
+  const pending = pendingTutorialBegin;
+  pendingTutorialBegin = null; // clear first: a re-entrant close must not double-begin
+  if (!pending) return;
+  if (pending.game !== game || !game.tutorial || game.result) return;
+  if (pending.persist) CT.markSeen(); // a tutorial player never gets the tour again
+  beginTutorial(pending.game);
+}
+
 function openControlsTour(opts) {
   const o = opts || {};
   if (o.mode !== 'reference' && game) {
@@ -411,11 +444,16 @@ function onTourClose() {
     tourPausedBefore = null;
     $('btn-pause').textContent = paused ? '▶' : '⏸';
   }
+  runPendingTutorialBegin(); // after the pause restore, so the scenario starts running
 }
 
 // Force-close without marking seen — a player whose match ends mid-tour
-// still gets it next time.
+// still gets it next time. The pending handoff is dropped BEFORE the close:
+// backToMenu() calls this while `game` is still the tutorial game and only
+// nulls it afterwards, so otherwise a trip to the menu would begin a scenario
+// on a match about to be torn down.
 function closeControlsTour() {
+  pendingTutorialBegin = null;
   if (CT.active()) CT.close({ seen: false });
   tourPausedBefore = null;
 }
@@ -3430,24 +3468,38 @@ function shotInCombat() {
 // dapp.json tests would only ever see the main menu. `?shot=controls-tour…`
 // boots a solo match on a FIXED seed, pauses it, and opens the tour at a
 // given step with the touch page set forced (so a desktop-width screenshot
-// harness still renders the phone content). It never marks the tour seen.
+// harness still renders the phone content). The boot itself never marks the
+// tour seen — only a visitor who pages all the way through it does.
 // Pure local UI state — no DB writes, so it works in every environment.
+// The `tutorial: true` entries boot the guided scenario's own map with the
+// prelude armed, so the phone tutorial's opening step is URL-reachable too —
+// with persist:false, so a screenshot boot never writes the seen flag (a
+// tester can still page to the end and watch the scenario card take over).
 const TOUR_SHOTS = {
-  'controls-tour': 0,          // step 1 — one-finger pan
-  'controls-tour-actions': 3,  // step 4 — the tap-again action list
-  'controls-tour-modes': 5,    // step 6 — Select vs Drag
+  'controls-tour': { step: 0 },          // step 1 — one-finger pan
+  'controls-tour-actions': { step: 3 },  // step 4 — the tap-again action list
+  'controls-tour-modes': { step: 5 },    // step 6 — Select vs Drag
+  'tutorial-prelude': { step: 0, tutorial: true },      // 📖 Tutorial, step 1 of the tour
+  'tutorial-prelude-end': { step: 7, tutorial: true },  // its hand-over step
 };
-function shotControlsTour(step) {
+function shotControlsTour(desc) {
   clearSaves();
   me = 0;
-  const g = S.newGame('shot212', 'xsmall', 'normal');
+  const g = desc.tutorial ? S.newTutorialGame() : S.newGame('shot212', 'xsmall', 'normal');
   startMatch(g);
   paused = true;
   $('btn-pause').textContent = '▶';
   input.clampView();
   renderPanel(true);
   updateHUD();
-  CT.open({ mode: 'tour', set: 'touch', step, force: true });
+  const opts = { mode: 'tour', set: 'touch', step: desc.step, force: true, onClose: onTourClose };
+  if (desc.tutorial) {
+    pendingTutorialBegin = { game: g, persist: false };
+    tourPausedBefore = false; // paging to the end hands over to a running scenario
+    opts.finishLabel = '✓ Start the tutorial';
+    opts.skipLabel = 'Skip to tutorial';
+  }
+  CT.open(opts);
 }
 
 // ---------------------------------------------------------------- boot
@@ -3467,7 +3519,7 @@ if (SHOT === 'wall-garrison') {
 if (SHOT === 'in-combat') {
   try { shotInCombat(); } catch (e) { console.warn('shot link failed', e); }
 }
-if (TOUR_SHOTS[SHOT] != null) {
+if (TOUR_SHOTS[SHOT]) {
   try { shotControlsTour(TOUR_SHOTS[SHOT]); } catch (e) { console.warn('shot link failed', e); }
 }
 

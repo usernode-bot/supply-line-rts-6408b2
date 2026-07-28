@@ -66,6 +66,10 @@
     { "name": "Controls tour can be skipped", "path": "/?shot=controls-tour&demo=1", "expectSelector": "#ct-skip" },
     { "name": "Controls tour explains the tap-again action list", "path": "/?shot=controls-tour-actions&demo=1", "expectText": "Tap your selection again" },
     { "name": "Controls tour explains Drag-mode box select", "path": "/?shot=controls-tour-modes&demo=1", "expectText": "draws a selection box" },
-    { "name": "Controls tour offers the mouse & keyboard set", "path": "/?shot=controls-tour&demo=1", "expectSelector": "#ct-swap" }
+    { "name": "Controls tour offers the mouse & keyboard set", "path": "/?shot=controls-tour&demo=1", "expectSelector": "#ct-swap" },
+    { "name": "Tutorial controls prelude renders the tour card", "path": "/?shot=tutorial-prelude&demo=1", "expectSelector": "#controls-tour-card" },
+    { "name": "Tutorial controls prelude starts on the first tour step", "path": "/?shot=tutorial-prelude&demo=1", "expectText": "Step 1 of 8" },
+    { "name": "Tutorial controls prelude offers a skip straight to the tutorial", "path": "/?shot=tutorial-prelude&demo=1", "expectText": "Skip to tutorial" },
+    { "name": "Tutorial controls prelude ends by starting the tutorial", "path": "/?shot=tutorial-prelude-end&demo=1", "expectText": "Start the tutorial" }
   ]
 }
