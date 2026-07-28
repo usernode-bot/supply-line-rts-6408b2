@@ -1,12 +1,16 @@
-// Controls tour (#212): a first-run, step-by-step touch-controls card that
-// opens the first time a player enters a match on a phone-sized screen, plus
-// a permanent 🕹️ help button that re-opens it as a reference.
+// Controls tour (#212): a hands-on touch-controls card. Every touch step is
+// completed by actually performing the gesture — the step's gate is satisfied
+// either by a state predicate (`practice`) or by a `signal()` fired from the
+// place in main.js / input.js where the gesture really lands. Next stays
+// enabled on every step, so a gesture a device or a pair of hands won't do can
+// never trap the player.
 //
 // Deliberately NOT part of tutorial.js: that module is a gated scenario keyed
 // to game.tutorial (fixed seed, tracked blob ids, whitelisted ops/acts). This
-// tour runs over ANY match — including a resumed save — and never gates or
-// swallows input. All state here is session-local UI state; nothing is
-// serialized into the sim save.
+// tour runs over ANY match — a real one, the tutorial map before its scenario
+// begins, or the throwaway practice map behind the menu's 🕹️ button — and it
+// never gates or swallows input. All state here is session-local UI state;
+// nothing is serialized into the sim save.
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,8 +20,8 @@ export function seen() {
   try { return localStorage.getItem(SEEN_KEY) === '1'; } catch { return false; }
 }
 // Exported so main.js can mark the tour delivered on a path that doesn't run
-// through close({ seen: true }) — the phone tutorial prelude marks seen the
-// moment it actually hands over to the scenario, whichever way it was closed.
+// through close({ seen: true }) — the phone tutorial prelude and the practice
+// map mark seen the moment they actually hand over.
 export function markSeen() {
   try { localStorage.setItem(SEEN_KEY, '1'); } catch { }
 }
@@ -28,6 +32,13 @@ const FIG_PAN = `<svg viewBox="0 0 120 48" class="w-full h-12" aria-hidden="true
   <rect x="2" y="4" width="116" height="40" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.3"/>
   <path d="M22 24h76" stroke="#38bdf8" stroke-width="2" stroke-dasharray="5 4" class="ct-fig-dash"/>
   <circle cx="30" cy="24" r="7" fill="#38bdf8" fill-opacity="0.35" stroke="#38bdf8" stroke-width="2" class="ct-fig-slide"/>
+</svg>`;
+
+const FIG_MINIMAP = `<svg viewBox="0 0 120 48" class="w-full h-12" aria-hidden="true">
+  <rect x="2" y="4" width="116" height="40" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.3"/>
+  <rect x="84" y="8" width="30" height="24" rx="3" fill="#166534" fill-opacity="0.5" stroke="#4ade80" stroke-opacity="0.7"/>
+  <rect x="92" y="14" width="12" height="10" rx="1" fill="none" stroke="#e4e4e7" stroke-opacity="0.8"/>
+  <circle cx="98" cy="19" r="8" fill="none" stroke="#a78bfa" stroke-width="2" class="ct-fig-tap"/>
 </svg>`;
 
 const FIG_PINCH = `<svg viewBox="0 0 120 48" class="w-full h-12" aria-hidden="true">
@@ -43,8 +54,8 @@ const FIG_TAP = `<svg viewBox="0 0 120 48" class="w-full h-12" aria-hidden="true
 </svg>`;
 
 // Select (cursor) + Drag (dashed box) icons, copied from the real
-// #mode-toggle buttons so step 6 reads correctly even when the live toggle
-// is off-screen (it is display:none at ≥640px).
+// #mode-toggle buttons so the mode step reads correctly even when the live
+// toggle is off-screen (it is display:none at ≥640px).
 const FIG_MODES = `<div class="flex items-center justify-center gap-3 py-1" aria-hidden="true">
   <span class="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-violet-400 bg-violet-600 text-white">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M5 2v17l4.5-4.2 2.8 6 2.9-1.3-2.8-6H19z"/></svg>
@@ -70,6 +81,12 @@ const FIG_HOLD = `<svg viewBox="0 0 120 48" class="w-full h-12" aria-hidden="tru
   <circle cx="56" cy="33" r="7" fill="#a78bfa" fill-opacity="0.5" stroke="#a78bfa" stroke-width="2" class="ct-fig-slide"/>
 </svg>`;
 
+const FIG_GROUPS = `<div class="flex items-center justify-center gap-1 py-1" aria-hidden="true">
+  <span class="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-violet-500 bg-violet-700 text-white text-xs font-semibold"><b>1</b>👥12</span>
+  <span class="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-zinc-700 bg-zinc-900/85 text-zinc-200 text-xs font-semibold"><b>2</b>🏠</span>
+  <span class="inline-flex items-center px-2 py-1 rounded-lg border border-dashed border-zinc-600 bg-zinc-900/70 text-zinc-400 text-xs">＋</span>
+</div>`;
+
 const FIG_MOUSE = `<svg viewBox="0 0 120 48" class="w-full h-12" aria-hidden="true">
   <rect x="46" y="6" width="28" height="38" rx="14" fill="none" stroke="currentColor" stroke-opacity="0.5" stroke-width="2"/>
   <path d="M60 6v16" stroke="currentColor" stroke-opacity="0.5" stroke-width="2"/>
@@ -85,23 +102,49 @@ const FIG_KEYS = `<div class="flex items-center justify-center gap-1 py-1 font-m
 
 // -- step scripts ---------------------------------------------------------
 //
-// { title, text, figure?, ring?, anchor?, practice? }
-//   ring     — element id outlined with .ct-ring while the step is up
-//              (skipped silently when the target is hidden)
-//   anchor   — 'top' (default) or 'bottom'; step 1 anchors bottom so the
-//              card can't cover the phone minimap it talks about
-//   practice — (view, ui, st) => boolean, polled each frame; auto-advances.
-//              Every step also keeps a working Next, so a device where the
-//              gesture is awkward can never trap the player.
+// { title, text, figure?, ring?, anchor?, todo?, practice?, needs?, stages?,
+//   available? }
+//   ring      — element id outlined with .ct-ring while the step is up
+//               (skipped silently when the target is hidden)
+//   anchor    — 'top' (default) or 'bottom'; the map/minimap steps anchor
+//               bottom so the card can't cover what they point at
+//   todo      — the "▸ Try it: …" line shown while the gate is open
+//   practice  — (view, ui, st) => boolean, polled each frame
+//   needs     — signal names; ANY ONE satisfies the step (see signal())
+//   stages    — ordered sub-goals [{ label, needs?, test? }] for the
+//               multi-part steps; forward-only, ticked off in #ct-todo
+//   available — (game, ui, st) => true | 'reason'. A string means the gate
+//               cannot be met in this match (control groups are switched off
+//               during the guided tutorial; the mode toggle doesn't exist at
+//               desktop widths), so the step renders the reason and relies on
+//               Next instead of waiting forever.
+//
+// Every step keeps a working Next, so an awkward gesture never traps anyone.
 
 const PAN_MIN = 3;      // tiles the view centre must move
 const ZOOM_IN = 1.3;    // scale ratio counted as a zoom
 const ZOOM_OUT = 0.77;
 
+const hasUnits = (ui) => !!(ui && ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'multi'));
+
+// Is anything on screen that the hold-and-slide gesture can be tried on?
+// #recall-hold / #field-hold live in the settlement panel; psplit lives in the
+// unit-options popup. All three are wired through the same 350 ms hold.
+function holdTargetExists() {
+  return !!($('recall-hold') || $('field-hold') ||
+    document.querySelector('#order-popup [data-act="psplit"]'));
+}
+
+function toggleVisible() {
+  const el = $('mode-toggle');
+  return !!(el && el.offsetParent !== null && el.offsetHeight > 0);
+}
+
 const TOUCH_STEPS = [
   {
     title: 'Look around',
-    text: 'Drag with one finger to pan the map. The minimap in the corner jumps you anywhere — tap it, or drag across it. Pan a little to continue.',
+    text: 'Drag with one finger to pan the map. Zoomed out you see your whole front; zoomed in you can read a single fight.',
+    todo: 'drag one finger across the map',
     figure: FIG_PAN,
     anchor: 'bottom',
     practice: (view, ui, st) => {
@@ -111,9 +154,20 @@ const TOUCH_STEPS = [
     },
   },
   {
+    title: 'Jump anywhere',
+    text: 'The minimap in the top-right corner is a shortcut across the whole map: tap it to jump the camera there, or drag across it to sweep.',
+    todo: 'tap the minimap in the corner',
+    figure: FIG_MINIMAP,
+    anchor: 'bottom',
+    needs: ['minimap'],
+  },
+  {
     title: 'Zoom',
-    text: 'Pinch with two fingers on the map to zoom in and out. Zoom in to read a fight, out to see your whole front. Try a pinch to continue.',
+    text: 'Pinch with two fingers on the map to zoom in and out.',
+    todo: 'pinch two fingers on the map',
     figure: FIG_PINCH,
+    anchor: 'bottom',
+    needs: ['pinch'],
     practice: (view, ui, st) => {
       if (!view) return true;
       if (!st.zoomStart) { st.zoomStart = view.scale; return false; }
@@ -124,35 +178,67 @@ const TOUCH_STEPS = [
   {
     title: 'Select',
     text: 'Tap a group of your units to select it — the panel at the bottom shows its health, food and roles. With nothing selected, tapping ground, a settlement or a wall inspects it instead.',
+    todo: 'tap one of your unit groups',
     figure: FIG_TAP,
-    practice: (view, ui) => !!(ui && ui.selected && (ui.selected.kind === 'blob' || ui.selected.kind === 'multi')),
+    practice: (view, ui) => hasUnits(ui),
   },
   {
     title: 'Give orders',
     text: 'Tap your selection again to open its action list beside your finger: 📍 Move…, 🔥 Pillage, ✂️ Split, 🏠 Build, 🧱 Wall…, 🚚 Supply route… and the three roles. Orders that need a destination arm first — then you tap the map.',
+    todo: 'tap your selected units again',
     figure: FIG_TAP,
+    needs: ['unit-options'],
+    available: (game, ui) => hasUnits(ui) || 'Select some units first — tap Back for that step.',
   },
   {
     title: 'Tapping with units in hand',
     text: 'A tap always asks before it acts. Empty ground offers Move / Attack / Deselect, so a stray tap never marches your army off. Your own settlement offers Select settlement / Garrison units. Founding a settlement or a wall shows a ✓ / ✕ pair you can pan the map under before you confirm.',
+    todo: 'with units selected, tap empty ground',
+    figure: FIG_TAP,
+    needs: ['ask-popup'],
+    available: (game, ui) => hasUnits(ui) || 'Select some units first — tap Back for that step.',
   },
   {
     title: 'Select vs Drag',
     text: 'The two icons in the bottom-left corner switch input modes. In Select mode taps do everything above. In Drag mode a one-finger drag draws a selection box that adds to your group — drag as many times as you like — while two-finger pan still works. Switching into Drag clears the current selection; orders resume in Select mode.',
     figure: FIG_MODES,
     ring: 'mode-toggle',
+    stages: [
+      { label: 'tap Drag', needs: ['mode-drag'] },
+      { label: 'drag a box on the map', needs: ['touch-box'] },
+      { label: 'tap Select again', needs: ['mode-select'] },
+    ],
+    available: (game, ui, st) => st.force || toggleVisible()
+      || 'The Select / Drag toggle only exists on phone-sized screens.',
   },
   {
     title: 'Reading the screen',
     text: 'The selection panel is a bottom sheet on phones, with the per-unit health strip just above it and the minimap up in the top-right corner. Everything scrolls inside the sheet — the map behind it stays live.',
+    todo: 'tap your own settlement to fill the sheet',
     figure: FIG_SHEET,
     ring: 'panel',
+    practice: (view, ui) => !!(ui && ui.selected && ui.selected.kind === 'settlement'),
   },
   {
-    title: 'Two shortcuts',
-    text: 'Press and hold ✂️ Split, Recall or Field for about a third of a second, then slide left or right to pick a number and release to commit. And the numbered chips down the left edge are control groups: tap to select, tap again to centre, ＋ assigns whatever you have selected.',
+    title: 'Hold and slide',
+    text: 'Press and hold ✂️ Split, Recall or Field for about a third of a second: a slider bar appears, sliding left or right picks a number, and releasing commits it. Let go without sliding and nothing happens.',
+    todo: 'press and hold Recall (or ✂️ Split) until the bar appears',
     figure: FIG_HOLD,
+    needs: ['hold-arm'],
+    available: () => holdTargetExists()
+      || 'Select your settlement (the step before this) to reach its Recall button.',
+  },
+  {
+    title: 'Control groups',
+    text: 'The numbered chips down the left edge are control groups: ＋ stores whatever you have selected, tapping a chip selects it again, and tapping the same chip twice centres the camera on it.',
+    figure: FIG_GROUPS,
     ring: 'groups-bar',
+    stages: [
+      { label: 'tap ＋ with something selected', needs: ['group-assign'] },
+      { label: 'tap the chip to select it again', needs: ['group-select'] },
+    ],
+    available: (game) => !(game && game.tutorial)
+      || 'Control groups are switched off during the tutorial — tap Next.',
   },
 ];
 
@@ -180,13 +266,19 @@ const DESK_STEPS = [
 
 // -- state ----------------------------------------------------------------
 
-let st = null;     // { mode, set, idx, flashUntil, camStart, zoomStart } while open
+let st = null;     // { mode, set, idx, hits, stage, flashUntil, … } while open
 let deps = null;   // { onClose } from main.js
 let wired = false;
 let ringEl = null;
+let lastGame = null; // most recent game handle from tick(), for signal()'s re-eval
 const PULSE_MS = 1300; // keep in sync with the .tut-pulse / .ct-ring animation
+const FLASH_MS = 700;
 
 function steps() { return st && st.set === 'desktop' ? DESK_STEPS : TOUCH_STEPS; }
+
+// Gating only ever applies to the interactive touch tour: the desktop pages
+// and every reference open are read-only.
+function gating() { return !!st && st.mode === 'tour' && st.set !== 'desktop'; }
 
 function clearRing() {
   if (ringEl) {
@@ -238,6 +330,102 @@ function syncAnchor() {
   }
 }
 
+// -- gate evaluation ------------------------------------------------------
+
+// true, or the reason string the step can't be gated here.
+function availability(step) {
+  if (!step || !step.available) return true;
+  let r = true;
+  try { r = step.available(lastGame, st.ui || null, st); } catch { r = true; }
+  return r === true ? true : (typeof r === 'string' ? r : true);
+}
+
+function stageDone(stage) {
+  if (!stage) return false;
+  if (stage.needs && stage.needs.some(n => st.hits.has(n))) return true;
+  if (stage.test) {
+    try { return !!stage.test(st.view || null, st.ui || null, st); } catch { return false; }
+  }
+  return false;
+}
+
+// Advance st.stage over every satisfied sub-goal (forward only, so tapping
+// Drag → Select → Drag can't walk the checklist backwards).
+function advanceStages(step) {
+  let moved = false;
+  while (st.stage < step.stages.length && stageDone(step.stages[st.stage])) {
+    st.stage++;
+    moved = true;
+  }
+  return moved;
+}
+
+// Renders the "▸ Try it: …" line, the stage checklist, or the muted reason.
+function renderTodo() {
+  const el = $('ct-todo');
+  if (!el) return;
+  const step = steps()[st.idx];
+  if (!gating() || !step) { el.classList.add('hidden'); el.textContent = ''; return; }
+  const avail = availability(step);
+  if (avail !== true) {
+    el.textContent = avail;
+    el.className = 'mt-2 text-xs text-zinc-500 italic';
+    el.classList.remove('hidden');
+    return;
+  }
+  if (step.stages) {
+    el.innerHTML = step.stages.map((s, i) => {
+      if (i < st.stage) return `<span class="text-emerald-400">✓ ${s.label}</span>`;
+      if (i === st.stage) return `<span class="text-sky-300 font-semibold">▸ ${s.label}</span>`;
+      return `<span class="text-zinc-500">${s.label}</span>`;
+    }).join('<span class="text-zinc-600"> · </span>');
+    el.className = 'mt-2 text-xs';
+    el.classList.remove('hidden');
+    return;
+  }
+  if (step.todo || step.needs || step.practice) {
+    el.textContent = `▸ Try it: ${step.todo || 'perform the gesture above'}`;
+    el.className = 'mt-2 text-xs text-sky-300 font-semibold';
+    el.classList.remove('hidden');
+    return;
+  }
+  el.classList.add('hidden');
+  el.textContent = '';
+}
+
+function flashDone() {
+  st.flashUntil = performance.now() + FLASH_MS;
+  const t = $('ct-text');
+  t.textContent = '✓ Nicely done!';
+  t.classList.add('text-emerald-300');
+  const todo = $('ct-todo');
+  if (todo) todo.classList.add('hidden');
+}
+
+// The single gate check, shared by tick() (each frame) and signal() (the
+// instant a gesture lands, so one that reverts in the same frame still counts).
+function evaluate() {
+  if (!gating() || st.flashUntil) return;
+  const step = steps()[st.idx];
+  if (!step) return;
+  if (availability(step) !== true) { renderTodo(); return; }
+  if (step.stages) {
+    if (advanceStages(step)) {
+      if (st.stage >= step.stages.length) { flashDone(); return; }
+      renderTodo();
+    }
+    return;
+  }
+  let ok = false;
+  if (step.needs && step.needs.some(n => st.hits.has(n))) ok = true;
+  if (!ok && step.practice) {
+    try { ok = !!step.practice(st.view || null, st.ui || null, st); } catch { ok = false; }
+  }
+  if (ok) flashDone();
+}
+
+// -- render ---------------------------------------------------------------
+
 function render() {
   if (!st) return;
   const list = steps();
@@ -258,6 +446,9 @@ function render() {
   const skip = $('ct-skip');
   skip.textContent = st.skipLabel || 'Skip tour';
   skip.classList.toggle('hidden', st.mode !== 'tour');
+  const exit = $('ct-exit');
+  exit.textContent = st.exitLabel || '';
+  exit.classList.toggle('hidden', !st.exitLabel);
   $('ct-swap').textContent = st.set === 'desktop'
     ? 'Show touch controls' : 'Show mouse & keyboard controls';
   // reference mode is modal (scrim + centred card); tour mode leaves the map
@@ -271,6 +462,12 @@ function render() {
   card.classList.toggle('pointer-events-auto', true);
   card.classList.toggle('ct-card-center', reference);
   card.classList.toggle('ct-card-tour', !reference);
+  card.classList.toggle('ct-card-collapsed', !!st.collapsed);
+  const coll = $('ct-collapse');
+  coll.textContent = st.collapsed ? '▴' : '▾';
+  coll.setAttribute('aria-label', st.collapsed ? 'Expand the controls card' : 'Fold the controls card away');
+  coll.classList.toggle('hidden', st.mode !== 'tour');
+  renderTodo();
   syncAnchor();
   syncRing();
 }
@@ -282,10 +479,17 @@ function go(delta) {
   if (next < 0) return;
   if (next >= list.length) { close({ seen: true }); return; }
   st.idx = next;
+  resetStep();
+  render();
+  evaluate(); // a step whose gate is already satisfied shouldn't stall
+}
+
+function resetStep() {
+  st.hits = new Set();
+  st.stage = 0;
   st.camStart = null;
   st.zoomStart = null;
   st.flashUntil = 0;
-  render();
 }
 
 function wire() {
@@ -294,13 +498,13 @@ function wire() {
   $('ct-next').addEventListener('click', () => go(1));
   $('ct-back').addEventListener('click', () => go(-1));
   $('ct-skip').addEventListener('click', () => close({ seen: true }));
+  $('ct-exit').addEventListener('click', () => close({ seen: true }));
+  $('ct-collapse').addEventListener('click', () => toggleCollapse());
   $('ct-swap').addEventListener('click', () => {
     if (!st) return;
     st.set = st.set === 'desktop' ? 'touch' : 'desktop';
     st.idx = 0;
-    st.camStart = null;
-    st.zoomStart = null;
-    st.flashUntil = 0;
+    resetStep();
     render();
   });
   $('ct-scrim').addEventListener('click', () => close({ seen: false }));
@@ -312,16 +516,18 @@ function wire() {
 
 // -- API ------------------------------------------------------------------
 
-// open({ mode, set, step, force, finishLabel, skipLabel, onClose })
+// open({ mode, set, step, force, finishLabel, skipLabel, exitLabel, onClose })
 //   mode        'tour' (non-modal, over a live match) | 'reference' (modal card)
 //   set         'touch' | 'desktop' — which page set to show
 //   step        0-based starting index
-//   force       screenshot deep links: ignore the seen flag / viewport width
+//   force       screenshot deep links: ignore the seen flag / viewport width,
+//               and treat width-dependent gates as available
 //   finishLabel replaces '✓ Got it' on the last step
 //   skipLabel   replaces 'Skip tour'
-// The two labels are plain overrides on purpose: the caller (main.js's phone
-// tutorial prelude) owns the wording, so this module needs to know nothing
-// about tutorials.
+//   exitLabel   adds an extra escape link (the practice map's "Exit practice")
+// The labels are plain overrides on purpose: the caller (main.js's tutorial
+// prelude / practice map) owns the wording and what closing means, so this
+// module needs to know nothing about tutorials or sandboxes.
 export function open(opts) {
   const o = opts || {};
   wire();
@@ -330,11 +536,18 @@ export function open(opts) {
     mode: o.mode === 'reference' ? 'reference' : 'tour',
     set: o.set === 'desktop' ? 'desktop' : 'touch',
     idx: Math.max(0, o.step || 0),
+    force: !!o.force,
     finishLabel: o.finishLabel || null,
     skipLabel: o.skipLabel || null,
+    exitLabel: o.exitLabel || null,
+    collapsed: false,
+    hits: new Set(),
+    stage: 0,
     flashUntil: 0,
     camStart: null,
     zoomStart: null,
+    view: null,
+    ui: null,
   };
   const list = steps();
   if (st.idx >= list.length) st.idx = list.length - 1;
@@ -356,6 +569,9 @@ export function close(opts) {
   clearRing();
   st = null;
   deps = null;
+  lastGame = null;
+  const card = $('controls-tour-card');
+  if (card) card.classList.remove('ct-card-collapsed');
   $('controls-tour').classList.add('hidden');
   if (hid) {
     const tbox = $('tutorial-box');
@@ -366,12 +582,32 @@ export function close(opts) {
 
 export function active() { return !!st; }
 
-// Called each frame from main.js's loop while the tour is open: polls the
-// step's practice predicate (with a brief ✓ flash before advancing), and
-// keeps the ring and the bottom-anchor offset current as the panel grows
-// and shrinks underneath.
-export function tick(view, ui) {
+// Fold the card down to a header pill and back. Gating keeps running while
+// folded, so the player can tuck the card away, do the gesture, and watch the
+// step tick over.
+export function toggleCollapse() {
   if (!st) return;
+  st.collapsed = !st.collapsed;
+  render();
+}
+
+// A gesture landed. No-op unless an interactive touch tour is open; otherwise
+// latch the name for this step and re-check the gate immediately, so a gesture
+// that resolves and reverts inside one frame still counts.
+export function signal(name) {
+  if (!gating() || !name) return;
+  st.hits.add(name);
+  evaluate();
+}
+
+// Called each frame from main.js's loop while the tour is open: keeps the
+// step's view/ui/game handles current, polls the gate, and keeps the ring and
+// the bottom-anchor offset in step with the panel growing and shrinking.
+export function tick(view, ui, game) {
+  if (!st) return;
+  st.view = view || null;
+  st.ui = ui || null;
+  lastGame = game || null;
   const now = performance.now();
   if (st.flashUntil) {
     if (now < st.flashUntil) return;
@@ -381,13 +617,7 @@ export function tick(view, ui) {
   }
   syncAnchor();
   syncRing();
-  if (st.mode !== 'tour') return;
-  const step = steps()[st.idx];
-  if (!step || !step.practice) return;
-  if (step.practice(view, ui, st)) {
-    st.flashUntil = now + 700;
-    const t = $('ct-text');
-    t.textContent = '✓ Nicely done!';
-    t.classList.add('text-emerald-300');
-  }
+  if (!gating()) return;
+  renderTodo(); // availability can change as the panel rebuilds
+  evaluate();
 }

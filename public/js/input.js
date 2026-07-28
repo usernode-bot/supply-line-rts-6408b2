@@ -61,6 +61,9 @@ export function createInput({ canvas, minimap, view, handlers }) {
       const [a, b] = [...pointers.values()];
       mode = 'pinch';
       if (handlers.gesture) handlers.gesture();
+      // a real two-finger pinch, as distinct from a wheel/trackpad zoom —
+      // the controls tour's zoom step gates on this (#212)
+      if (handlers.pinch) handlers.pinch();
       pinch = {
         d: Math.hypot(a.x - b.x, a.y - b.y),
         scale: view.scale,
@@ -250,6 +253,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
     canvas.focus({ preventScroll: true });
     minimap.setPointerCapture(e.pointerId);
     if (handlers.gesture) handlers.gesture();
+    if (handlers.minimap) handlers.minimap(); // controls tour's jump step (#212)
     minimapJump(e);
     e.preventDefault();
     e.stopPropagation();
