@@ -49,8 +49,15 @@ export const C = {
                            // ring bounces back from a raid in a few minutes, but
                            // repeated raids keep knocking it down faster than it heals
   TERRITORY: 5,            // settlement territory radius: feeds friendly blobs, farmer reach, drawn ring
-  UNIT_HP: 100,            // individual unit health (deploy / supply)
+  UNIT_HP: 100,            // individual unit health (deploy); also the DAMAGE SCALE —
+                           // applyLosses spends casualties × UNIT_HP regardless of the
+                           // victim's roles, so a smaller role max means "dies faster"
   UNIT_HP_FARM: 10,        // farmers are 1/10th as tough
+  UNIT_HP_SUPPLY: 40,      // caravans travel light (#213): 40 % of a fighter, so a
+                           // pure-supply blob dies 2.5× faster than the same headcount
+                           // of soldiers — and it returns no fire at all. Garrisoned
+                           // supply militia is untouched: applyGarrisonLosses counts
+                           // whole units and never reads per-unit HP.
   HEAL_FRAC: 0.001,        // fraction of max HP regained per tick at home (1%/s — see tickHeal)
   FLOW_FX_TICKS: 10,       // resource-flow particle travel time in ticks (< fx prune window)
   WHEAT_FX_FOOD: 1.0,      // food earned per wheat particle (farm income → settlement)
@@ -81,6 +88,12 @@ export const C = {
                            // refeeds its own bellies from this, never eats it directly
   WALL_NEAR_PROT: 10,      // structure-damage divisor while a friendly garrison is within 1 tile
   WALL_VISION: 4,          // fog reveal radius per GARRISONED wall tile
+  WALL_REGEN: 0.05,        // self-repair per tick for a PROTECTED wall out of combat (#217):
+                           // 0.05 × 2000 ticks = WALL_HP, i.e. rubble→full in 200 sim-s
+                           // (400 s ≈ 6m40s at the 1× default) — half the rate a wounded
+                           // unit heals at home (HEAL_FRAC × UNIT_HP = 0.1/tick)
+  WALL_REGEN_BARE: 0.01,   // unmanned AND uncovered: the old SETT_REGEN crawl (~33 min at
+                           // 1× for a full heal). Stone doesn't repair itself; people do.
 };
 
 // Difficulty is AI *skill*, not an economy cheat: every level earns food
@@ -265,8 +278,12 @@ export function settVisible(game, s) {
 
 // -- per-unit records: each unit has its own hp plus a hidden seed that
 // fixes the (invisible) order units absorb damage in. Max HP depends on
-// role: farmers are 1/10th as tough as deploy/supply units.
-export function unitMaxHP(role) { return role === 'farm' ? C.UNIT_HP_FARM : C.UNIT_HP; }
+// role: farmers are 1/10th as tough as a fighter, supply units 40 % (#213).
+export function unitMaxHP(role) {
+  if (role === 'farm') return C.UNIT_HP_FARM;
+  if (role === 'supply') return C.UNIT_HP_SUPPLY;
+  return C.UNIT_HP;
+}
 function newUnit(role) { return { role, hp: unitMaxHP(role), seed: Math.random() }; }
 // Role changes convert HP proportionally (a half-dead fighter becomes a
 // half-dead farmer, and vice versa).
@@ -1245,8 +1262,15 @@ function tickWallBuild(game) {
 function tickWalls(game) {
   for (const w of [...game.walls]) {
     if (w.building) continue;
+    // slow self-repair out of combat (#217). The rate is people-driven:
+    // a PROTECTED tile (its own garrison, or a friendly one within 1 tile —
+    // the same wallProtected predicate combat and the renderer use, so the
+    // look, the damage tier and the repair rate can never drift apart) knits
+    // back at WALL_REGEN; an abandoned, uncovered one keeps the old crawl.
+    // Being NEAR an enemy doesn't stop repairs — being hit does, via lastHitT.
     if (w.hp < C.WALL_HP && game.tick - (w.lastHitT != null ? w.lastHitT : -999) > 100) {
-      w.hp = Math.min(C.WALL_HP, w.hp + C.SETT_REGEN);
+      const rate = wallProtected(game, w) ? C.WALL_REGEN : C.WALL_REGEN_BARE;
+      w.hp = Math.min(C.WALL_HP, w.hp + rate);
     }
     // pending garrison arm-up (#108 pattern): converts the whole
     // garrison to the ordered role once the countdown completes
@@ -1351,6 +1375,32 @@ function fieldAssign(game, b, x, y) {
   recount(b);
   b.dead = true;
   return { ok: true, fielded: n };
+}
+
+// Carry an arriving group's pending arm-up into the garrison it just
+// folded into (#215) — walls and settlements alike, since both wear the
+// same {garrison, convert} shape. `armUp` is the ABSORBED blob's convert
+// record, captured before the absorb bookkeeping killed it.
+//
+// The structure's convert applies to its whole garrison (see the arm-up
+// blocks in tickSettlement / tickWalls), so this can arm more units than
+// the arrivals alone. That's deliberate: it's visible (panel line + amber
+// progress bar) and one tap undoes it, whereas silently dropping a role
+// order the player gave is the worse failure. Returns true when an arm-up
+// was actually taken on, so the caller can say so in its event.
+function carryGarrisonArmUp(game, holder, armUp, garrTotal) {
+  if (!armUp || garrTotal <= 0) return false;
+  // already entirely in that role — nothing to arm (mirrors opGarrisonRole /
+  // opWallGarrisonRole's "already in that role" short-circuit)
+  if (holder.garrison[armUp.role] === garrTotal) { holder.convert = null; return false; }
+  if (holder.convert && holder.convert.role === armUp.role) {
+    // both arming to the same role: the earlier finish wins, so marching
+    // reinforcements in never restarts the countdown
+    holder.convert = { role: armUp.role, done: Math.min(holder.convert.done, armUp.done) };
+    return true;
+  }
+  holder.convert = { role: armUp.role, done: armUp.done };
+  return true;
 }
 
 // Whether (x, y) is a spot where `owner`'s arriving units fold into a
@@ -1489,7 +1539,10 @@ export function opSplit(game, b, takeN) {
   if (n < 2) return { err: 'Too small to split' };
   leaveRoute(game, b);
   b.order = null; b.path = null; b.chaseId = null;
-  b.convert = null; // splitting cancels a pending arm-up (#108)
+  // a pending arm-up SURVIVES the split (#215): both halves keep arming on
+  // the same countdown. Splitting is a formation change, not a role order —
+  // only an explicit role pick (or fielding) cancels an arm-up.
+  const armUp = b.convert ? { role: b.convert.role, done: b.convert.done } : null;
   const take = Math.max(1, Math.min(n - 1, Math.round(takeN)));
   const newCount = { deploy: 0, supply: 0, farm: 0 };
   for (const role of ['deploy', 'supply', 'farm']) {
@@ -1520,6 +1573,9 @@ export function opSplit(game, b, takeN) {
   const nb = makeBlob(game, b.owner, spot.x + 0.5, spot.y + 0.5, null, taken);
   nb.food = foodShare;
   nb.pillaging = b.pillaging;
+  // each half gets its OWN record, never a shared reference — finishConvert
+  // nulls one and must not touch the other
+  if (armUp) nb.convert = { role: armUp.role, done: armUp.done };
   b.noMerge = true;
   nb.noMerge = true;
   return { ok: true, blob: nb };
@@ -2180,6 +2236,9 @@ function tickOrder(game, b) {
           if (room > 0) {
             const take = Math.min(room, total(b));
             const foodShare = total(b) > 0 ? b.food * take / total(b) : 0;
+            // pending arm-up read BEFORE the absorb (#215) — a remainder blob
+            // left outside keeps its own copy and goes on arming
+            const armUp = b.convert ? { role: b.convert.role, done: b.convert.done } : null;
             for (let k = 0; k < take; k++) {
               const u = b.units.shift();
               w.garrison[u.role]++;
@@ -2195,7 +2254,12 @@ function tickOrder(game, b) {
             w.stock = Math.min(C.WALL_FOOD_CAP, (w.stock || 0) + (foodShare - toMeter));
             if (b.units.length === 0) b.dead = true;
             else b.food = Math.min(b.food, foodCap(b));
-            game.events.push({ owner: b.owner, msg: `🧱 +${take} garrisoned on the wall`, x: w.x + 0.5, y: w.y + 0.5 });
+            const armed = carryGarrisonArmUp(game, w, armUp, wallGarrisonTotal(w));
+            game.events.push({
+              owner: b.owner,
+              msg: `🧱 +${take} garrisoned on the wall${armed ? ' — arming continues' : ''}`,
+              x: w.x + 0.5, y: w.y + 0.5,
+            });
           } else if (!o.fullWarned) {
             // a full tile used to swallow the order in silence (#201) —
             // say so once, then let the group stand where it was sent
@@ -2212,6 +2276,8 @@ function tickOrder(game, b) {
       const s = game.settlements.find(s2 => s2.owner === b.owner && !s2.building && dist(s2.x + 1, s2.y + 1, b.x, b.y) < 1.9);
       if (s) { // garrison
         const n = total(b);
+        // pending arm-up carries into the town's garrison (#215)
+        const armUp = b.convert ? { role: b.convert.role, done: b.convert.done } : null;
         s.garrison.deploy += b.count.deploy;
         s.garrison.supply += b.count.supply;
         s.garrison.farm += b.count.farm;
@@ -2222,8 +2288,13 @@ function tickOrder(game, b) {
         s.garrFood = (s.garrFood || 0) + toMeter;
         s.stockpile = Math.min(C.STOCK_CAP, s.stockpile + (b.food - toMeter));
         b.dead = true;
+        const armed = carryGarrisonArmUp(game, s, armUp, garrisonTotal(s));
         // announce the absorb (#135) — a silent disappearance reads as a bug
-        game.events.push({ owner: b.owner, msg: `🏠 +${n} garrisoned into ${s.name}`, x: s.x + 1, y: s.y + 1 });
+        game.events.push({
+          owner: b.owner,
+          msg: `🏠 +${n} garrisoned into ${s.name}${armed ? ' — arming continues' : ''}`,
+          x: s.x + 1, y: s.y + 1,
+        });
       }
     }
   }
@@ -3450,12 +3521,25 @@ function tickSettlement(game, s) {
         const f = spawnWorkingFarmer(game, s);
         const give = Math.min(s.stockpile, foodCap(f));
         s.stockpile -= give;
+        s.parts.upkeep -= give; // panel breakdown only — see the flowAcc note below
         f.food = give;
       }
     }
   } else if (s.mode === 'supply' || s.mode === 'deploy') {
     if (!trainGated(s) && investProduction(game, s)) {
       s.garrison[s.mode === 'supply' ? 'supply' : 'deploy']++;
+      // the recruit arrives with rations (#210), exactly like a new farmer
+      // above. Without this the new mouth diluted the garrison's shared
+      // meter (garrFood stays put while gcap grows by FOOD_PER_UNIT), so a
+      // unit trained into a small garrison and fielded at once marched out
+      // Famished — at half combat strength. Best-effort: an empty granary
+      // still honestly produces a hungry recruit, and training never stalls.
+      const give = Math.min(s.stockpile, C.FOOD_PER_UNIT);
+      if (give > 0) {
+        s.stockpile -= give;
+        s.garrFood = (s.garrFood || 0) + give;
+        s.parts.upkeep -= give;
+      }
     }
   }
   // release the docked-carrier hold-back (#193): it survives past
@@ -3569,11 +3653,16 @@ function tickMerge(game) {
         keep.order.cargo = (keep.order.cargo || 0) + add;
         keep.food = Math.min(foodCap(keep), keep.food + (goneCargo - add));
       }
-      // pending arm-ups (#108): survive only when both halves were
-      // converting to the same role (earlier finish wins); mixed intent drops
-      keep.convert = keep.convert && gone.convert && keep.convert.role === gone.convert.role
-        ? { role: keep.convert.role, done: Math.min(keep.convert.done, gone.convert.done) }
-        : null;
+      // pending arm-ups (#215): the survivor adopts one from EITHER half —
+      // earliest finish wins. Merging is an automatic event the player never
+      // asked for, so it must not silently drop a role order (the old rule
+      // dropped it even when the SURVIVOR was the arming half). Arming is
+      // always an upgrade toward deploy, so adopting is never a downgrade.
+      const armA = keep.convert, armB = gone.convert;
+      keep.convert = armA && armB
+        ? { role: armA.done <= armB.done ? armA.role : armB.role, done: Math.min(armA.done, armB.done) }
+        : armA ? { role: armA.role, done: armA.done }
+          : armB ? { role: armB.role, done: armB.done } : null;
       // settle between the two groups so the absorbed half doesn't
       // teleport; skip onto-mountain / onto-settlement centroids
       if (passable(game.map, Math.floor(cx), Math.floor(cy)) && !game.settAt[tileIdx(game, cx, cy)]) {

@@ -1069,6 +1069,12 @@ export function createRenderer(canvas, minimap) {
     if (ui.pending === 'wall') {
       let end = ui.wallEnd;
       if (!end && ui.hover) end = { x: Math.floor(ui.hover.x), y: Math.floor(ui.hover.y) };
+      // touch-only devices have no hover (#214): input.mouseWorld is null
+      // until a mouse moves, so after the FIRST tap there was no `end` at
+      // all and this whole block drew nothing — the tap read as if it
+      // hadn't registered. Fall back to the pinned start so the degenerate
+      // one-tile "line" marks the anchor immediately.
+      if (!end && ui.wallStart) end = ui.wallStart;
       if (end) {
         end = {
           x: Math.max(0, Math.min(game.map.w - 1, end.x)),
@@ -1089,6 +1095,20 @@ export function createRenderer(canvas, minimap) {
             : `rgba(248,113,113,${isStart ? 1 : 0.8})`;
           ctx.lineWidth = isStart ? 2.5 : 1.5;
           ctx.strokeRect(wx(t.x) + 0.5, wy(t.y) + 0.5, s - 1, s - 1);
+          // 🧱 on the anchored start (#214): at a phone's default zoom
+          // (~17 px/tile) a lone dashed outline is easy to miss, so the
+          // pinned tile also carries the glyph — same faint treatment as
+          // the queued-wall markers above.
+          if (isStart && s >= 10) {
+            ctx.setLineDash([]);
+            ctx.globalAlpha = 0.45;
+            ctx.font = `${Math.max(8, Math.min(14, s * 0.55))}px system-ui`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('🧱', wx(t.x + 0.5), wy(t.y + 0.5));
+            ctx.globalAlpha = 1;
+            ctx.setLineDash([5, 3]);
+          }
         }
         ctx.setLineDash([]);
       }
@@ -1427,37 +1447,45 @@ export function createRenderer(canvas, minimap) {
       ctx.textBaseline = 'middle';
       ctx.fillText('🔨', x0 + size / 2, y0 + size / 2);
     }
-    // chips + bars mirror the settlement treatment (render drawSettlement):
-    // 🌾 stockpile chip (own walls only — the enemy's stays private, #86),
-    // a garrison chip whose icons reflect the actual role mix, and bars
-    // stacked below the tile: damage/progress, rations, arming progress.
+    // chips + bars, tuned for a ONE-tile body (#211): a single garrison
+    // chip, an occasional 🌾 stockpile chip (own walls only — the enemy's
+    // stays private, #86), and bars stacked below the tile: damage/progress,
+    // rations, arming progress. The bars are the low-zoom readout.
     const gTot = w.garrison ? w.garrison.deploy + w.garrison.supply + w.garrison.farm : 0;
     const own = !ghost && w.owner === viewer(game);
+    // A wall is ONE tile, not a settlement's 2×2 keep, so it cannot carry
+    // the same amount of text (#211): at a phone's default zoom (~17 px/tile)
+    // the old three-part role chip measured ~3 tiles wide and a garrisoned
+    // chain smeared overlapping labels across the whole line. Two rules
+    // instead: ONE combined garrison chip, and a fit test that refuses to
+    // draw any label wider than its own tile — so no zoom level, font or
+    // DPR can reproduce the overlap. Exact numbers live in the panel.
     const chipAt = (label, lx, ly, fs, col) => {
       ctx.font = `600 ${fs}px system-ui`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       const tw = ctx.measureText(label).width;
+      if (tw + 4 > size) return false; // wouldn't fit its tile — skip it
       ctx.fillStyle = 'rgba(0,0,0,0.45)';
       ctx.fillRect(lx - tw / 2 - 2, ly - fs * 0.7, tw + 4, fs * 1.4);
       ctx.fillStyle = col || '#e4e4e7';
       ctx.fillText(label, lx, ly);
+      return true;
     };
     const fs = Math.max(9, Math.min(12, s * 0.5));
-    const showStock = own && !building && s >= 8 && (gTot > 0 || (w.stock || 0) >= 1);
-    if (showStock) {
-      // the tile's SUPPLIES stash (#200) — stored grain, wheat-tinted.
-      // Distinct from the hunger bar below it, which is the garrison's
-      // own bellies: two pools, two readouts, two colour languages.
-      chipAt(`🌾${Math.floor(w.stock || 0)}`, x0 + size / 2, y0 + size * 0.3, fs, WHEAT);
-    }
-    if (!ghost && gTot > 0 && s >= 8) {
-      // role-mix icons, like settlement garrison chips, not a flat ⚔️
-      const parts = [];
-      if (w.garrison.deploy > 0) parts.push(`⚔️${w.garrison.deploy}`);
-      if (w.garrison.supply > 0) parts.push(`🚚${w.garrison.supply}`);
-      if (w.garrison.farm > 0) parts.push(`🌱${w.garrison.farm}`);
-      chipAt(parts.join(' '), x0 + size / 2, y0 + size * (showStock ? 0.66 : 0.45), fs);
+    const CHIP_MIN_S = 12; // below this the bars under the tile carry the state
+    // the tile's SUPPLIES stash (#200) — stored grain, wheat-tinted, and
+    // distinct from the hunger bar below (that's the garrison's bellies).
+    // Only worth the pixels when the tile is SELECTED or actually starving:
+    // otherwise the rations bar says enough and the chain stays readable.
+    const showStock = own && !building && s >= CHIP_MIN_S
+      && (gTot > 0 || (w.stock || 0) >= 1)
+      && (sel || S.wallStarving(w))
+      && chipAt(`🌾${Math.floor(w.stock || 0)}`, x0 + size / 2, y0 + size * 0.3, fs, WHEAT);
+    if (!ghost && gTot > 0 && s >= CHIP_MIN_S) {
+      // one chip: the garrison total under the icon of its dominant role
+      const icon = w.garrison.deploy > 0 ? '⚔️' : w.garrison.supply > 0 ? '🚚' : '🌱';
+      chipAt(`${icon}${gTot}`, x0 + size / 2, y0 + size * (showStock ? 0.66 : 0.45), fs);
     }
     let barY = y0 + size + 1;
     // build-progress / damage bar

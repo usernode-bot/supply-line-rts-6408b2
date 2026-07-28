@@ -58,7 +58,8 @@ function spawnBlob(game, owner, x, y, deploy, supply) {
   const units = [];
   for (const role of ['deploy', 'supply']) {
     for (let k = 0; k < counts[role]; k++) {
-      units.push({ role, hp: role === 'farm' ? 10 : 100, seed: (units.length + 1) / 100 });
+      // per-role max, never a hardcoded 100 — supply units are 40 HP (#213)
+      units.push({ role, hp: S.unitMaxHP(role), seed: (units.length + 1) / 100 });
     }
   }
   const b = {
@@ -944,6 +945,258 @@ function hpOf(b) { return b.units.reduce((a, u) => a + u.hp, 0); }
     check('the disengage flag survives', !!(a2 && a2.order && a2.order.disengage));
     check('the garrison flag survives', !!(b2 && b2.order && b2.order.garrison));
   }
+}
+
+// ---------------------------------------------------------------- 9. wall self-repair (#217)
+
+{
+  console.log('damaged walls knit back together out of combat (#217):');
+  const g = fresh();
+  const spot = findClearPair(g);
+  // a manned tile and a bare one, both battered to half, both left alone
+  const manned = injectWall(g, 0, spot.x, spot.y, { deploy: 3, supply: 0, farm: 0 },
+    { stock: S.C.WALL_FOOD_CAP });
+  const bare = injectWall(g, 0, spot.x + 2, spot.y, null);
+  manned.hp = 50; bare.hp = 50;
+  manned.lastHitT = -999; bare.lastHitT = -999;
+  const TICKS = 200;
+  run(g, TICKS);
+  const dManned = manned.hp - 50, dBare = bare.hp - 50;
+  check(`a manned wall repairs at ≈WALL_REGEN/tick (+${dManned.toFixed(2)} over ${TICKS})`,
+    Math.abs(dManned - S.C.WALL_REGEN * TICKS) < 0.5, `got ${dManned}`);
+  check(`an abandoned wall keeps the old crawl (+${dBare.toFixed(2)})`,
+    Math.abs(dBare - S.C.WALL_REGEN_BARE * TICKS) < 0.5, `got ${dBare}`);
+  check('the protected rate is materially faster than the bare one', dManned > dBare * 4,
+    `manned=${dManned} bare=${dBare}`);
+  check('repair never overshoots WALL_HP', manned.hp <= S.C.WALL_HP && bare.hp <= S.C.WALL_HP);
+}
+
+{
+  console.log('a wall under attack does not repair (#217):');
+  const g = fresh();
+  const spot = findClearPair(g);
+  const w = injectWall(g, 0, spot.x, spot.y, { deploy: 4, supply: 0, farm: 0 },
+    { stock: S.C.WALL_FOOD_CAP });
+  w.hp = 40;
+  // an enemy war party parked Chebyshev-adjacent refreshes lastHitT every tick
+  const foe = spawnBlob(g, 1, spot.x - 0.5, spot.y + 0.5, 6, 0);
+  let peak = w.hp;
+  for (let t = 0; t < 150; t++) {
+    foe.x = spot.x - 0.5; foe.y = spot.y + 0.5; // hold contact
+    foe.food = S.foodCap(foe);
+    S.step(g);
+    if (!g.walls.some(x => x.id === w.id)) break;
+    peak = Math.max(peak, w.hp);
+  }
+  check(`structure HP never climbed while in contact (peak ${peak.toFixed(2)} ≤ 40)`,
+    peak <= 40.0001, `peak=${peak}`);
+}
+
+// ---------------------------------------------------------------- 10. caravan fragility (#213)
+
+{
+  console.log('supply caravans die faster than the same headcount of soldiers (#213):');
+  check(`a supply unit's max HP is UNIT_HP_SUPPLY (${S.C.UNIT_HP_SUPPLY})`,
+    S.unitMaxHP('supply') === S.C.UNIT_HP_SUPPLY);
+  check('a soldier is still UNIT_HP and a farmer UNIT_HP_FARM',
+    S.unitMaxHP('deploy') === S.C.UNIT_HP && S.unitMaxHP('farm') === S.C.UNIT_HP_FARM);
+
+  // one victim of each kind, each pinned in contact with an identical raiding
+  // party, so the only variable is the victim's own toughness
+  function ticksToDie(supplyN, deployN) {
+    const g = freshField();
+    const area = findOpenArea(g, 7);
+    if (!area) return null;
+    g.blobs.length = 0;
+    const victim = spawnBlob(g, 0, area.x + 0.5, area.y + 0.5, deployN, supplyN);
+    const raider = spawnBlob(g, 1, area.x + 1.4, area.y + 0.5, 6, 0);
+    for (let t = 1; t <= 3000; t++) {
+      raider.x = area.x + 1.4; raider.y = area.y + 0.5;
+      raider.food = S.foodCap(raider);
+      victim.x = area.x + 0.5; victim.y = area.y + 0.5;
+      S.step(g);
+      if (victim.dead) return t;
+    }
+    return Infinity;
+  }
+  const tCaravan = ticksToDie(4, 0);
+  const tSoldiers = ticksToDie(0, 4);
+  if (tCaravan != null && tSoldiers != null) {
+    // 4 carriers = 160 HP vs 4 fighters = 400 HP against the same damage rate
+    const ratio = tSoldiers / tCaravan;
+    check(`a 4-unit caravan dies ~2.5× faster than 4 soldiers (${tCaravan} vs ${tSoldiers} ticks)`,
+      ratio > 2.0 && ratio < 3.2, `ratio=${ratio.toFixed(2)}`);
+    check(`the caravan is gone inside ~15 s of 1× play (${S.gameSeconds(tCaravan).toFixed(1)} s)`,
+      S.gameSeconds(tCaravan) < 15, `${S.gameSeconds(tCaravan)}s`);
+  }
+
+  // blobHealth reads against the role max, so a fresh caravan is still 100 %
+  const g2 = fresh();
+  const spot2 = findClearPair(g2);
+  const car = spawnBlob(g2, 0, spot2.x - 3.5, spot2.y + 0.5, 0, 3);
+  check('a fresh caravan reads full health', Math.abs(S.blobHealth(car) - 1) < 1e-9,
+    `health=${S.blobHealth(car)}`);
+  check('arming a wounded carrier keeps its wound fraction', (() => {
+    car.units[0].hp = S.C.UNIT_HP_SUPPLY / 2;
+    const frac = S.blobHealth(car);
+    S.opSetRole(g2, car, 'deploy');
+    run(g2, S.C.CONVERT_TICKS + 2);
+    return car.count.deploy === 3 && Math.abs(S.blobHealth(car) - frac) < 1e-6;
+  })(), `health=${S.blobHealth(car)}`);
+}
+
+{
+  console.log('old saves with 100-HP supply units are clamped on load (#213):');
+  const g = fresh();
+  const spot = findClearPair(g);
+  const b = spawnBlob(g, 0, spot.x - 3.5, spot.y + 0.5, 0, 2);
+  const data = JSON.parse(JSON.stringify(S.serialize(g)));
+  const bd = data.blobs.find(x => x.id === b.id);
+  for (const u of bd.units) u.hp = 100; // pre-#213 save
+  const g2 = S.deserialize(data);
+  const b2 = g2.blobs.find(x => x.id === b.id);
+  check('supply HP is clamped to the new role max',
+    b2.units.every(u => u.hp <= S.C.UNIT_HP_SUPPLY), JSON.stringify(b2.units.map(u => u.hp)));
+  check('so a migrated caravan reads exactly full, never over',
+    Math.abs(S.blobHealth(b2) - 1) < 1e-9, `health=${S.blobHealth(b2)}`);
+}
+
+// ---------------------------------------------------------------- 11. arm-up survival (#215)
+
+{
+  console.log('a pending arm-up survives an auto-merge (#215):');
+  const g = freshField();
+  const area = findOpenArea(g, 7);
+  if (area) {
+    g.blobs.length = 0;
+    const a = spawnBlob(g, 0, area.x + 0.5, area.y + 0.5, 0, 6);   // the arming half
+    const b = spawnBlob(g, 0, area.x + 0.9, area.y + 0.5, 0, 2);   // idle, not arming
+    check('arm order accepted', !!S.opSetRole(g, a, 'deploy').ok);
+    const done = a.convert.done;
+    run(g, 10); // tickMerge runs every 5 ticks
+    const survivor = g.blobs.find(x => !x.dead && x.owner === 0);
+    check('the two groups merged', g.blobs.filter(x => !x.dead && x.owner === 0).length === 1);
+    check('the survivor is still arming', !!(survivor && survivor.convert),
+      JSON.stringify(survivor && survivor.convert));
+    check('on the original countdown', !!survivor.convert && survivor.convert.done === done,
+      `${survivor.convert && survivor.convert.done} vs ${done}`);
+    run(g, S.C.CONVERT_TICKS + 5);
+    check('and the whole merged group ends up armed',
+      survivor.count.deploy === S.total(survivor), JSON.stringify(survivor.count));
+  }
+}
+
+{
+  console.log('a pending arm-up survives a split (#215):');
+  const g = fresh();
+  const spot = findClearPair(g);
+  const b = spawnBlob(g, 0, spot.x - 3.5, spot.y + 0.5, 0, 6);
+  S.opSetRole(g, b, 'deploy');
+  const done = b.convert.done;
+  const r = S.opSplit(g, b, 3);
+  check('split accepted', !!r.ok, JSON.stringify(r));
+  check('the parent is still arming', !!b.convert && b.convert.done === done);
+  check('the new half is arming too', !!(r.blob && r.blob.convert && r.blob.convert.done === done),
+    JSON.stringify(r.blob && r.blob.convert));
+  check('each half has its OWN record (not a shared reference)', b.convert !== r.blob.convert);
+  run(g, S.C.CONVERT_TICKS + 5);
+  check('both halves finish armed',
+    b.count.deploy === S.total(b) && r.blob.count.deploy === S.total(r.blob),
+    `${JSON.stringify(b.count)} / ${JSON.stringify(r.blob.count)}`);
+}
+
+{
+  console.log('a pending arm-up carries into a wall garrison (#215):');
+  const g = fresh();
+  const spot = findClearPair(g);
+  const w = injectWall(g, 0, spot.x, spot.y, null, { stock: S.C.WALL_FOOD_CAP });
+  // stand on the neighbouring clear tile findClearPair guarantees, so the
+  // march is one tile and the group ARRIVES while still arming
+  const b = spawnBlob(g, 0, spot.x + 1.5, spot.y + 0.5, 0, 3);
+  S.opSetRole(g, b, 'deploy');
+  const done = b.convert.done;
+  S.opMove(g, b, spot.x + 0.5, spot.y + 0.5);
+  run(g, 40); // well inside CONVERT_TICKS (100)
+  check('the group garrisoned the wall', S.wallGarrisonTotal(w) === 3,
+    JSON.stringify(w.garrison));
+  check('the wall garrison picked up the arm-up', !!(w.convert && w.convert.role === 'deploy'),
+    JSON.stringify(w.convert));
+  check('on the original countdown', !!w.convert && w.convert.done === done,
+    `${w.convert && w.convert.done} vs ${done}`);
+  run(g, S.C.CONVERT_TICKS + 5);
+  check('and the wall garrison ends up armed', w.garrison.deploy === 3, JSON.stringify(w.garrison));
+  // fielding a garrison still cancels an arm-up — that's documented in the UI
+  S.opWallGarrisonRole(g, w.id, 'deploy');
+  check('an already-armed garrison takes no pointless arm-up', !w.convert);
+}
+
+{
+  console.log('a pending arm-up carries into a settlement garrison (#215):');
+  const g = freshField();
+  const home = g.settlements.find(s => s.owner === 0);
+  const b = spawnBlob(g, 0, home.x + 4, home.y + 1, 0, 3);
+  S.opSetRole(g, b, 'deploy');
+  const done = b.convert.done;
+  S.opMove(g, b, home.x + 1, home.y + 1);
+  run(g, 40); // arrives WHILE still arming (CONVERT_TICKS is 100)
+  check('the group garrisoned the town', b.dead, `dead=${b.dead}`);
+  check('the town garrison picked up the arm-up', !!(home.convert && home.convert.role === 'deploy'),
+    JSON.stringify(home.convert));
+  check('on the original countdown', !!home.convert && home.convert.done === done,
+    `${home.convert && home.convert.done} vs ${done}`);
+  run(g, S.C.CONVERT_TICKS + 5);
+  check('the garrison finished arming', home.garrison.deploy === S.garrisonTotal(home),
+    JSON.stringify(home.garrison));
+  // and fielding still cancels, as the panel promises
+  home.convert = { role: 'deploy', done: g.tick + S.C.CONVERT_TICKS };
+  S.opFieldGarrison(g, home);
+  check('fielding still cancels a garrison arm-up', !home.convert);
+}
+
+// ---------------------------------------------------------------- 12. recruit rations (#210)
+
+{
+  console.log('newly trained units arrive with rations, not famished (#210):');
+  const g = freshField();
+  const home = g.settlements.find(s => s.owner === 0);
+  g.blobs.length = 0;                     // no field armies eating the stores
+  home.garrison = { deploy: 0, supply: 0, farm: 0 };
+  home.garrFood = 0;
+  home.stockpile = S.C.STOCK_CAP;
+  S.opSetMode(g, home, 'deploy');
+  let trained = 0;
+  for (let t = 0; t < 4000 && trained < 1; t++) {
+    S.step(g);
+    trained = S.garrisonTotal(home);
+  }
+  check('the town trained a unit', trained >= 1, `garrison=${trained}`);
+  check(`the recruit's rations read Well-fed (${S.fedLabel(S.settFedMeter(home))})`,
+    S.fedLabel(S.settFedMeter(home)) === 'Well-fed',
+    `meter=${S.settFedMeter(home).toFixed(3)}`);
+  const r = S.opFieldRole(g, home, 'deploy', 1);
+  check('fielding it works', !!r.ok, JSON.stringify(r));
+  check(`the fielded unit marches out Well-fed (${r.blob && S.fedLabel(S.fedMeter(r.blob))})`,
+    !!r.blob && S.fedLabel(S.fedMeter(r.blob)) === 'Well-fed',
+    r.blob && `meter=${S.fedMeter(r.blob).toFixed(3)}`);
+  check('and at full combat strength', !!r.blob && S.fedMult(S.fedMeter(r.blob)) === 1.25,
+    r.blob && `mult=${S.fedMult(S.fedMeter(r.blob))}`);
+}
+
+{
+  console.log('an empty granary still honestly trains a hungry recruit (#210):');
+  const g = freshField();
+  const home = g.settlements.find(s => s.owner === 0);
+  g.blobs.length = 0;
+  home.garrison = { deploy: 0, supply: 0, farm: 0 };
+  home.garrFood = 0;
+  home.trainAcc = S.C.TRAIN_COST;  // paid for, but nothing banked for rations
+  home.stockpile = 0;
+  S.opSetMode(g, home, 'deploy');
+  const before = S.garrisonTotal(home);
+  run(g, 1);
+  check('training is never blocked by missing rations', S.garrisonTotal(home) >= before,
+    `${before} → ${S.garrisonTotal(home)}`);
+  check('the stockpile never goes negative', home.stockpile >= -1e-9, `stockpile=${home.stockpile}`);
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall checks passed');
