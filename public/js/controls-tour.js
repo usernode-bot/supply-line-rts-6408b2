@@ -14,17 +14,11 @@
 
 const $ = (id) => document.getElementById(id);
 
-const SEEN_KEY = 'supply-line-controls-tour-v1';
-
-export function seen() {
-  try { return localStorage.getItem(SEEN_KEY) === '1'; } catch { return false; }
-}
-// Exported so main.js can mark the tour delivered on a path that doesn't run
-// through close({ seen: true }) — the phone tutorial prelude and the practice
-// map mark seen the moment they actually hand over.
-export function markSeen() {
-  try { localStorage.setItem(SEEN_KEY, '1'); } catch { }
-}
+// This module owns no persistence: which page sets a player has read lives in
+// main.js's playerState section (account-backed, localStorage-cached). All the
+// tour does is report, through onClose({ set, seen }), which set was on screen
+// when it closed and whether the player reached the end — main.js decides what
+// that means.
 
 // -- figures: inline SVG only, no assets and no build step ----------------
 
@@ -276,9 +270,11 @@ const FLASH_MS = 700;
 
 function steps() { return st && st.set === 'desktop' ? DESK_STEPS : TOUCH_STEPS; }
 
-// Gating only ever applies to the interactive touch tour: the desktop pages
-// and every reference open are read-only.
-function gating() { return !!st && st.mode === 'tour' && st.set !== 'desktop'; }
+// Whether the current pages wait for real gestures. Decided by the CALLER at
+// open() time (see the `gated` option) rather than derived from the page set,
+// because the touch pages shown on a desktop-width screen must read through
+// rather than ask for fingers that aren't there.
+function gating() { return !!st && st.mode === 'tour' && !!st.gated; }
 
 function clearRing() {
   if (ringEl) {
@@ -503,6 +499,7 @@ function wire() {
   $('ct-swap').addEventListener('click', () => {
     if (!st) return;
     st.set = st.set === 'desktop' ? 'touch' : 'desktop';
+    st.gated = false; // swapping is a lookup, never something to perform
     st.idx = 0;
     resetStep();
     render();
@@ -520,8 +517,11 @@ function wire() {
 //   mode        'tour' (non-modal, over a live match) | 'reference' (modal card)
 //   set         'touch' | 'desktop' — which page set to show
 //   step        0-based starting index
-//   force       screenshot deep links: ignore the seen flag / viewport width,
-//               and treat width-dependent gates as available
+//   gated       whether the steps wait for real gestures; defaults to
+//               set === 'touch'. The caller owns this because it depends on the
+//               SCREEN, not the page set (see gating()).
+//   force       screenshot deep links: ignore the viewport width, and treat
+//               width-dependent gates as available
 //   finishLabel replaces '✓ Got it' on the last step
 //   skipLabel   replaces 'Skip tour'
 //   exitLabel   adds an extra escape link (the practice map's "Exit practice")
@@ -532,9 +532,11 @@ export function open(opts) {
   const o = opts || {};
   wire();
   deps = { onClose: o.onClose || null };
+  const set = o.set === 'desktop' ? 'desktop' : 'touch';
   st = {
     mode: o.mode === 'reference' ? 'reference' : 'tour',
-    set: o.set === 'desktop' ? 'desktop' : 'touch',
+    set,
+    gated: o.gated === undefined ? set === 'touch' : !!o.gated,
     idx: Math.max(0, o.step || 0),
     force: !!o.force,
     finishLabel: o.finishLabel || null,
@@ -560,10 +562,13 @@ export function open(opts) {
   render();
 }
 
+// close({ seen }) — `seen` means the player reached the end or skipped, i.e.
+// the pages were delivered. The set that was ON SCREEN at close time is
+// reported to onClose, so a mid-tour swap credits the pages actually read.
 export function close(opts) {
   if (!st) return;
   const o = opts || {};
-  if (o.seen) markSeen();
+  const info = { set: st.set, seen: !!o.seen };
   const hid = st.hidTutBox;
   const cb = deps && deps.onClose;
   clearRing();
@@ -577,7 +582,7 @@ export function close(opts) {
     const tbox = $('tutorial-box');
     if (tbox) tbox.classList.remove('hidden');
   }
-  if (cb) cb();
+  if (cb) cb(info);
 }
 
 export function active() { return !!st; }

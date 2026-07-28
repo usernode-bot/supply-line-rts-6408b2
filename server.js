@@ -185,6 +185,49 @@ app.put('/api/save', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------- player state
+
+// Per-player onboarding progress (#212): which controls page sets the player
+// has read, and whether they've finished the guided tutorial. Kept in its own
+// table rather than inside the save row because clearSaves() DELETEs that row
+// on every finished match — these flags have to outlive it.
+//
+// Every flag is a MONOTONIC "has happened" bit, which is what makes syncing
+// trivial: merging two devices is a logical OR, so there is no conflict to
+// resolve and the API has no way to express un-setting one.
+const STATE_KEYS = ['tutorial_done', 'controls_touch_seen', 'controls_desktop_seen'];
+
+app.get('/api/player-state', async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT state FROM player_state WHERE user_id = $1`, [req.user.id]);
+    res.json({ state: r.rows.length ? r.rows[0].state : {} });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/player-state', async (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    // whitelist + monotonic: only known keys, and only ever set to true
+    const patch = {};
+    for (const k of STATE_KEYS) if (body[k] === true) patch[k] = true;
+    if (!Object.keys(patch).length) return res.status(400).json({ error: 'No known flags to set' });
+    const r = await pool.query(`
+      INSERT INTO player_state (user_id, username, state, updated_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (user_id) DO UPDATE
+        SET state = player_state.state || EXCLUDED.state,
+            username = EXCLUDED.username,
+            updated_at = NOW()
+      RETURNING state
+    `, [req.user.id, req.user.username, patch]);
+    res.json({ state: r.rows[0].state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/save', async (req, res) => {
   try {
     await pool.query(`DELETE FROM saves WHERE user_id = $1`, [req.user.id]);
@@ -513,6 +556,20 @@ async function start() {
       username VARCHAR(255) NOT NULL,
       data JSONB NOT NULL,
       saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  // Cross-device onboarding progress (#212): the controls-seen marks and the
+  // tutorial-done mark, so they follow the player between devices instead of
+  // living in one browser. Deliberately PUBLIC (no staging:private comment):
+  // a row is a user id, a public username and a few onboarding booleans —
+  // the same sensitivity class as `matches` and `saves`.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS player_state (
+      user_id INTEGER PRIMARY KEY,
+      username VARCHAR(255) NOT NULL,
+      state JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
 

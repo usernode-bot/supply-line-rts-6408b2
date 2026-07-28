@@ -21,6 +21,130 @@ const SAVE_KEY = 'supply-line-save-v1';
 const IS_DEMO = params.get('demo') === '1';
 const SHOT = params.get('shot') || ''; // screenshot-state deep link (#199)
 
+// ---------------------------------------------------------------- player state (#212)
+// Onboarding progress — which controls page sets have been read, and whether
+// the guided tutorial is done — lives against the signed-in account
+// (/api/player-state) so it follows the player between devices, with
+// localStorage as the cache/fallback for offline play and tokenless boots.
+//
+// Every flag is MONOTONIC ("has happened", never un-happens), so merging the
+// cache and the server is a logical OR in both directions: no timestamps, no
+// conflict rules, no authoritative side.
+
+const PS_KEYS = {
+  // the tutorial key is the one that shipped before this table existed, so it
+  // keeps its name and migrates into the account on the first successful sync
+  tutorial_done: 'supply-line-tutorial-done-v1',
+  controls_touch_seen: 'supply-line-controls-seen-touch-v1',
+  controls_desktop_seen: 'supply-line-controls-seen-desktop-v1',
+};
+const PS = { tutorial_done: false, controls_touch_seen: false, controls_desktop_seen: false };
+let stateLoaded = false;   // has the account's copy answered (or been ruled out)?
+let visOverride = null;    // ?shot= boots pin the machine's inputs; see bootShotState
+
+const seenKeyFor = (set) => (set === 'desktop' ? 'controls_desktop_seen' : 'controls_touch_seen');
+
+function loadLocalState() {
+  for (const k of Object.keys(PS)) {
+    try { PS[k] = localStorage.getItem(PS_KEYS[k]) === '1'; } catch { PS[k] = false; }
+  }
+  // No account to ask: the cache IS the truth, so render from it immediately.
+  if (!token) stateLoaded = true;
+}
+loadLocalState();
+
+function flag(name) {
+  if (visOverride) return !!visOverride[name];
+  return !!PS[name];
+}
+
+// The single write path. Monotonic, so a second call is a no-op; the cache is
+// written first and the account is updated fire-and-forget, exactly like the
+// solo save's PUT.
+function setFlag(name) {
+  if (visOverride) return;         // a screenshot boot must never write anything
+  if (PS[name]) return;
+  PS[name] = true;
+  try { localStorage.setItem(PS_KEYS[name], '1'); } catch { }
+  if (token) {
+    fetch('/api/player-state', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...apiHeaders },
+      body: JSON.stringify({ [name]: true }),
+    }).catch(() => { });
+  }
+  refreshControlsVisibility();
+  refreshTutorialButton();
+}
+
+// The boot read, modelled on refreshServerSave(): unawaited, never throws, and
+// re-renders whatever depends on it once the answer lands.
+async function refreshPlayerState() {
+  if (!token || visOverride) { stateLoaded = true; return; }
+  try {
+    const r = await fetch('/api/player-state', { headers: apiHeaders });
+    const j = r.ok ? await r.json() : null;
+    const remote = (j && j.state && typeof j.state === 'object') ? j.state : {};
+    const behind = [];
+    for (const k of Object.keys(PS)) {
+      if (remote[k] === true && !PS[k]) {
+        PS[k] = true;
+        try { localStorage.setItem(PS_KEYS[k], '1'); } catch { }
+      } else if (PS[k] && remote[k] !== true) {
+        behind.push(k); // this device knows something the account doesn't
+      }
+    }
+    // push up anything written while offline (or before this table existed)
+    if (behind.length) {
+      const patch = {};
+      for (const k of behind) patch[k] = true;
+      fetch('/api/player-state', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...apiHeaders },
+        body: JSON.stringify(patch),
+      }).catch(() => { });
+    }
+  } catch { /* offline / 401 — the cache stands in */ }
+  stateLoaded = true;
+  refreshControlsVisibility();
+  refreshTutorialButton();
+  refreshMenu();
+}
+
+// ---------------------------------------------------------------- controls visibility (#212)
+// Three states, from the two controls marks plus the tutorial mark:
+//   1  tutorial not done      → no menu 🕹️; the tutorial teaches the controls
+//   2  one set still unread   → menu 🕹️ names that set and boots practice on it
+//   3  both sets read         → both 🕹️ buttons retire
+
+// The first unread set, preferring the one this screen actually uses.
+function unseenSet() {
+  const mine = isMobile() ? 'touch' : 'desktop';
+  const other = mine === 'touch' ? 'desktop' : 'touch';
+  if (!flag(seenKeyFor(mine))) return mine;
+  if (!flag(seenKeyFor(other))) return other;
+  return null;
+}
+
+function controlsState() {
+  if (!flag('tutorial_done')) return 1;
+  return unseenSet() === null ? 3 : 2;
+}
+
+// Both buttons stay in the DOM and are hidden by class. While the account's
+// copy is still in flight everything is hidden: a control may APPEAR once
+// progress is known, but must never vanish from under the player's finger.
+function refreshControlsVisibility() {
+  const state = stateLoaded ? controlsState() : 0;
+  const unseen = state === 2 ? unseenSet() : null;
+  const menu = $('btn-controls');
+  menu.classList.toggle('hidden', !unseen);
+  if (unseen) {
+    menu.textContent = unseen === 'touch' ? '🕹️ Show controls for mobile' : '🕹️ Show controls for desktop';
+  }
+  $('btn-help').classList.toggle('hidden', state !== 1 && state !== 2);
+}
+
 let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1; // displayed speed step 1–4; the sim multiplier is speed × 0.5
@@ -38,6 +162,9 @@ mqDesktop.addEventListener('change', () => {
   // the tour keeps whichever page set is already open — rotating a phone
   // across the 640px line must not swap the content mid-read
   if (CT.active()) CT.tick(view, ui, game);
+  // ...but the menu button's label names the viewport's own set first, so it
+  // can change when both sets are still unread
+  refreshControlsVisibility();
 });
 let renderer = null, input = null;
 let groups = {};                      // control groups (#69): n -> {kind:'blobs', ids} | {kind:'settlement', id}
@@ -320,12 +447,8 @@ $('btn-resume').addEventListener('click', () => {
 // A scripted, ephemeral solo scenario driven by tutorial.js: never saved,
 // never recorded, and it leaves any in-progress solo save untouched.
 
-const TUT_DONE_KEY = 'supply-line-tutorial-done-v1';
-
 function refreshTutorialButton() {
-  let done = false;
-  try { done = localStorage.getItem(TUT_DONE_KEY) === '1'; } catch { }
-  $('btn-tutorial').textContent = done ? '📖 Replay tutorial' : '📖 Tutorial';
+  $('btn-tutorial').textContent = flag('tutorial_done') ? '📖 Replay tutorial' : '📖 Tutorial';
 }
 
 function beginTutorial(g) {
@@ -337,14 +460,17 @@ function startTutorial() {
     me = 0;
     const g = S.newTutorialGame();
     startMatch(g);
-    // On phones the controls tour runs FIRST, as step 0 of onboarding: the
-    // gestures it asks the player to try (pan, pinch, tap a unit) only work
-    // while the scenario's per-step input gating is still inert, i.e. before
-    // TUT.begin. So arm a handoff and defer the begin into the tour's close.
-    if (isMobile() && !SHOT) {
+    // The controls tour runs FIRST, as step 0 of onboarding, on BOTH widths —
+    // the hands-on touch steps on a phone, the mouse & keyboard pages on a
+    // desktop screen. It has to come before TUT.begin because the gestures it
+    // asks for (pan, pinch, tap a unit) only work while the scenario's
+    // per-step input gating is still inert. So arm a handoff and defer the
+    // begin into the tour's close. Skipped once this platform's set is read.
+    const set = isMobile() ? 'touch' : 'desktop';
+    if (!SHOT && !flag(seenKeyFor(set))) {
       pendingTutorialBegin = { game: g, persist: true };
       openControlsTour({
-        mode: 'tour', set: 'touch',
+        mode: 'tour', set, gated: set === 'touch' && isMobile(),
         finishLabel: '✓ Start the tutorial', skipLabel: 'Skip to tutorial',
       });
     } else {
@@ -367,7 +493,7 @@ function confirmExitTutorial() {
 }
 
 function finishTutorial() {
-  try { localStorage.setItem(TUT_DONE_KEY, '1'); } catch { }
+  setFlag('tutorial_done');
   TUT.end();
   backToMenu();
 }
@@ -378,7 +504,7 @@ function finishTutorial() {
 // never saved, never recorded, and it never clears the player's real save.
 function keepPlayingTutorial() {
   if (!game || !game.tutorial) return;
-  try { localStorage.setItem(TUT_DONE_KEY, '1'); } catch { }
+  setFlag('tutorial_done');
   TUT.end();
   game.tutorial = false; // gating, AI skip and hint suppression all key off this
   game.sandbox = true;
@@ -419,12 +545,15 @@ let pendingTutorialBegin = null;
 // tutorial, or the 🕹️ toggle — so "the scenario started" and "the tour counts
 // as delivered" stay in lockstep. Force-closes (match over, back to menu)
 // clear the pending entry first and so never land here.
-function runPendingTutorialBegin() {
+function runPendingTutorialBegin(set) {
   const pending = pendingTutorialBegin;
   pendingTutorialBegin = null; // clear first: a re-entrant close must not double-begin
   if (!pending) return;
   if (pending.game !== game || !game.tutorial || game.result) return;
-  if (pending.persist) CT.markSeen(); // a tutorial player never gets the tour again
+  // credit the set that was ON SCREEN, so a mid-prelude swap marks what was
+  // actually read — and do it even when the 🕹️ toggle closed with seen:false,
+  // so "the scenario started" and "the pages were delivered" stay in lockstep
+  if (pending.persist) setFlag(seenKeyFor(set));
   beginTutorial(pending.game);
 }
 
@@ -440,14 +569,21 @@ function openControlsTour(opts) {
   CT.open({ ...o, onClose: onTourClose });
 }
 
-function onTourClose() {
+// info is { set, seen } from controls-tour.js: which page set was on screen at
+// close time, and whether the player reached the end (or skipped). This is the
+// ONLY place a controls set gets marked read.
+function onTourClose(info) {
+  const o = info || {};
+  const set = o.set === 'desktop' ? 'desktop' : 'touch';
   if (tourPausedBefore !== null) {
     paused = tourPausedBefore;
     tourPausedBefore = null;
     $('btn-pause').textContent = paused ? '▶' : '⏸';
   }
-  runPendingTutorialBegin(); // after the pause restore, so the scenario starts running
-  endPracticeIfPending();
+  if (o.seen) setFlag(seenKeyFor(set));
+  runPendingTutorialBegin(set); // after the pause restore, so the scenario starts running
+  endPracticeIfPending(set);
+  refreshControlsVisibility();
 }
 
 // Force-close without marking seen — a player whose match ends mid-tour
@@ -468,23 +604,24 @@ function closeControlsTour() {
 // which saveGame bails on), never recorded, and it leaves an in-progress solo
 // save alone — note the deliberate absence of clearSaves() here.
 //
-// Which page set depends on the width: phones get the gated touch tour, and a
-// desktop-width screen gets the mouse & keyboard pages over the same live map.
-// Those pages are ungated by construction (controls-tour.js skips gating for
-// the desktop set — there are no desktop gesture signals), so the map is there
-// to try right-click orders, WASD and the wheel on while reading, not to be
-// quizzed on. The map stays paused either way.
+// The page set is the CALLER's choice — in state 2 the menu button offers
+// whichever set is still unread, which may not be the one this screen uses. The
+// gates only ever run for the touch pages on a phone-sized screen (see the
+// `gated` option); everywhere else the map is simply there to try right-click
+// orders, WASD and the wheel on while reading. The map stays paused either way.
 
 let pendingPracticeExit = false; // close the tour → leave the practice map
 
-function startControlsPractice() {
+function startControlsPractice(setArg) {
   try {
     me = 0;
+    const set = setArg === 'desktop' || setArg === 'touch'
+      ? setArg : (isMobile() ? 'touch' : 'desktop');
     const g = S.newPracticeGame();
     startMatch(g);
     pendingPracticeExit = true;
     openControlsTour({
-      mode: 'tour', set: isMobile() ? 'touch' : 'desktop',
+      mode: 'tour', set, gated: set === 'touch' && isMobile(),
       finishLabel: '✓ Done', skipLabel: 'Skip', exitLabel: 'Exit practice',
     });
   } catch (e) {
@@ -495,11 +632,11 @@ function startControlsPractice() {
 // Every close path of a practice tour ends the sandbox: finishing the last
 // step, Skip, and Exit practice all land here. Marking seen keeps the
 // invariant "the tour was delivered" true however it was closed.
-function endPracticeIfPending() {
+function endPracticeIfPending(set) {
   if (!pendingPracticeExit) return;
   pendingPracticeExit = false; // clear first — backToMenu re-enters closeControlsTour
   if (!game || !game.practice) return;
-  CT.markSeen();
+  setFlag(seenKeyFor(set)); // however it was closed, those pages were delivered
   backToMenu();
 }
 
@@ -513,7 +650,7 @@ $('btn-help').addEventListener('click', () => {
 $('btn-controls').addEventListener('click', () => {
   if (CT.active()) { CT.close({ seen: false }); return; }
   if (waiting) { showMenuError('Cancel your multiplayer lobby first.'); return; }
-  startControlsPractice(); // both widths — the page set follows the viewport
+  startControlsPractice(unseenSet()); // whichever set is still unread
 });
 
 // In-app confirm dialog — native confirm() is blocked inside the sandboxed
@@ -1109,14 +1246,16 @@ function startMatch(g) {
   renderer.resize();
   renderPanel(true);
   updateGroupsBar();
+  refreshControlsVisibility(); // the top-bar 🕹️ retires once both sets are read
 
   // first-run controls tour (#212): phone widths only, and never on top of
   // the guided tutorial's own card, a PvP match (no pausing, an opponent is
   // waiting), the practice sandbox or a ?shot= screenshot boot — those last
   // two open it explicitly right after this returns.
   closeControlsTour();
-  if (isMobile() && !SHOT && !g.pvp && !g.tutorial && !g.practice && !CT.seen()) {
-    openControlsTour({ mode: 'tour', set: 'touch' });
+  if (stateLoaded && isMobile() && !SHOT && !g.pvp && !g.tutorial && !g.practice
+    && !flag('controls_touch_seen')) {
+    openControlsTour({ mode: 'tour', set: 'touch', gated: true });
   }
 }
 
@@ -1134,6 +1273,7 @@ function backToMenu() {
   $('main-menu').classList.remove('hidden');
   refreshMenu();
   refreshTutorialButton();
+  refreshControlsVisibility();
   refreshServerSave();
   loadHistory();
   loadRatings();
@@ -3555,7 +3695,25 @@ const TOUR_SHOTS = {
   'controls-tour-modes': { step: 6 },     // step 7 — Select vs Drag
   'tutorial-prelude': { step: 0, tutorial: true },      // 📖 Tutorial, step 1 of the tour
   'tutorial-prelude-end': { step: 9, tutorial: true },  // its hand-over step
+  'tutorial-prelude-desktop': { step: 0, tutorial: true, desk: true }, // its desktop form
+  'tutorial-prelude-desktop-end': { step: 3, tutorial: true, desk: true }, // ...and its hand-over page
 };
+
+// The visibility machine's states (#212) are per-account, so no URL can reach
+// state 2 or 3 by itself — and a signed-in reviewer may already be in state 3,
+// where there is nothing to screenshot. These links pin the machine's inputs in
+// memory instead: no fetch, no write, no localStorage, identical in staging and
+// production, and immune to whose account is looking.
+const BTN_SHOTS = {
+  'controls-btn-mobile': { tutorial_done: true, controls_touch_seen: false, controls_desktop_seen: true },
+  'controls-btn-desktop': { tutorial_done: true, controls_touch_seen: true, controls_desktop_seen: false },
+};
+function shotControlsButton(state) {
+  visOverride = state;
+  stateLoaded = true;
+  refreshTutorialButton();
+  refreshControlsVisibility();
+}
 function shotControlsTour(desc) {
   clearSaves();
   me = 0;
@@ -3570,9 +3728,10 @@ function shotControlsTour(desc) {
   updateHUD();
   // `desk` renders the mouse & keyboard pages the practice map shows at
   // desktop widths; every other link forces the touch set so a desktop-width
-  // screenshot harness still captures the phone content.
+  // screenshot harness still captures the phone content — gated, so the "Try
+  // it" line and the stage checklist are in both capture frames.
   const opts = {
-    mode: 'tour', set: desc.desk ? 'desktop' : 'touch',
+    mode: 'tour', set: desc.desk ? 'desktop' : 'touch', gated: !desc.desk,
     step: desc.step, force: true, onClose: onTourClose,
   };
   if (desc.tutorial) {
@@ -3595,7 +3754,9 @@ function shotControlsTour(desc) {
 
 refreshMenu();
 refreshTutorialButton();
+refreshControlsVisibility();
 refreshServerSave();
+refreshPlayerState(); // account-backed onboarding flags; re-renders when it lands
 loadHistory();
 loadRatings();
 startMenuPolling();
@@ -3607,6 +3768,9 @@ if (SHOT === 'wall-garrison') {
 }
 if (SHOT === 'in-combat') {
   try { shotInCombat(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (BTN_SHOTS[SHOT]) {
+  try { shotControlsButton(BTN_SHOTS[SHOT]); } catch (e) { console.warn('shot link failed', e); }
 }
 if (TOUR_SHOTS[SHOT]) {
   try { shotControlsTour(TOUR_SHOTS[SHOT]); } catch (e) { console.warn('shot link failed', e); }
