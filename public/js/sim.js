@@ -555,6 +555,36 @@ export function newTutorialGame() {
   return game;
 }
 
+// Controls-practice sandbox (#212): the map behind the menu's 🕹️ button. The
+// standard solo start already carries almost everything the controls tour asks
+// the player to try — a settlement with farmers in its fields (so the panel's
+// Recall button exists for the hold-and-slide step) and a 10-unit army (so the
+// action list offers ✂️ Split and 🏠 Build) — this adds a garrison, so Field
+// exists too, and a second small group to catch in a drag-box.
+//
+// game.practice switches the enemy commander off in main.js's loop and hides
+// surrender / speed; game.sandbox (the flag the tutorial's "keep playing"
+// already uses) makes it a throwaway — never saved, never recorded, and it
+// leaves the player's real solo save untouched.
+export function newPracticeGame() {
+  const game = newGame('practice-1', 'xsmall', 'easy');
+  game.practice = true;
+  game.sandbox = true;
+  const home = game.settlements.find(s => s.owner === 0);
+  home.stockpile = 300;         // nothing runs dry during a long session
+  home.garrison.deploy = 4;     // gives the panel its Field chip + hold button
+  home.garrFood = garrisonTotal(home) * C.FOOD_PER_UNIT;
+  // A second group a few tiles from the army, so box-select and multi-select
+  // have something to catch besides the army itself.
+  const s = game.map.starts[0];
+  const spot = nearestPassable(game.map, s.x + 4, s.y + 2, 4, null,
+    new Set(settTiles(game.map, home))) || { x: s.x + 4, y: s.y + 2 };
+  const pair = makeBlob(game, 0, spot.x + 0.5, spot.y + 0.5, { deploy: 2, supply: 0, farm: 0 });
+  pair.food = foodCap(pair);
+  updateVision(game);
+  return game;
+}
+
 // Which side this client plays. In PvP, `game.fog` stays aliased to the
 // viewer's own fog array so all render/UI fog reads are viewer-relative.
 export function setViewer(game, me) {

@@ -112,6 +112,48 @@
       80% { transform: translateX(5px); }
     }
     .tut-shake { animation: tut-shake 0.35s ease; }
+    /* controls tour (#212): the same pulse as .tut-pulse, but a distinct
+       class applied to CONTAINER elements (#mode-toggle, #panel,
+       #groups-bar). tutorial.js's MutationObserver owns .tut-pulse on
+       [data-act] buttons and would fight a shared class. */
+    .ct-ring {
+      outline: 2px solid rgba(56, 189, 248, 0.9);
+      outline-offset: 2px;
+      border-radius: 0.5rem;
+      animation: tut-pulse 1.3s ease-out infinite;
+    }
+    /* tour mode: card pinned under the top bar (or bottom-anchored from JS,
+       so step 1 can't cover the phone minimap it talks about) */
+    .ct-card-tour { top: 3rem; left: 0; right: 0; margin-left: auto; margin-right: auto; }
+    /* reference mode: centred modal card */
+    .ct-card-center { top: 50%; left: 50%; transform: translate(-50%, -50%); }
+    /* folded down to a header pill, so the card can be tucked out of the way
+       of whatever the current step asks the player to tap (layout only — no
+       animation, nothing for prefers-reduced-motion to freeze). The id is in
+       the selector on purpose: the card carries Tailwind's own max-h-[70%],
+       and a bare class would lose to it. */
+    #controls-tour-card.ct-card-collapsed {
+      max-height: 2.75rem;
+      overflow: hidden;
+      padding-top: 0.4rem;
+      padding-bottom: 0.4rem;
+    }
+    @keyframes ct-slide { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(58px); } }
+    @keyframes ct-dash { to { stroke-dashoffset: -18; } }
+    @keyframes ct-pinch-a { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(-14px); } }
+    @keyframes ct-pinch-b { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(14px); } }
+    @keyframes ct-tap { 0% { r: 8; opacity: 0.9; } 100% { r: 17; opacity: 0; } }
+    @keyframes ct-fill { 0%, 100% { width: 46px; } 50% { width: 92px; } }
+    .ct-fig-slide { animation: ct-slide 2.4s ease-in-out infinite; }
+    .ct-fig-dash { animation: ct-dash 1s linear infinite; }
+    .ct-fig-pinch-a { animation: ct-pinch-a 2s ease-in-out infinite; }
+    .ct-fig-pinch-b { animation: ct-pinch-b 2s ease-in-out infinite; }
+    .ct-fig-tap { animation: ct-tap 1.6s ease-out infinite; }
+    .ct-fig-fill { animation: ct-fill 2.4s ease-in-out infinite; }
+    @media (prefers-reduced-motion: reduce) {
+      .ct-ring, .ct-fig-slide, .ct-fig-dash, .ct-fig-pinch-a,
+      .ct-fig-pinch-b, .ct-fig-tap, .ct-fig-fill { animation: none; }
+    }
   </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 h-full overflow-hidden">
@@ -129,6 +171,7 @@
       <button id="btn-backtowork" class="btn-sm px-3 rounded bg-emerald-800 hover:bg-emerald-700 hidden whitespace-nowrap"></button>
       <span id="stat-opp" class="hidden text-red-300 truncate max-w-[30vw]"></span>
       <span class="flex-1"></span>
+      <button id="btn-help" aria-label="Controls help" title="Controls help" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">🕹️</button>
       <button id="btn-pause" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">⏸</button>
       <select id="sel-speed" class="btn-sm px-2 rounded bg-zinc-800 hover:bg-zinc-700 font-mono text-zinc-100">
         <option value="1" selected>1×</option>
@@ -247,6 +290,11 @@
 
       <button id="btn-tutorial" class="btn w-full py-3 rounded-xl bg-sky-800 hover:bg-sky-700 font-semibold">📖 Tutorial</button>
 
+      <!-- label + visibility are state-driven (#212): refreshControlsVisibility()
+           names whichever controls set the player hasn't read, and hides the
+           button entirely before the tutorial is done / once both are read -->
+      <button id="btn-controls" class="hidden btn w-full py-3 rounded-xl bg-sky-900 hover:bg-sky-800 font-semibold -mt-2">🕹️ Show controls for mobile</button>
+
       <div id="mp-section" class="bg-zinc-900 rounded-xl p-4 flex flex-col gap-3 border border-zinc-800">
         <h2 class="font-semibold text-zinc-200">Multiplayer</h2>
 
@@ -298,7 +346,7 @@
           <p><b class="text-zinc-200">🌾 Food</b> — Every unit eats. Armies stay fed inside your own territory; beyond it, toggle <b class="text-zinc-200">Pillage</b> to live off the land you're on, or run a <b class="text-zinc-200">Supply route</b> from a settlement. Hungry armies fight worse — and starve at zero.</p>
           <p><b class="text-zinc-200">🏠 Settlements</b> — Cost 5 units to found; build on fertile land. Each runs one mode: <b class="text-zinc-200">Farm</b> (grow population), train <b class="text-zinc-200">Supply</b>/<b class="text-zinc-200">Deploy</b> units, or <b class="text-zinc-200">Stockpile</b> food. A garrisoned town defends its walls hard; an empty one falls in seconds.</p>
           <p><b class="text-zinc-200">🧱 Walls</b> — Any units can build a wall: pick <b class="text-zinc-200">Wall</b>, then click where the line starts and where it ends (more hands build faster). Your units cross freely; enemies must break through. Garrison up to 8 units per tile — a manned wall (or one with a garrison within 1 tile) holds hard and strikes enemies next to or diagonal from it; an unmanned, uncovered wall crumbles in seconds. On Normal and Hard the enemy commander builds walls too — and a wall you haven't scouted won't show on your map until you do. On Hard it also breaches yours, and sends raiding parties after your caravans and field hands. On Very Hard it mans and resupplies its walls — including the plugs it drops across mountain passes.</p>
-          <p><b class="text-zinc-200">🕹️ Controls</b> — Touch: tap a blob to select, tap ground to move, tap an enemy to attack; tap your selection again for actions (Build, Pillage, Split…). Desktop: left-click selects, right-click moves or attacks, drag box-selects, wheel zooms.</p>
+          <p><b class="text-zinc-200">🕹️ Controls</b> — Touch: tap a blob to select, tap ground to move, tap an enemy to attack; tap your selection again for actions (Build, Pillage, Split…). Desktop: left-click selects, right-click moves or attacks, drag box-selects, wheel zooms. Hold ✂️ Split, Recall or Field on a phone to slide a count; the numbered chips on the left edge are control groups.</p>
           <p class="text-zinc-500 italic">Everything else — sieges, flanking, raiding caravans — you'll pick up as you play.</p>
         </div>
       </details>
@@ -323,6 +371,38 @@
         <p class="text-xs text-zinc-500 mb-2">The commanders are fixed anchors — beating one lifts you toward its rating, never past it. Climb higher in multiplayer.</p>
         <div id="ratings-rows" class="space-y-1 text-sm text-zinc-400">Loading…</div>
       </div>
+    </div>
+  </div>
+
+  <!-- ============ Controls tour (#212) ============ -->
+  <!-- Top-level so it can open over the menu as well as a live match. In
+       tour mode the root is pointer-transparent (only the card takes taps)
+       so the map behind stays fully usable for the practice steps; in
+       reference mode #ct-scrim dims and swallows taps like a modal. -->
+  <div id="controls-tour" class="hidden fixed inset-0 z-40">
+    <div id="ct-scrim" class="hidden absolute inset-0 bg-black/70"></div>
+    <div id="controls-tour-card"
+      class="ct-card-tour pointer-events-auto absolute w-[92%] max-w-md max-h-[70%] overflow-y-auto px-4 py-3 rounded-xl bg-indigo-950/95 backdrop-blur border border-sky-700 text-sm shadow-lg">
+      <div class="flex items-center justify-between gap-3 mb-1">
+        <span id="ct-step" class="text-xs font-semibold text-sky-300"></span>
+        <span class="flex items-center gap-3">
+          <button id="ct-skip" class="text-xs text-zinc-400 hover:text-zinc-200 underline">Skip tour</button>
+          <button id="ct-collapse" class="btn-sm px-2 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 leading-none"
+            aria-label="Fold the controls card away">▾</button>
+        </span>
+      </div>
+      <h2 id="ct-title" class="font-semibold text-zinc-100 mb-1"></h2>
+      <div id="ct-figure" class="hidden text-zinc-500 mb-2"></div>
+      <p id="ct-text" class="text-zinc-100"></p>
+      <!-- the "▸ Try it: …" line, the multi-part checklist, or the reason a
+           step's gate can't be met in this match -->
+      <div id="ct-todo" class="hidden mt-2 text-xs text-sky-300 font-semibold"></div>
+      <div class="flex gap-2 mt-3">
+        <button id="ct-back" class="btn px-4 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200">Back</button>
+        <button id="ct-next" class="btn flex-1 rounded-lg bg-sky-700 hover:bg-sky-600 font-semibold">Next</button>
+      </div>
+      <button id="ct-swap" class="mt-2 w-full text-xs text-zinc-400 hover:text-zinc-200 underline"></button>
+      <button id="ct-exit" class="hidden mt-1 w-full text-xs text-zinc-400 hover:text-zinc-200 underline"></button>
     </div>
   </div>
 
