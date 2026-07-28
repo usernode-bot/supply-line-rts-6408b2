@@ -38,7 +38,6 @@ mqDesktop.addEventListener('change', () => {
   // the tour keeps whichever page set is already open — rotating a phone
   // across the 640px line must not swap the content mid-read
   if (CT.active()) CT.tick(view, ui, game);
-  refreshControlsButton(); // "🕹️ Practice controls" only reads right on phones
 });
 let renderer = null, input = null;
 let groups = {};                      // control groups (#69): n -> {kind:'blobs', ids} | {kind:'settlement', id}
@@ -463,11 +462,18 @@ function closeControlsTour() {
   tourPausedBefore = null;
 }
 
-// -- the practice sandbox: the menu's 🕹️ button on phones ------------------
-// A throwaway match built only so the ten gestures are all performable. It is
-// never saved (S.newPracticeGame sets game.sandbox, which saveGame bails on),
-// never recorded, and it leaves an in-progress solo save alone — note the
-// deliberate absence of clearSaves() here.
+// -- the practice sandbox: the menu's 🕹️ button ----------------------------
+// A throwaway match to read the controls over, and — on phones — to perform
+// all ten gestures on. It is never saved (S.newPracticeGame sets game.sandbox,
+// which saveGame bails on), never recorded, and it leaves an in-progress solo
+// save alone — note the deliberate absence of clearSaves() here.
+//
+// Which page set depends on the width: phones get the gated touch tour, and a
+// desktop-width screen gets the mouse & keyboard pages over the same live map.
+// Those pages are ungated by construction (controls-tour.js skips gating for
+// the desktop set — there are no desktop gesture signals), so the map is there
+// to try right-click orders, WASD and the wheel on while reading, not to be
+// quizzed on. The map stays paused either way.
 
 let pendingPracticeExit = false; // close the tour → leave the practice map
 
@@ -478,7 +484,7 @@ function startControlsPractice() {
     startMatch(g);
     pendingPracticeExit = true;
     openControlsTour({
-      mode: 'tour', set: 'touch',
+      mode: 'tour', set: isMobile() ? 'touch' : 'desktop',
       finishLabel: '✓ Done', skipLabel: 'Skip', exitLabel: 'Exit practice',
     });
   } catch (e) {
@@ -507,16 +513,8 @@ $('btn-help').addEventListener('click', () => {
 $('btn-controls').addEventListener('click', () => {
   if (CT.active()) { CT.close({ seen: false }); return; }
   if (waiting) { showMenuError('Cancel your multiplayer lobby first.'); return; }
-  // phones get the hands-on tour on a practice map; at desktop widths every
-  // gesture it teaches is absent from the UI, so the mouse & keyboard pages
-  // open as a plain reference instead
-  if (isMobile()) { startControlsPractice(); return; }
-  CT.open({ mode: 'reference', set: 'desktop' });
+  startControlsPractice(); // both widths — the page set follows the viewport
 });
-
-function refreshControlsButton() {
-  $('btn-controls').textContent = isMobile() ? '🕹️ Practice controls' : '🕹️ Controls';
-}
 
 // In-app confirm dialog — native confirm() is blocked inside the sandboxed
 // platform iframe (it silently returns false), so never use it.
@@ -1136,7 +1134,6 @@ function backToMenu() {
   $('main-menu').classList.remove('hidden');
   refreshMenu();
   refreshTutorialButton();
-  refreshControlsButton();
   refreshServerSave();
   loadHistory();
   loadRatings();
@@ -3552,6 +3549,7 @@ function shotInCombat() {
 // tester can still page to the end and watch the scenario card take over).
 const TOUR_SHOTS = {
   'controls-practice': { step: 0 },       // the menu 🕹️ button's practice map
+  'controls-practice-desktop': { step: 0, desk: true }, // ditto at desktop width
   'controls-tour': { step: 0 },           // step 1 — one-finger pan
   'controls-tour-actions': { step: 4 },   // step 5 — the tap-again action list
   'controls-tour-modes': { step: 6 },     // step 7 — Select vs Drag
@@ -3570,7 +3568,13 @@ function shotControlsTour(desc) {
   input.clampView();
   renderPanel(true);
   updateHUD();
-  const opts = { mode: 'tour', set: 'touch', step: desc.step, force: true, onClose: onTourClose };
+  // `desk` renders the mouse & keyboard pages the practice map shows at
+  // desktop widths; every other link forces the touch set so a desktop-width
+  // screenshot harness still captures the phone content.
+  const opts = {
+    mode: 'tour', set: desc.desk ? 'desktop' : 'touch',
+    step: desc.step, force: true, onClose: onTourClose,
+  };
   if (desc.tutorial) {
     pendingTutorialBegin = { game: g, persist: false };
     tourPausedBefore = false; // paging to the end hands over to a running scenario
@@ -3591,7 +3595,6 @@ function shotControlsTour(desc) {
 
 refreshMenu();
 refreshTutorialButton();
-refreshControlsButton();
 refreshServerSave();
 loadHistory();
 loadRatings();

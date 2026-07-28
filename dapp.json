@@ -75,6 +75,10 @@
     { "name": "Controls practice tour asks the player to perform the gesture", "path": "/?shot=controls-practice&demo=1", "expectSelector": "#ct-todo" },
     { "name": "Controls practice tour states the first gesture to try", "path": "/?shot=controls-practice&demo=1", "expectText": "Try it" },
     { "name": "Controls practice tour can be exited back to the menu", "path": "/?shot=controls-practice&demo=1", "expectSelector": "#ct-exit" },
-    { "name": "Controls practice tour can be folded out of the way", "path": "/?shot=controls-practice&demo=1", "expectSelector": "#ct-collapse" }
+    { "name": "Controls practice tour can be folded out of the way", "path": "/?shot=controls-practice&demo=1", "expectSelector": "#ct-collapse" },
+    { "name": "Desktop controls practice boots the practice map", "path": "/?shot=controls-practice-desktop&demo=1", "expectSelector": "#controls-tour-card" },
+    { "name": "Desktop controls practice shows the mouse & keyboard pages", "path": "/?shot=controls-practice-desktop&demo=1", "expectText": "Step 1 of 4" },
+    { "name": "Desktop controls practice names the right-click order button", "path": "/?shot=controls-practice-desktop&demo=1", "expectText": "right-click is the order button" },
+    { "name": "Desktop controls practice can be exited back to the menu", "path": "/?shot=controls-practice-desktop&demo=1", "expectSelector": "#ct-exit" }
   ]
 }
