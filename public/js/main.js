@@ -3103,6 +3103,47 @@ function renderPanelInner(force) {
       const runway = fmtRunway(S.wallRationTicks(w));
       const feeder = S.wallFeeder(game, w);
       const inW = game.routes.filter(r2 => r2.owner === me && r2.targetKind === 'wall' && r2.targetId === w.id);
+      // compact phone sheet (#211), mirroring the settlement panel: the
+      // readouts and every control stay, the long explainers shrink to one
+      // short line each. The panel is a max-h-[60%] bottom sheet on phones,
+      // so seven lines of prose pushed the buttons below the fold.
+      // NOTE: the trimmed wording deliberately still CONTAINS every
+      // substring dapp.json asserts ("refills them from these supplies",
+      // "while the wall is under attack", "Supplies", "mouths", the fed
+      // words) — the test harness viewport is unspecified, so both
+      // templates must satisfy the assertions.
+      if (isMobile()) {
+        setPanelHTML(`
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-semibold">🧱 Wall${w.building ? ' — building' : ''}</span>
+            <span class="text-xs ${!w.building && w.hp < S.C.WALL_HP ? 'text-red-400' : 'text-zinc-500'}">HP ${Math.ceil(w.hp)}/${S.C.WALL_HP}</span>
+          </div>
+          <div class="h-1 rounded bg-zinc-800 overflow-hidden mb-1"><div class="h-full ${barCol}" style="width:${pct}%"></div></div>
+          ${w.building
+            ? '<div class="text-xs text-zinc-400">Builders raise it beside the tile — more hands build faster.</div>'
+            : `<div class="text-xs mb-1 ${prot ? 'text-emerald-400' : 'text-amber-400'}">${prot ? '🛡️ Protected — a garrison holds within 1 tile' : '⚠️ Unprotected — falls fast under attack'}</div>
+          <div class="text-xs text-zinc-500 mb-1">Garrison ${gTot}/${S.C.WALL_GARRISON_CAP}${gTot > 0
+            ? ` · ⚔️${w.garrison.deploy} 🚚${w.garrison.supply} 🌱${w.garrison.farm} · <span class="${fedCol}">${S.fedLabel(fedM)}</span>` : ''}</div>
+          <div class="text-xs text-zinc-400">Supplies <b class="text-amber-300">🌾 ${Math.floor(w.stock || 0)}</b> / ${S.C.WALL_FOOD_CAP}${gTot > 0
+            ? `${runway && !starving ? ` · ${runway}` : ''} · ${gTot} mouth${gTot === 1 ? '' : 's'}` : ' · no mouths to feed'}</div>
+          <div class="h-0.5 rounded bg-zinc-800 overflow-hidden mb-1"><div class="h-full bg-amber-300" style="width:${Math.round(stockFrac * 100)}%"></div></div>
+          ${starving ? '<div class="text-xs text-red-400 mb-1">💀 Starving — the garrison is dying and fights at half strength.</div>' : ''}
+          ${inW.length
+            ? '<div class="text-xs text-sky-300 mb-1">🚚 Supplied by ' + (inW.length === 1 ? 'a supply route' : inW.length + ' supply routes') + '</div>'
+            : feeder
+              ? `<div class="text-xs text-sky-300 mb-1">🏠 Topped up from ${feeder.name || 'a settlement'}'s stores</div>`
+              : gTot > 0 ? '<div class="text-xs text-amber-400 mb-1">⚠️ No supply — the stash only drains</div>' : ''}
+          ${gTot > 0
+            ? `<div class="flex gap-1 mb-1">
+                ${roleBtn('deploy', '⚔️', false, false)}${roleBtn('supply', '🚚', false, false)}${roleBtn('farm', '🌱', false, false)}
+              </div>
+              ${w.convert ? `<div class="text-xs text-amber-400 mb-1">⚔️ Garrison arming… ready in ~${convertEta(w.convert)}s (fielding cancels)</div>` : ''}
+              <button data-act="fieldwall" class="btn w-full rounded bg-zinc-700 hover:bg-zinc-600 mt-1">Field garrison (${gTot})</button>
+              <div class="text-xs text-zinc-600 mt-1">The garrison keeps its own rations and refills them from these supplies.</div>
+              <div class="text-xs text-zinc-600 mt-1">Reinforcements march in even while the wall is under attack (max ${S.C.WALL_GARRISON_CAP}).</div>`.replaceAll('data-act="role"', 'data-act="wrole"')
+            : '<div class="text-xs text-zinc-600">No garrison — march units onto the tile (max ' + S.C.WALL_GARRISON_CAP + '), even while the wall is under attack.</div>'}`}`);
+        return;
+      }
       setPanelHTML(`
         <div class="flex items-center justify-between mb-1">
           <span class="font-semibold">🧱 Wall${w.building ? ' — under construction' : ''}</span>
@@ -3633,6 +3674,50 @@ function shotWallGarrison() {
   renderPanel(true);
 }
 
+// The armed wall-placement state (#214) is two taps deep and its "after the
+// FIRST tap" moment is exactly the bug: on touch there was no hover, so the
+// pinned start tile rendered nothing at all. `?shot=wall-start` boots a solo
+// match on a FIXED seed, selects the player's opening war party, arms wall
+// placement, pins ui.wallStart on a wall-legal tile beside it and leaves
+// ui.hover null — reproducing the touch-only state a mouse can't. The sim is
+// paused so the marker holds still. Pure local UI state, no DB writes.
+function shotWallStart() {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot214', 'small', 'normal');
+  const mine = g.blobs.find(b => b.owner === 0 && b.count.deploy > 0);
+  if (!mine) return;
+  // nearest wall-legal tile to the army, scanned in a fixed order so the
+  // same seed always pins the same tile. Starts a few tiles out so the
+  // marker isn't hidden under the army's own sprite in the screenshot.
+  let spot = null;
+  for (let r = 3; r <= 7 && !spot; r++) {
+    for (let dy = -r; dy <= r && !spot; dy++) {
+      for (let dx = -r; dx <= r && !spot; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = Math.floor(mine.x) + dx, y = Math.floor(mine.y) + dy;
+        if (x < 0 || y < 0 || x >= g.map.w || y >= g.map.h) continue;
+        if (!S.canPlaceWall(g, 0, x, y).err) spot = { x, y };
+      }
+    }
+  }
+  if (!spot) return;
+  startMatch(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  ui.selected = { kind: 'blob', id: mine.id };
+  ui.pending = 'wall';
+  ui.wallStart = { x: spot.x, y: spot.y };
+  ui.wallEnd = null;
+  ui.hover = null; // the whole point: touch devices never have one
+  view.cx = spot.x + 0.5;
+  view.cy = spot.y + 0.5;
+  view.scale = 26;
+  input.clampView();
+  updateHint();
+  renderPanel(true);
+}
+
 // The in-combat / rear-attack panel lines (#201) exist only while a
 // selected group is actually under fire, which no plain URL can reach —
 // so `?shot=in-combat` boots a solo match on a FIXED seed and stages a
@@ -3768,6 +3853,9 @@ if (SHOT === 'wall-garrison') {
 }
 if (SHOT === 'in-combat') {
   try { shotInCombat(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'wall-start') {
+  try { shotWallStart(); } catch (e) { console.warn('shot link failed', e); }
 }
 if (BTN_SHOTS[SHOT]) {
   try { shotControlsButton(BTN_SHOTS[SHOT]); } catch (e) { console.warn('shot link failed', e); }
