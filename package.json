@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/walls-smoke.mjs && node test/ai-walls.mjs && node test/ai-strategy.mjs && node test/elo.mjs && node test/calibration.mjs && node test/offline.mjs",
+    "test": "node test/walls-smoke.mjs && node test/ai-walls.mjs && node test/ai-strategy.mjs && node test/elo.mjs && node test/calibration.mjs && node test/offline.mjs && node test/replay.mjs",
     "calibrate": "node test/calibrate-ai.mjs"
   },
   "dependencies": {

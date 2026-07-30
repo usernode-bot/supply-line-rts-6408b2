@@ -12,6 +12,7 @@ import { startAttract, stopAttract } from './attract.js';
 import * as TUT from './tutorial.js';
 import * as CT from './controls-tour.js';
 import * as OFF from './offline.js';
+import * as RP from './replay.js';
 import { dist, fertTier, FERT_TIERS } from './mapgen.js';
 
 const $ = (id) => document.getElementById(id);
@@ -37,6 +38,7 @@ const offStore = OFF.createStore(SHOT ? null : (() => {
 
 let netDown = false;           // is the server currently unreachable?
 let offlineShot = null;        // ?shot=offline-menu override; see bootOfflineMenu
+let replayListShot = null;     // ?shot=replay-list / replay-stale override (#223)
 let installPrompt = null;      // captured beforeinstallprompt event
 
 // Everything that reads "are we offline" goes through here so the screenshot
@@ -210,6 +212,12 @@ let groups = {};                      // control groups (#69): n -> {kind:'blobs
 let lastGroupTap = { n: 0, t: 0 };    // for double-tap-to-center
 let lastFrame = 0, acc = 0, lastSaveTick = 0, lastPanel = 0;
 let resultPosted = false;
+// -- replays (#223) ---------------------------------------------------
+let recorder = null;    // the recording of the solo match in progress
+let player = null;      // the playback cursor while a replay is open
+let replaySpeed = 2;    // 2× is the sim's native rate — see the replay bar
+let lastReplayUi = -1;  // tick the transport readouts were last drawn for
+let endReplay = null;   // payload behind the end modal's ▶ Watch replay
 let panelHeld = false;
 let toastTimer = null;
 let lastPanelHTML = '';
@@ -258,13 +266,18 @@ async function api(path, body) {
 // device's own log (#221), so a match finished offline shows up at once and
 // stays visible — marked pending — until it has been recorded.
 function localHistoryRows() {
+  if (replayListShot) return [];   // ?shot=replay-list pins the server rows (#223)
   if (offlineShot) return offlineShot.local;
   return OFF.readHistory(offStore);
 }
 
 function renderMineRows(serverRows) {
   const mineEl = $('history-mine-rows');
+  // ?shot=replay-list (#223) pins the rows so the panel renders identically in
+  // every environment, the same way offlineShot pins the offline menu's.
+  if (replayListShot) serverRows = replayListShot;
   lastServerHistory = Array.isArray(serverRows) ? serverRows : [];
+  refreshLocalReplayIndex();   // which pending rows have a local recording (#223)
   const rows = OFF.mergeHistory(lastServerHistory, localHistoryRows());
   const tag = (m) => m.mode === 'pvp' ? `vs ${esc(m.opponent || '?')}` : esc(diffLabel(m.difficulty));
   if (!rows.length) {
@@ -272,13 +285,14 @@ function renderMineRows(serverRows) {
     return;
   }
   mineEl.innerHTML = rows.map(m => `
-      <div class="flex justify-between gap-2">
+      <div class="flex justify-between gap-2 items-baseline">
         <span class="${m.result === 'win' ? 'text-emerald-400' : 'text-red-400'}">${m.result === 'win' ? 'Victory' : m.result === 'surrender' ? 'Surrendered' : 'Defeat'}</span>
         <span class="text-zinc-500 truncate">${tag(m)}</span>
         ${m.pending ? '<span class="text-amber-400 text-xs shrink-0">pending</span>'
       : m.dropped ? '<span class="text-zinc-600 text-xs shrink-0">not recorded</span>'
         : `<span class="font-mono ${deltaClass(m.rating_delta)} w-10 text-right">${fmtDelta(m.rating_delta)}</span>`}
         <span class="font-mono text-zinc-500">${fmtDur(m.duration_seconds)}</span>
+        ${replayBtnHTML(m)}
       </div>`).join('');
   const waiting = offlineShot ? offlineShot.pending : OFF.pendingCount(offStore);
   if (waiting > 0) {
@@ -297,9 +311,10 @@ async function loadHistory() {
     const res = await fetch('/api/matches', { headers: apiHeaders });
     noteApiSuccess();
     if (!res.ok) {
-      // Reachable but not authorised: local rows still stand on their own.
+      // Reachable but not authorised: local rows still stand on their own, and
+      // so do a ?shot= boot's pinned rows (#223) — neither needs an account.
       renderMineRows([]);
-      if (!localHistoryRows().length) {
+      if (!localHistoryRows().length && !replayListShot) {
         $('history-mine-rows').textContent = 'Sign in via Usernode to see your matches.';
       }
       recentEl.textContent = '—';
@@ -554,12 +569,17 @@ async function flushOutbox() {
       if (OFF.syncDecision(rec, currentUsername) === 'drop') { OFF.dropRecord(offStore, rec.client_id); continue; }
       let data;
       try {
+        // The recording rides along with the result (#223) — one idempotent
+        // call, so an offline match and its replay reach the server together.
+        // The server drops a malformed log rather than failing the result.
+        const replay = RP.takeLocal(offStore, rec.client_id);
         data = await api('/api/match-result', {
           result: rec.result,
           difficulty: rec.difficulty,
           duration_seconds: rec.duration_seconds,
           map_seed: rec.map_seed,
           client_id: rec.client_id,
+          replay: replay || undefined,
         });
       } catch (e) {
         // A 400 means the server will never accept this record — drop it
@@ -568,6 +588,9 @@ async function flushOutbox() {
         break;
       }
       OFF.markSynced(offStore, rec.client_id);
+      // The server owns the recording now and the history row carries its id,
+      // so the device copy has done its job (#223).
+      RP.dropLocal(offStore, rec.client_id);
       lastFlushResult = { client_id: rec.client_id, data };
       if (data && data.rating != null) myRating = data.rating;
     }
@@ -865,11 +888,22 @@ $('btn-controls').addEventListener('click', () => {
 // platform iframe (it silently returns false), so never use it.
 const confirmModal = $('confirm-modal');
 
-function showConfirm(title, text, actions) {
+// `opts.okOnly` (#223) makes this an information dialog instead of a
+// confirmation: a single OK and no Cancel, because there is nothing to cancel.
+function showConfirm(title, text, actions, opts) {
   $('confirm-title').textContent = title;
   $('confirm-text').textContent = text;
   const box = $('confirm-actions');
   box.innerHTML = '';
+  if (opts && opts.okOnly) {
+    const ok = document.createElement('button');
+    ok.className = 'btn w-full py-3 rounded-xl font-semibold bg-violet-600 hover:bg-violet-500';
+    ok.textContent = 'OK';
+    ok.addEventListener('click', hideConfirm);
+    box.appendChild(ok);
+    confirmModal.classList.remove('hidden');
+    return;
+  }
   for (const a of actions) {
     const b = document.createElement('button');
     b.className = `btn w-full py-3 rounded-xl font-semibold ${a.cls}`;
@@ -1314,89 +1348,128 @@ function tutBlocked(op) {
   return true;
 }
 
+// Replay guard (#223): a replay is a recording being re-run, so no order path
+// may touch it. Selection, panels, pan/zoom, the minimap and control groups all
+// stay live — only mutation is refused, at the same single funnel tutBlocked
+// uses, so a stray panel button can never desync the playback.
+const REPLAY_BLOCKED = { err: "You're watching a replay" };
+function replayBlocked() {
+  return !!(game && game.replay);
+}
+
+// The one path every order takes (#223). It records the command into the live
+// recording and, in PvP, relays it to the server-authoritative sim. The
+// descriptor is built unconditionally now — it's the replay log's vocabulary as
+// well as the wire format, and applyCommand is the only thing that reads it.
+//
+// PvP is NOT recorded here: the runner sees BOTH players' orders and writes the
+// canonical log server-side, so `recorder` stays null for a PvP match and this
+// is a no-op for it.
+function relay(c) {
+  RP.recordCommand(recorder, game ? game.tick : 0, c);
+  if (inPvp()) sendCmd(c);
+}
+
 function doMove(b, x, y, target) {
   if (tutBlocked('move')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'move', blobId: b.id, x, y, target: target || null });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'move', blobId: b.id, x, y, target: target || null });
   return S.opMove(game, b, x, y, target);
 }
 function doSetRole(b, role) {
   if (tutBlocked('setRole')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'setRole', blobId: b.id, role });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'setRole', blobId: b.id, role });
   return S.opSetRole(game, b, role);
 }
 function doSplit(b, n) {
   if (tutBlocked('split')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'split', blobId: b.id, take: n });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'split', blobId: b.id, take: n });
   return S.opSplit(game, b, n);
 }
 function doBuild(b) {
   if (tutBlocked('build')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'build', blobId: b.id });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'build', blobId: b.id });
   return S.opBuild(game, b);
 }
 function doBuildAt(b, x, y) {
   if (tutBlocked('buildAt')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'buildAt', blobId: b.id, x, y });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'buildAt', blobId: b.id, x, y });
   return S.opBuildAt(game, b, x, y);
 }
 function doPillage(b, on) {
   if (tutBlocked('pillage')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'pillage', blobId: b.id, on: !!on });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'pillage', blobId: b.id, on: !!on });
   return S.opPillage(game, b, on);
 }
 function doRoute(b, target, sourceId) {
   if (tutBlocked('route')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'route', blobId: b.id, target, sourceId: sourceId == null ? null : sourceId });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'route', blobId: b.id, target, sourceId: sourceId == null ? null : sourceId });
   return S.opRoute(game, b, target, sourceId);
 }
 function doSetMode(st, mode) {
   if (tutBlocked('setMode')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'setMode', settlementId: st.id, mode });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'setMode', settlementId: st.id, mode });
   return S.opSetMode(game, st, mode);
 }
 function doFieldGarrison(st) {
   if (tutBlocked('fieldGarrison')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'fieldGarrison', settlementId: st.id });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'fieldGarrison', settlementId: st.id });
   return S.opFieldGarrison(game, st);
 }
 function doFieldRole(st, role, n) {
   if (tutBlocked('fieldRole')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'fieldRole', settlementId: st.id, role, n });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'fieldRole', settlementId: st.id, role, n });
   return S.opFieldRole(game, st, role, n);
 }
 function doFieldFarmerGroup(st) {
   if (tutBlocked('fieldFarmerGroup')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'fieldFarmerGroup', settlementId: st.id });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'fieldFarmerGroup', settlementId: st.id });
   return S.opFieldFarmerGroup(game, st);
 }
 function doGarrisonRole(st, role) {
   if (tutBlocked('garrisonRole')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'garrisonRole', settlementId: st.id, role });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'garrisonRole', settlementId: st.id, role });
   return S.opGarrisonRole(game, st, role);
 }
 function doSupplyRoute(st, target) {
   if (tutBlocked('supplyRoute')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'supplyRoute', settlementId: st.id, target });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'supplyRoute', settlementId: st.id, target });
   return S.opSupplyRoute(game, st, target);
 }
 function doSiegeRun(routeId, on) {
   if (tutBlocked('siegeRun')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'siegeRun', routeId, on: !!on });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'siegeRun', routeId, on: !!on });
   return S.opSiegeRun(game, routeId, !!on);
 }
 function doBuildWalls(b, tiles) {
   if (tutBlocked('wallBuild')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'wallBuild', blobId: b.id, tiles });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'wallBuild', blobId: b.id, tiles });
   return S.opBuildWalls(game, b, tiles);
 }
 function doFieldWall(w) {
   if (tutBlocked('fieldWall')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'fieldWall', wallId: w.id });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'fieldWall', wallId: w.id });
   return S.opFieldWall(game, w.id);
 }
 function doWallRole(w, role) {
   if (tutBlocked('wallRole')) return TUT_BLOCKED;
-  if (inPvp()) sendCmd({ op: 'wallRole', wallId: w.id, role });
+  if (replayBlocked()) return REPLAY_BLOCKED;
+  relay({ op: 'wallRole', wallId: w.id, role });
   return S.opWallGarrisonRole(game, w.id, role);
 }
 
@@ -1406,6 +1479,13 @@ function startMatch(g) {
   stopAttract(); // the menu backdrop must cost nothing while playing
   game = g;
   resultPosted = false;
+  // Record every ordinary solo match (#223). Skipped for PvP (the server
+  // records it), for a replay itself, and for the tutorial / practice /
+  // sandbox games — none of which are recorded as matches either.
+  recorder = (!g.replay && !g.pvp && !g.tutorial && !g.practice && !g.sandbox)
+    ? RP.createRecorder(g) : null;
+  endReplay = null;
+  $('btn-end-replay').classList.add('hidden');
   ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, wallStart: null, wallEnd: null, hover: null, touchMode: 'select' };
   groups = {};
   hideOrderPopup();
@@ -1416,11 +1496,12 @@ function startMatch(g) {
   // clients run it at the 1× default (speed stays forced to 1). The
   // tutorial (#185) keeps pause but pins 1× and swaps surrender for the
   // card's own Exit link.
-  $('btn-pause').classList.toggle('hidden', !!g.pvp);
+  // a replay has its own transport in the replay bar, so the live pair goes
+  $('btn-pause').classList.toggle('hidden', !!g.pvp || !!g.replay);
   // the controls-practice sandbox (#212) has no rating and nothing to
   // surrender, and its map is held still by the tour anyway
-  $('sel-speed').classList.toggle('hidden', !!g.pvp || !!g.tutorial || !!g.practice);
-  $('btn-surrender').classList.toggle('hidden', !!g.tutorial || !!g.practice);
+  $('sel-speed').classList.toggle('hidden', !!g.pvp || !!g.tutorial || !!g.practice || !!g.replay);
+  $('btn-surrender').classList.toggle('hidden', !!g.tutorial || !!g.practice || !!g.replay);
   updateOppLabel();
   stopMenuPolling();
 
@@ -1467,7 +1548,7 @@ function startMatch(g) {
   // waiting), the practice sandbox or a ?shot= screenshot boot — those last
   // two open it explicitly right after this returns.
   closeControlsTour();
-  if (stateLoaded && isMobile() && !SHOT && !g.pvp && !g.tutorial && !g.practice
+  if (stateLoaded && isMobile() && !SHOT && !g.pvp && !g.tutorial && !g.practice && !g.replay
     && !flag('controls_touch_seen')) {
     openControlsTour({ mode: 'tour', set: 'touch', gated: true });
   }
@@ -1476,6 +1557,8 @@ function startMatch(g) {
 function backToMenu() {
   TUT.end(); // no-op unless a tutorial session is live
   closeControlsTour();
+  player = null;                                  // replay teardown (#223)
+  $('replay-bar').classList.add('hidden');
   stopMpTimers();
   mp = null;
   me = 0;
@@ -1499,7 +1582,10 @@ function backToMenu() {
 }
 
 function saveGame(push) {
-  if (!game || game.result || game.pvp || game.tutorial || game.sandbox) return;
+  // `game.replay` matters here (#223): a replay IS a fresh solo game at tick 0
+  // as far as every other clause is concerned, so without it watching a replay
+  // would overwrite the player's real autosave and their server save slot.
+  if (!game || game.replay || game.result || game.pvp || game.tutorial || game.sandbox) return;
   try {
     const data = S.serialize(game);
     data.savedAt = Date.now();
@@ -1535,6 +1621,9 @@ function showEndModal(win, reason) {
         ? `You surrendered to ${opp} after ${dur}.`
         : `${opp} destroyed your war effort after ${dur}.`);
   $('end-rating').classList.add('hidden');   // filled in once the post answers
+  // PvP recordings are written server-side, so there is nothing in memory to
+  // rewatch from here — the match's row in the history list carries it.
+  $('btn-end-replay').classList.add('hidden');
   $('end-modal').classList.remove('hidden');
 }
 
@@ -1570,6 +1659,19 @@ function endMatch(result) {
     ended_at: Date.now(),
     username: currentUsername,
   });
+  // The recording lands on the device first too (#223), so a match finished
+  // offline is rewatchable straight away and uploads with the result. The end
+  // card's rewatch button reads it from memory — it was just recorded on this
+  // very engine, so it never needs the version gate.
+  if (recorder) {
+    RP.recordEnd(recorder, game, result);
+    const payload = RP.finishRecording(recorder);
+    if (payload) {
+      RP.saveLocal(offStore, clientId, payload);
+      endReplay = payload;
+      $('btn-end-replay').classList.remove('hidden');
+    }
+  }
   if (!token) {
     showOfflineRatingLine('Recorded on this device — sign in via Usernode to have it rated.');
     return;
@@ -1618,8 +1720,15 @@ function showRatingLine(data) {
 }
 
 $('btn-end-menu').addEventListener('click', backToMenu);
+// In a replay the outcome card is informational, so its backdrop dismisses back
+// to the final frame (#223). A real match's card has no such escape — the result
+// is already recorded and the only way on is back to the menu.
+$('end-modal').addEventListener('click', (e) => {
+  if (e.target === $('end-modal') && game && game.replay) $('end-modal').classList.add('hidden');
+});
 $('btn-surrender').addEventListener('click', () => {
   if (!game || game.result) return;
+  if (replayBlocked()) return;   // hidden in a replay, but never trust CSS alone
   showConfirm('Surrender this match?', 'The match ends immediately and counts as a loss.', [
     { label: '🏳️ Surrender', cls: 'bg-red-700 hover:bg-red-600 text-white', fn: () => {
       if (!game || game.result) return;
@@ -1636,6 +1745,13 @@ $('btn-surrender').addEventListener('click', () => {
 // Shared by the ⏸ button and the space bar (#168). Solo only — the PvP
 // sim is shared and never pauses.
 function togglePause() {
+  // In a replay the space bar drives the replay bar's own transport (#223).
+  if (game && game.replay) {
+    if (!player || RP.atEnd(player)) return;
+    paused = !paused;
+    $('replay-play').textContent = paused ? '▶' : '⏸';
+    return;
+  }
   if (!game || game.pvp || game.result) return;
   paused = !paused;
   $('btn-pause').textContent = paused ? '▶' : '⏸';
@@ -1651,7 +1767,12 @@ $('sel-speed').addEventListener('change', () => {
 $('btn-backtowork').addEventListener('click', () => {
   if (!game || game.result) return;
   if (game.tutorial) { TUT.nudge(); return; }
-  const r = S.opBackToWork(game, 0);
+  if (replayBlocked()) return;
+  // relayed and recorded like every other order (#223) — this is also what
+  // finally makes the button work in PvP, where it used to move only the
+  // local predicted sim
+  relay({ op: 'backToWork' });
+  const r = S.opBackToWork(game, me);
   if (r.fielded + r.walking > 0) {
     const parts = [];
     if (r.fielded > 0) parts.push(`${r.fielded} farmer${r.fielded === 1 ? '' : 's'} back in the fields`);
@@ -3833,7 +3954,7 @@ function updateHUD() {
   const idle = S.idleFarmers(game, 0);
   const idleN = idle.field + idle.walk;
   const btw = $('btn-backtowork');
-  btw.classList.toggle('hidden', idleN === 0 || !!game.result);
+  btw.classList.toggle('hidden', idleN === 0 || !!game.result || !!game.replay);
   if (idleN > 0) btw.textContent = `🌱 Back to work (${idleN})`;
   updateGroupsBar();
   if (game.pvp) {
@@ -3854,19 +3975,34 @@ function frame(ts) {
   lastFrame = ts;
   if (!game) return;
 
-  if (!paused && !game.result) {
+  if (game.replay) {
+    // Replay playback (#223). Its own transport: the bar's 1×/2×/4×/8× are
+    // multiples of the sim's native rate, so 1× runs the match back in exactly
+    // the wall-clock time it originally took. The player owns the stepping (it
+    // has to apply the log's orders at the right tick), and a seek in flight
+    // holds the clock still.
+    if (!paused && player && !player.seeking && !RP.atEnd(player)) {
+      acc += dt * replaySpeed;
+      let iter = 0;
+      while (acc >= 100 && iter++ < 60) {
+        if (!RP.stepPlayer(player)) break;
+        acc -= 100;
+      }
+      if (acc >= 100) acc = 0;
+    }
+  } else if (!paused && !game.result) {
     // displayed speed steps 1–4 map to 0.5×–2× of the sim's native tick
     // rate: 1× is the half-speed default, 2× the old normal. PvP always
     // runs at step 1, so both clients share the same 0.5 multiplier.
     acc += dt * speed * 0.5;
     let iter = 0;
     while (acc >= 100 && iter++ < 40) {
-      S.step(game);
-      // tutorial (#185): the enemy commander is switched off — its camp
-      // sits passive until the player attacks (sim-side combat still runs).
-      // How often it thinks is a difficulty dial (evalTicks) — see aiCadence.
-      // the controls-practice sandbox (#212) switches it off the same way
-      if (!game.pvp && !game.tutorial && !game.practice && game.tick % S.aiCadence(game.difficulty) === 0) aiTick(game, S);
+      // one shared definition of "advance a tick" (step, then the enemy
+      // commander thinks) — replay.js owns it so the live loop and playback
+      // can never drift apart. The tutorial (#185) and the controls-practice
+      // sandbox (#212) switch the commander off; advance() knows that.
+      RP.advance(game);
+      if (recorder) RP.recordTick(recorder, game);
       acc -= 100;
     }
     if (acc >= 100) acc = 0; // fell behind (background tab); drop the backlog
@@ -3884,7 +4020,8 @@ function frame(ts) {
     updateHUD();
     renderPanel(false);
   }
-  if (!game.pvp && game.tick - lastSaveTick >= 300) {
+  if (game.replay) refreshReplayUi();   // clock + scrub position (#223)
+  if (!game.pvp && !game.replay && game.tick - lastSaveTick >= 300) {
     lastSaveTick = game.tick;
     saveGame(true);
   }
@@ -3896,6 +4033,303 @@ function frame(ts) {
 }
 
 requestAnimationFrame(frame);
+
+// ---------------------------------------------------------------- replays (#223)
+
+// The playable/unavailable button for one history row.
+//
+// The gate is strict on purpose: a recording is an order log re-run through the
+// CURRENT sim, so it only reproduces the match while the engine is unchanged.
+// A mismatch (older, or newer than this bundle) renders a muted button that
+// explains itself instead of silently playing a match that never happened.
+//
+// It stays clickable — a real `disabled` attribute would swallow the tap and the
+// player would get no explanation at all — and is marked aria-disabled.
+function replayBtnHTML(m) {
+  const localVer = m.client_id ? localReplayIndex[m.client_id] : undefined;
+  const id = m.replay_id != null ? m.replay_id : null;
+  const ver = id != null ? m.replay_sim_version : localVer;
+  if (id == null && localVer === undefined) return '';         // no recording at all
+  const key = id != null ? `id:${id}` : `local:${m.client_id}`;
+  if ((ver | 0) !== S.SIM_VERSION) {
+    return `<button data-replay="${esc(key)}" data-replay-stale="1" aria-disabled="true"
+      class="btn-sm px-2 rounded bg-zinc-800/60 text-zinc-600 text-xs shrink-0 whitespace-nowrap"
+      title="The game engine has changed since this match was recorded">▶ Replay · unavailable</button>`;
+  }
+  return `<button data-replay="${esc(key)}"
+    class="btn-sm px-2 rounded bg-sky-800 hover:bg-sky-700 text-sky-100 text-xs shrink-0 whitespace-nowrap"
+    title="Watch this match back">▶ Replay</button>`;
+}
+
+// client_id -> sim_version for the logs this device is holding. Refreshed
+// whenever the list renders so a pending row gets its button too.
+let localReplayIndex = {};
+function refreshLocalReplayIndex() {
+  try { localReplayIndex = RP.localIndex(offStore); } catch { localReplayIndex = {}; }
+}
+refreshLocalReplayIndex();
+
+// The engine-changed notice. Informational, so it gets a single OK.
+function showEngineChangedDialog() {
+  showConfirm('Replay unavailable',
+    'The game engine has changed since this match was recorded, so the replay can no longer be shown. The match itself, its result and its rating are unaffected.',
+    [], { okOnly: true });
+}
+
+$('history-mine-rows').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-replay]');
+  if (!btn) return;
+  if (btn.hasAttribute('data-replay-stale')) { showEngineChangedDialog(); return; }
+  const key = btn.getAttribute('data-replay') || '';
+  if (key.startsWith('local:')) openLocalReplay(key.slice(6));
+  else openServerReplay(parseInt(key.slice(3), 10));
+});
+
+$('btn-end-replay').addEventListener('click', () => {
+  if (endReplay) openReplay(endReplay);
+});
+
+function openLocalReplay(clientId) {
+  const payload = RP.takeLocal(offStore, clientId);
+  if (!payload) {
+    refreshLocalReplayIndex();
+    renderMineRows(lastServerHistory);
+    showEngineChangedDialog();
+    return;
+  }
+  openReplay(payload);
+}
+
+async function openServerReplay(id) {
+  if (!Number.isInteger(id)) return;
+  // a ?shot= boot serves its own logs — no network, works in every environment
+  if (shotReplayLogs[id]) { openReplay(shotReplayLogs[id]); return; }
+  try {
+    const data = await api('/api/replays/' + id);
+    if (!data || !data.replay) throw new Error('Replay not found');
+    openReplay(data.replay);
+  } catch (err) {
+    showMenuError(err.message || 'Could not load that replay');
+  }
+}
+
+// Boot the viewer. The second version check is belt-and-braces for the paths
+// that don't come through the list (the end card, a ?shot= boot).
+function openReplay(payload) {
+  if (!RP.playable(payload)) { showEngineChangedDialog(); return; }
+  const p = RP.createPlayer(payload);
+  if (!p) { showEngineChangedDialog(); return; }
+  player = p;
+  me = payload.mode === 'pvp' ? (payload.viewer_owner | 0) : 0;
+  ui.selected = null;
+  replaySpeed = 2;             // the sim's native rate — see the replay bar
+  $('replay-speed').value = '2';
+  paused = false;
+  acc = 0;
+  lastReplayUi = -1;
+  $('replay-play').textContent = '⏸';
+  $('replay-fog').classList.remove('bg-sky-800', 'text-sky-100');
+  $('replay-seek').max = String(Math.max(1, p.endTick));
+  $('replay-seek').value = '0';
+  $('replay-notice').classList.add('hidden');
+  replayEndShown = false;
+  startMatch(p.game);
+  // startMatch centres on the viewer's own start, which is exactly right here.
+  resultPosted = true;         // a replay must never post a result or clear saves
+  $('replay-bar').classList.remove('hidden');
+  refreshReplayUi();
+}
+
+function closeReplay() {
+  paused = false;
+  backToMenu();   // owns the teardown, including the bar and the player
+}
+
+// The outcome card at the end of a playback: the same Victory / Defeat /
+// Surrendered wording the player saw the first time, minus the rating line
+// (nothing is being rated) and minus the rewatch button (they're already here).
+// Tapping the backdrop dismisses it back to the paused final frame, so ⏮ and the
+// scrub bar are still reachable after the replay has run out.
+let replayEndShown = false;
+function showReplayEndCard() {
+  if (replayEndShown || !player) return;
+  replayEndShown = true;
+  const r = player.meta.result;
+  const win = r === 'win' || r === 'p0-win' && (player.meta.viewer_owner | 0) === 0
+    || r === 'p1-win' && (player.meta.viewer_owner | 0) === 1;
+  $('end-emoji').textContent = win ? '🏆' : '🏳️';
+  $('end-title').textContent = win ? 'Victory!' : r === 'surrender' ? 'Surrendered' : 'Defeat';
+  $('end-detail').textContent = `Replay complete — ${fmtDur(S.gameSeconds(player.game.tick))} of play.`;
+  $('end-rating').classList.add('hidden');
+  $('btn-end-replay').classList.add('hidden');
+  $('end-modal').classList.remove('hidden');
+}
+
+// Clock, scrub position and the drift notice. Cheap enough to call per frame,
+// but keyed on the tick so it only touches the DOM when something moved.
+function refreshReplayUi() {
+  if (!player) return;
+  const t = player.game.tick;
+  if (t === lastReplayUi && !player.seeking) return;
+  lastReplayUi = t;
+  const el = $('replay-time');
+  el.textContent = player.seeking
+    ? 'Rewinding…'
+    : `${fmtDur(S.gameSeconds(t))} / ${fmtDur(S.gameSeconds(player.endTick))}`;
+  const seek = $('replay-seek');
+  if (document.activeElement !== seek) seek.value = String(t);
+  if (player.drift && $('replay-notice').classList.contains('hidden')) {
+    $('replay-notice').textContent = '⚠ This playback has drifted from the recording — it may not match exactly what happened.';
+    $('replay-notice').classList.remove('hidden');
+  }
+  if (RP.atEnd(player)) {
+    if ($('replay-play').textContent !== '▶') $('replay-play').textContent = '▶';
+    if (!player.seeking) showReplayEndCard();
+  }
+}
+
+$('replay-play').addEventListener('click', () => {
+  if (!player) return;
+  if (RP.atEnd(player)) { doReplaySeek(0); return; }   // finished: ⏯ restarts
+  paused = !paused;
+  $('replay-play').textContent = paused ? '▶' : '⏸';
+});
+$('replay-restart').addEventListener('click', () => doReplaySeek(0));
+$('replay-exit').addEventListener('click', closeReplay);
+$('replay-speed').addEventListener('change', () => {
+  replaySpeed = Math.max(1, Math.min(8, +$('replay-speed').value || 2));
+  $('replay-speed').blur();
+});
+$('replay-fog').addEventListener('click', () => {
+  if (!player) return;
+  RP.setReveal(player, !player.reveal);
+  $('replay-fog').classList.toggle('bg-sky-800', player.reveal);
+  $('replay-fog').classList.toggle('text-sky-100', player.reveal);
+});
+for (const ev of ['input', 'change']) {
+  $('replay-seek').addEventListener(ev, () => {
+    if (!player) return;
+    doReplaySeek(parseInt($('replay-seek').value, 10) || 0);
+  });
+}
+
+// One seek at a time: a drag fires a stream of input events, so a request that
+// lands mid-seek is remembered and run once the current one lands.
+let seekPending = null;
+async function doReplaySeek(tick) {
+  if (!player) return;
+  if (player.seeking) { seekPending = tick; return; }
+  const target = tick;
+  if (target < player.endTick) {
+    // scrubbing away from the end re-arms the outcome card
+    replayEndShown = false;
+    if (game && game.replay) $('end-modal').classList.add('hidden');
+  }
+  await RP.seek(player, target, () => {
+    // yield to the frame loop between slices so a long rewind stays responsive
+    refreshReplayUi();
+    return new Promise((r) => requestAnimationFrame(() => r()));
+  });
+  if (player) {
+    if (player.game.tick <= 0 || !RP.atEnd(player)) $('replay-play').textContent = paused ? '▶' : '⏸';
+    lastReplayUi = -1;
+    refreshReplayUi();
+    renderPanel(true);
+  }
+  if (seekPending != null) {
+    const next = seekPending;
+    seekPending = null;
+    doReplaySeek(next);
+  }
+}
+
+// ---------------------------------------------------------------- replay shots (#223)
+
+// The replay viewer only exists once a recorded match is open, and the history
+// list's ▶ Replay buttons only exist once there are recordings — so plain
+// navigation reaches neither, and before/after screenshots (plus the dapp.json
+// tests) would only ever see the main menu. These three boots build fixed
+// payloads IN CODE and never touch the network or storage, so they render
+// identically in every environment.
+
+// A short, valid solo log on a fixed seed. Home settlement is id 1 and the
+// opening war party is blobs 2/3/4 on any fresh game (newGame assigns ids in a
+// fixed order), so the orders below can be written literally.
+function shotReplayPayload(version) {
+  return {
+    mode: 'solo',
+    seed: 'shot223',
+    size_key: 'xsmall',
+    difficulty: 'normal',
+    viewer_owner: 0,
+    result: 'win',
+    duration_seconds: 240,
+    end_tick: 1200,
+    sim_version: version == null ? S.SIM_VERSION : version,
+    log: [
+      { t: 20, c: { op: 'setMode', settlementId: 1, mode: 'farm' } },
+      { t: 60, c: { op: 'move', blobId: 2, x: 16, y: 14 } },
+      { t: 240, c: { op: 'move', blobId: 3, x: 13, y: 16 } },
+      { t: 420, c: { op: 'pillage', blobId: 2, on: true } },
+      { t: 600, c: { op: 'setRole', blobId: 4, role: 'farm' } },
+      { t: 1200, end: 'win' },
+    ],
+  };
+}
+
+// `?shot=replay` — open the viewer on that log, run it to a fixed tick and
+// pause, so the whole transport (clock, scrub position, speed, fog toggle)
+// renders from a URL alone.
+async function shotReplay() {
+  openReplay(shotReplayPayload());
+  await doReplaySeek(600);
+  paused = true;
+  $('replay-play').textContent = '▶';
+  lastReplayUi = -1;
+  refreshReplayUi();
+  renderPanel(true);
+}
+
+// The stand-in "Yours" list for the two list shots: two rows on this engine
+// (live ▶ Replay buttons) and one recorded on an older one (the muted
+// unavailable state), so both states are on screen at once. In-memory only —
+// modelled directly on initOfflineShot().
+const SHOT_REPLAY_ROWS = [
+  { client_id: 'shot223-a', result: 'win', difficulty: 'normal', duration_seconds: 1622, rating_delta: 12 },
+  { client_id: 'shot223-b', result: 'loss', difficulty: 'veryhard', duration_seconds: 2480, rating_delta: -16 },
+  { client_id: 'shot223-old', result: 'win', difficulty: 'hard', duration_seconds: 1385, rating_delta: 9, stale: true },
+];
+
+function initReplayListShot() {
+  const now = Date.now();
+  // A dedicated override rather than reusing offlineShot: this shot is about the
+  // replay buttons, not about being offline, so the rest of the menu must look
+  // completely normal — recorded, rated rows, no "pending" badges.
+  replayListShot = SHOT_REPLAY_ROWS.map((r, i) => ({
+    client_id: r.client_id,
+    result: r.result,
+    difficulty: r.difficulty,
+    duration_seconds: r.duration_seconds,
+    map_seed: r.client_id,
+    created_at: new Date(now - (i + 1) * 3600_000).toISOString(),
+    mode: 'solo',
+    opponent: null,
+    rating_delta: r.rating_delta,
+    // the row's own recording: one of them on an older engine
+    replay_id: 223000 + i,
+    replay_sim_version: r.stale ? 0 : S.SIM_VERSION,
+  }));
+  // The logs go into the (memory-only) replay store keyed by the SAME ids the
+  // rows advertise, so the buttons are real: tapping a playable one opens the
+  // viewer for real, with no network.
+  replayListShot.forEach((row, i) => {
+    shotReplayLogs[row.replay_id] = shotReplayPayload(SHOT_REPLAY_ROWS[i].stale ? 0 : undefined);
+  });
+  refreshLocalReplayIndex();
+}
+
+// Logs behind the list shot's rows, so openServerReplay never has to fetch.
+const shotReplayLogs = {};
 
 // ---------------------------------------------------------------- screenshot-state deep links
 
@@ -4207,6 +4641,11 @@ function registerServiceWorker() {
 
 if (typeof navigator !== 'undefined' && navigator.onLine === false) netDown = true;
 if (SHOT === 'offline-menu') initOfflineShot();
+// the two list shots seed their stand-in rows BEFORE the boot block below, so
+// the first loadHistory() render already has them (#223)
+if (SHOT === 'replay-list' || SHOT === 'replay-stale') {
+  try { initReplayListShot(); } catch (e) { console.warn('shot link failed', e); }
+}
 refreshOfflineUi();
 refreshOfflineCard();
 registerServiceWorker();
@@ -4245,6 +4684,16 @@ if (BTN_SHOTS[SHOT]) {
 }
 if (TOUR_SHOTS[SHOT]) {
   try { shotControlsTour(TOUR_SHOTS[SHOT]); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'replay') {
+  try { shotReplay().catch((e) => console.warn('shot link failed', e)); }
+  catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'replay-stale') {
+  // the list, then its engine-changed dialog — so the message itself is
+  // reachable from a URL for screenshots and tests
+  try { renderMineRows([]); showEngineChangedDialog(); }
+  catch (e) { console.warn('shot link failed', e); }
 }
 
 // Screenshot-state deep links (#200): the wall-garrison panel only exists

@@ -11,7 +11,7 @@
 // call skipWaiting (see below), so a client keeps the old bundle until the
 // version string changes and it does a cold load. Forgetting the bump means
 // shipping code nobody receives.
-const CACHE_VERSION = 'supply-line-v1';
+const CACHE_VERSION = 'supply-line-v2';
 const STATIC_CACHE = CACHE_VERSION + '-static';
 const RUNTIME_CACHE = CACHE_VERSION + '-runtime';
 
@@ -33,6 +33,7 @@ const PRECACHE = [
   '/js/commands.js',
   '/js/attract.js',
   '/js/offline.js',
+  '/js/replay.js',
   '/js/tutorial.js',
   '/js/controls-tour.js',
 ];

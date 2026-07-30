@@ -103,6 +103,124 @@ const DEMO_CHALLENGE_ID = 900103;
 const DEMO_NAMES = ['Staging demo Quartermaster', 'Staging demo Forager', 'Staging demo Warden'];
 const isDemoReq = (req) => IS_STAGING && req.query.demo === '1';
 
+// ------------------------------------------------------------- replays (#223)
+// A replay is an order log re-run through the client's own sim, so the server
+// only stores and hands back bytes — it never simulates and never judges
+// playability. That gate is `sim_version` vs the client's SIM_VERSION constant,
+// checked in the browser next to the constant itself.
+// The client's sim/replay engine version, read from public/js/sim.js at boot
+// (same dynamic-import trick attract-pool.js uses for the browser modules).
+// The server never simulates — it only needs the number so staging seeds can be
+// stamped with the version the previewing client will actually accept.
+let SIM_VERSION = 1;
+
+const REPLAY_KEEP = 20;              // newest replays retained per user
+const REPLAY_MAX_ENTRIES = 4000;     // mirrors LOG_MAX_ENTRIES in replay.js
+const REPLAY_MAX_BYTES = 256 * 1024; // mirrors LOG_MAX_BYTES
+
+// ---- staging demo replays -------------------------------------------------
+// `replays` is a brand-new table, so staging copies it EMPTY and both the
+// ▶ Replay buttons and the viewer itself would be unreviewable in a preview.
+// These four rows fix that. The logs are hand-authored but genuinely valid: on
+// a fresh game the player's home settlement is id 1 and their opening war party
+// is blobs 2/3/4 (newGame assigns ids in a fixed order), so the orders below
+// resolve and the AI commander plays its own game around them.
+const DEMO_REPLAY_IDS = new Set([900201, 900202, 900203, 900204]);
+
+// setMode → march the war party out → pillage → put a hand on the fields, then
+// the terminal result. Not good play; just watchable, and every entry applies.
+const DEMO_LOG_SOLO = [
+  { t: 20, c: { op: 'setMode', settlementId: 1, mode: 'farm' } },
+  { t: 60, c: { op: 'move', blobId: 2, x: 16, y: 14 } },
+  { t: 240, c: { op: 'move', blobId: 3, x: 13, y: 16 } },
+  { t: 420, c: { op: 'pillage', blobId: 2, on: true } },
+  { t: 600, c: { op: 'setRole', blobId: 4, role: 'farm' } },
+  { t: 900, c: { op: 'move', blobId: 2, x: 20, y: 18 } },
+  { t: 1200, end: 'win' },
+];
+const DEMO_LOG_PVP = [
+  { t: 30, o: 0, c: { op: 'setMode', settlementId: 1, mode: 'supply' } },
+  { t: 120, o: 0, c: { op: 'move', blobId: 2, x: 30, y: 28 } },
+  { t: 300, o: 1, c: { op: 'move', blobId: 6, x: 40, y: 40 } },
+  { t: 700, o: 0, c: { op: 'pillage', blobId: 2, on: true } },
+  { t: 1100, end: 'p0-win' },
+];
+
+// id, owner, the match row it hangs off, and the log. 900204 is stamped
+// sim_version 0 ON PURPOSE — an impossible-to-match version — so a preview also
+// shows the "engine changed" state and its dialog without anyone having to bump
+// SIM_VERSION to review that path.
+const DEMO_REPLAYS = [
+  { id: 900201, matchId: 900001, userId: -1, username: DEMO_NAMES[0], mode: 'solo', seed: 'staging-demo-1', size: 'xsmall', diff: 'normal', owner: 0, result: 'win', dur: 1622, end: 1200, log: DEMO_LOG_SOLO, stale: false },
+  { id: 900202, matchId: 900002, userId: -2, username: DEMO_NAMES[1], mode: 'solo', seed: 'staging-demo-2', size: 'xsmall', diff: 'hard', owner: 0, result: 'loss', dur: 2210, end: 1200, log: DEMO_LOG_SOLO, stale: false },
+  { id: 900203, matchId: 900006, userId: -1, username: DEMO_NAMES[0], mode: 'pvp', seed: 'staging-demo-6', size: 'small', diff: 'normal', owner: 0, result: 'win', dur: 1744, end: 1100, log: DEMO_LOG_PVP, stale: false },
+  { id: 900204, matchId: 900003, userId: -3, username: DEMO_NAMES[2], mode: 'solo', seed: 'staging-demo-3', size: 'xsmall', diff: 'easy', owner: 0, result: 'win', dur: 1385, end: 1200, log: DEMO_LOG_SOLO, stale: true },
+];
+
+// History rows shaped exactly like the real `mine` projection, injected for a
+// ?demo=1 previewer. Three playable, one on a stale engine.
+function demoReplayRows() {
+  const now = Date.now();
+  return DEMO_REPLAYS.map((d, i) => ({
+    result: d.result,
+    difficulty: d.mode === 'pvp' ? 'pvp' : d.diff,
+    duration_seconds: d.dur,
+    map_seed: d.seed,
+    created_at: new Date(now - (i + 1) * 3600_000).toISOString(),
+    mode: d.mode,
+    opponent: d.mode === 'pvp' ? DEMO_NAMES[1] : null,
+    rating_delta: null,
+    client_id: null,
+    replay_id: d.id,
+    replay_sim_version: d.stale ? 0 : SIM_VERSION,
+  }));
+}
+
+// Shape-only validation. A bad replay is DROPPED, never fatal: recording the
+// match result matters more than keeping its recording.
+function cleanReplay(r) {
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+  if (!Array.isArray(r.log) || !r.log.length) return null;
+  if (r.log.length > REPLAY_MAX_ENTRIES) return null;
+  if (!MAP_SIZES.has(r.size_key) || !DIFFICULTIES.has(r.difficulty)) return null;
+  const seed = typeof r.seed === 'string' ? r.seed.slice(0, 64) : null;
+  if (!seed) return null;
+  const version = parseInt(r.sim_version, 10);
+  if (!Number.isInteger(version) || version < 0 || version > 32767) return null;
+  const endTick = Math.max(0, Math.min(2000000, parseInt(r.end_tick, 10) || 0));
+  let bytes;
+  try { bytes = JSON.stringify(r.log).length; } catch { return null; }
+  if (bytes > REPLAY_MAX_BYTES) return null;
+  return {
+    seed, size_key: r.size_key, difficulty: r.difficulty,
+    mode: r.mode === 'pvp' ? 'pvp' : 'solo',
+    viewer_owner: r.viewer_owner === 1 ? 1 : 0,
+    sim_version: version, end_tick: endTick, log: r.log, bytes,
+  };
+}
+
+// Insert one replay row and trim the owner back to the newest REPLAY_KEEP.
+// Returns the new row's id. Runs inside the caller's transaction.
+async function insertReplay(client, rep, meta) {
+  const ins = await client.query(`
+    INSERT INTO replays (user_id, username, mode, client_id, lobby_id, seed, size_key,
+                         difficulty, viewer_owner, result, duration_seconds, end_tick,
+                         sim_version, log, bytes)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+    ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
+    RETURNING id
+  `, [meta.userId, meta.username, rep.mode, meta.clientId || null, meta.lobbyId || null,
+    rep.seed, rep.size_key, rep.difficulty, rep.viewer_owner, meta.result,
+    meta.duration, rep.end_tick, rep.sim_version, JSON.stringify(rep.log), rep.bytes]);
+  if (!ins.rows.length) return null;
+  await client.query(`
+    DELETE FROM replays WHERE user_id = $1 AND id NOT IN (
+      SELECT id FROM replays WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2
+    )
+  `, [meta.userId, REPLAY_KEEP]);
+  return ins.rows[0].id;
+}
+
 // Record a finished match. Fire-and-forget from the client at match end.
 // The rating update rides along in the same transaction: only the
 // player's row moves — the AI commander is a fixed anchor, and a
@@ -115,7 +233,7 @@ const isDemoReq = (req) => IS_STAGING && req.query.demo === '1';
 app.post('/api/match-result', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { result, difficulty, duration_seconds, map_seed, client_id } = req.body || {};
+    const { result, difficulty, duration_seconds, map_seed, client_id, replay } = req.body || {};
     if (!RESULTS.has(result)) return res.status(400).json({ error: 'Bad result' });
     if (!DIFFICULTIES.has(difficulty) || difficulty === 'pvp') return res.status(400).json({ error: 'Bad difficulty' });
     const duration = Math.max(0, Math.min(86400, parseInt(duration_seconds, 10) || 0));
@@ -148,11 +266,27 @@ app.post('/api/match-result', async (req, res) => {
         userId: req.user.id, username: req.user.username, difficulty, result,
       })
       : null;
+    // The recording rides along with the result (#223), so an offline match
+    // and its replay reach the server in the same idempotent call. A malformed
+    // or oversized log is dropped — never a reason to lose the match itself.
+    let replayId = null;
+    const rep = cleanReplay(replay);
+    if (rep) {
+      try {
+        replayId = await insertReplay(client, rep, {
+          userId: req.user.id, username: req.user.username, clientId,
+          result, duration,
+        });
+      } catch (e) {
+        console.error('replay insert failed:', e.message);
+        replayId = null;
+      }
+    }
     await client.query(`
-      INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, rating_delta, rating_after, client_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, rating_delta, rating_after, client_id, replay_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     `, [req.user.id, req.user.username, result, difficulty, duration, seed,
-      out ? out.delta : null, out ? out.after : null, clientId]);
+      out ? out.delta : null, out ? out.after : null, clientId, replayId]);
     await client.query('COMMIT');
 
     res.json({
@@ -192,17 +326,56 @@ app.get('/api/ratings', async (req, res) => {
 // wins platform-wide.
 app.get('/api/matches', async (req, res) => {
   try {
+    // replay_sim_version rides along (#223) so the list can render the
+    // playable / "engine changed" state per row without fetching a single log.
     const mine = await pool.query(`
-      SELECT result, difficulty, duration_seconds, map_seed, created_at, mode, opponent, rating_delta, client_id
-      FROM matches WHERE user_id = $1
-      ORDER BY created_at DESC LIMIT 10
+      SELECT m.result, m.difficulty, m.duration_seconds, m.map_seed, m.created_at,
+             m.mode, m.opponent, m.rating_delta, m.client_id,
+             m.replay_id, r.sim_version AS replay_sim_version
+      FROM matches m LEFT JOIN replays r ON r.id = m.replay_id
+      WHERE m.user_id = $1
+      ORDER BY m.created_at DESC LIMIT 10
     `, [req.user.id]);
     const recent = await pool.query(`
       SELECT username, difficulty, duration_seconds, created_at, mode, opponent
       FROM matches WHERE result = 'win'
       ORDER BY created_at DESC LIMIT 10
     `);
-    res.json({ mine: mine.rows, recent: recent.rows });
+    let mineRows = mine.rows;
+    if (isDemoReq(req)) {
+      // Request-time demo injection: the seeded replay rows belong to demo
+      // users, and this endpoint only ever returns the caller's own matches, so
+      // a preview would never see a ▶ Replay button. Same pattern as the
+      // injected demo challenge in /api/lobbies. Never persisted.
+      mineRows = mineRows.concat(demoReplayRows());
+    }
+    res.json({ mine: mineRows, recent: recent.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// One replay's metadata and order log. Strictly the caller's own — a replay is
+// the sequence of moves someone made, and it is theirs to rewatch.
+app.get('/api/replays/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Bad replay id' });
+    const r = await pool.query(`
+      SELECT id, user_id, mode, seed, size_key, difficulty, viewer_owner, result,
+             duration_seconds, end_tick, sim_version, log, created_at
+      FROM replays WHERE id = $1
+    `, [id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Replay not found' });
+    const row = r.rows[0];
+    // The staging demo rows are owned by fake negative-id users, so a previewer
+    // has to be allowed to open them — exactly like the demo challenge.
+    const demoOk = isDemoReq(req) && DEMO_REPLAY_IDS.has(row.id);
+    if (row.user_id !== req.user.id && !demoOk) {
+      return res.status(403).json({ error: 'Not your replay' });
+    }
+    delete row.user_id;
+    res.json({ replay: row });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -215,7 +388,7 @@ app.get('/api/matches', async (req, res) => {
 // sim itself re-validates everything at deserialize time.
 
 const validSaveData = (d) => d && typeof d === 'object' && !Array.isArray(d)
-  && d.v >= 2 && d.v <= 4 && !d.pvp && !d.result;
+  && d.v >= 2 && d.v <= 5 && !d.pvp && !d.result;
 
 app.get('/api/save', async (req, res) => {
   try {
@@ -560,6 +733,16 @@ app.get('*', (req, res) => {
 });
 
 async function start() {
+  // The replay engine version the browser will enforce (#223). Read once from
+  // the same module the client runs, so a seed can never claim a version the
+  // client would reject by accident.
+  try {
+    const S = await import('./public/js/sim.js');
+    if (Number.isInteger(S.SIM_VERSION)) SIM_VERSION = S.SIM_VERSION;
+  } catch (err) {
+    console.error('could not read SIM_VERSION from sim.js:', err.message);
+  }
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS matches (
       id SERIAL PRIMARY KEY,
@@ -581,6 +764,43 @@ async function start() {
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS matches_client_id_idx
     ON matches (user_id, client_id) WHERE client_id IS NOT NULL
+  `);
+  // Replays (#223): the history row's link to its recording. Nullable — every
+  // match played before this shipped has none, and one that overran the log
+  // caps is recorded without one.
+  await pool.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS replay_id INTEGER`);
+
+  // Match replays (#223): one row per participant (mirroring how `matches`
+  // already duplicates a PvP match), holding the order log the client re-runs
+  // through its own sim. Deliberately PUBLIC (no staging:private comment): a row
+  // is a user id, a public username and the moves someone made in a game whose
+  // result is ALREADY published in `matches` and on the recent-wins list — the
+  // same sensitivity class as `matches`, `saves` and `player_state`.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS replays (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      username VARCHAR(255) NOT NULL,
+      mode VARCHAR(16) NOT NULL DEFAULT 'solo',
+      client_id VARCHAR(64),
+      lobby_id INTEGER,
+      seed VARCHAR(64) NOT NULL,
+      size_key VARCHAR(16) NOT NULL,
+      difficulty VARCHAR(16) NOT NULL,
+      viewer_owner SMALLINT NOT NULL DEFAULT 0,
+      result VARCHAR(16) NOT NULL,
+      duration_seconds INTEGER NOT NULL DEFAULT 0,
+      end_tick INTEGER NOT NULL DEFAULT 0,
+      sim_version SMALLINT NOT NULL,
+      log JSONB NOT NULL,
+      bytes INTEGER,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS replays_user_idx ON replays (user_id, created_at DESC)`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS replays_client_id_idx
+    ON replays (user_id, client_id) WHERE client_id IS NOT NULL
   `);
 
   await pool.query(`
@@ -693,6 +913,20 @@ async function start() {
         ('user:-4', 'Staging demo Marshal',       1340, 31, 0, 0)
       ON CONFLICT (participant) DO NOTHING
     `);
+    // Replay rows (#223) for the seeded matches, so the ▶ Replay buttons and
+    // the viewer are reviewable in a preview. 900204 carries sim_version 0 on
+    // purpose — see DEMO_REPLAYS — so the "engine changed" state shows too.
+    for (const d of DEMO_REPLAYS) {
+      await pool.query(`
+        INSERT INTO replays (id, user_id, username, mode, seed, size_key, difficulty,
+                             viewer_owner, result, duration_seconds, end_tick, sim_version, log, bytes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ON CONFLICT (id) DO UPDATE SET sim_version = EXCLUDED.sim_version, log = EXCLUDED.log
+      `, [d.id, d.userId, d.username, d.mode, d.seed, d.size, d.diff, d.owner,
+        d.result, d.dur, d.end, d.stale ? 0 : SIM_VERSION,
+        JSON.stringify(d.log), JSON.stringify(d.log).length]);
+      await pool.query(`UPDATE matches SET replay_id = $2 WHERE id = $1`, [d.matchId, d.id]);
+    }
     // Give the seeded history rows plausible deltas so the "Yours" list
     // shows the +/- column in previews (ids from the block above).
     await pool.query(`
