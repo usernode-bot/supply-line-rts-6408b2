@@ -3732,6 +3732,62 @@ function shotWallStart() {
   renderPanel(true);
 }
 
+// Scorched reclaimed farmland (#219) only exists after a wall standing on
+// your own plot is razed mid-match, so no plain URL reaches it.
+// `?shot=wall-razed` boots a solo match on a FIXED seed, drops a finished
+// wall on the home settlement's outermost plot (which ploughs it under),
+// then razes it off honest sim output — a hair of structure left and the
+// enemy's opening war party moved in beside it — so the reclaimed tile is
+// selected with the real burnt-earth paint and the inspector's Barren +
+// 🔥 Scorched lines. Pure local UI state, no DB writes: works everywhere.
+function shotWallRazed() {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot219', 'xsmall', 'normal');
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  if (!home) return;
+  // the fertile own plot furthest from the keep, scanned in a fixed order
+  // so the same seed always burns the same tile
+  let spot = null, bd = -1;
+  for (const i of [...home.tilled].sort((a, b) => a - b)) {
+    const x = i % g.map.w, y = (i / g.map.w) | 0;
+    if (!g.map.fert[i]) continue;
+    const res = S.canPlaceWall(g, 0, x, y);
+    if (!res.ok || !res.farm) continue;
+    const d = Math.hypot(x + 0.5 - (home.x + 1), y + 0.5 - (home.y + 1));
+    if (d > bd) { bd = d; spot = { x, y, i }; }
+  }
+  if (!spot) return;
+  const w = S.spawnFinishedWall(g, 0, spot.x, spot.y, { deploy: 0, supply: 0, farm: 0 });
+  if (!w) return;
+  startMatch(g);
+  const foe = g.blobs.find(b => b.owner === 1 && b.count.deploy > 0);
+  if (foe) {
+    foe.x = spot.x + 1.5; foe.y = spot.y + 0.5;
+    foe.prevX = foe.x; foe.prevY = foe.y;
+    foe.order = null; foe.path = null; foe.pathGoal = null;
+    // foraging off: otherwise the raiders strip the tiles they stand on
+    // and the shot has scorch marks that aren't the wall's
+    foe.pillaging = false;
+    w.hp = 0.5; // an unmanned wall on its last legs: one contact ends it
+    for (let i = 0; i < 20 && g.walls.some(x => x.id === w.id); i++) S.step(g);
+    // the raiders pull back off the rubble so the burnt tile — the whole
+    // subject of the shot — isn't hidden under their sprite
+    foe.x = spot.x + 4.5; foe.y = spot.y + 0.5;
+    foe.prevX = foe.x; foe.prevY = foe.y;
+    foe.order = null; foe.path = null; foe.pathGoal = null;
+  }
+  ui.selected = { kind: 'tile', i: spot.i };
+  view.cx = spot.x + 0.5;
+  view.cy = spot.y + 0.5;
+  view.scale = 34;
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+}
+
 // The in-combat / rear-attack panel lines (#201) exist only while a
 // selected group is actually under fire, which no plain URL can reach —
 // so `?shot=in-combat` boots a solo match on a FIXED seed and stages a
@@ -3870,6 +3926,9 @@ if (SHOT === 'in-combat') {
 }
 if (SHOT === 'wall-start') {
   try { shotWallStart(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'wall-razed') {
+  try { shotWallRazed(); } catch (e) { console.warn('shot link failed', e); }
 }
 if (BTN_SHOTS[SHOT]) {
   try { shotControlsButton(BTN_SHOTS[SHOT]); } catch (e) { console.warn('shot link failed', e); }

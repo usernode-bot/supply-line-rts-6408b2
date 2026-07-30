@@ -1114,6 +1114,21 @@ function destroyWall(game, w, byCombat) {
   if (game.wallAt[i] === w.id) game.wallAt[i] = 0;
   game.walls = game.walls.filter(x => x.id !== w.id);
   game.dirty.add(i);
+  // Tearing a wall's foundations out ruins the soil (#219): the tile is
+  // left at the bottom of the LOWEST tier — Barren, below FERT_WORTHWHILE
+  // and below pillage's own yield floor, so it earns and feeds nothing —
+  // and then heals through the ordinary pillage machinery. `orig` is
+  // never touched, so tickRegen brings it back to exactly its old tier
+  // (slowly while fallow, a full level per 225 ticks with a farmer on it).
+  // Fertility is only ever lowered here, never raised: an already-stripped
+  // tile stays where it is.
+  if (game.map.fert[i] > 0) game.map.fert[i] = 0;
+  // `pillaged` drives regen, the burnt-earth overlay and the inspector's
+  // 🔥 Scorched line. Register the tile only when it is genuinely below
+  // its original — the same test deserialize uses to rebuild the set from
+  // fertDelta, so a wall razed on naturally barren ground can't leave the
+  // live set holding a tile a reload would drop (byte-identical saves).
+  if (game.map.fert[i] < game.map.orig[i] - 0.0001) game.pillaged.add(i);
   // the rubble goes back to plain ground, so whoever's ring reaches it
   // ploughs it again (#219) — including a plot the wall itself took.
   // Ascending id, exactly like destroySettlement: that's the sequence

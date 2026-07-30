@@ -89,6 +89,10 @@
     { "name": "Desktop tutorial prelude hands over to the tutorial", "path": "/?shot=tutorial-prelude-desktop-end&demo=1", "expectText": "Start the tutorial" },
     { "name": "Desktop tutorial prelude names the right-click order button", "path": "/?shot=tutorial-prelude-desktop&demo=1", "expectText": "right-click is the order button" },
     { "name": "How to Play says walls may cross your own farmland", "path": "/?demo=1", "expectText": "your own farmland" },
-    { "name": "How to Play says a walled plot is tilled again if the wall falls", "path": "/?demo=1", "expectText": "tilled again if the wall ever falls" }
+    { "name": "How to Play says a razed wall leaves the plot scorched", "path": "/?demo=1", "expectText": "scorched and barren" },
+    { "name": "Razed-wall screenshot state selects the reclaimed tile", "path": "/?shot=wall-razed&demo=1", "expectSelector": "#panel" },
+    { "name": "A razed wall's plot reads as the lowest fertility tier", "path": "/?shot=wall-razed&demo=1", "expectText": "Barren land" },
+    { "name": "A razed wall's plot reads as scorched", "path": "/?shot=wall-razed&demo=1", "expectText": "Scorched" },
+    { "name": "The scorched plot is farmland again", "path": "/?shot=wall-razed&demo=1", "expectText": "Farmland of your settlement" }
   ]
 }
