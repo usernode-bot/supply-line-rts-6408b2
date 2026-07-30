@@ -163,6 +163,13 @@
       .ct-ring, .ct-fig-slide, .ct-fig-dash, .ct-fig-pinch-a,
       .ct-fig-pinch-b, .ct-fig-tap, .ct-fig-fill { animation: none; }
     }
+    /* replay scrub bar (#223): the default range track renders near-white,
+       which reads as a bright band across the dark HUD */
+    #replay-seek { -webkit-appearance: none; appearance: none; height: 1.25rem; background: transparent; cursor: pointer; }
+    #replay-seek::-webkit-slider-runnable-track { height: 0.375rem; border-radius: 9999px; background: #3f3f46; }
+    #replay-seek::-moz-range-track { height: 0.375rem; border-radius: 9999px; background: #3f3f46; }
+    #replay-seek::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 1rem; height: 1rem; margin-top: -0.3125rem; border-radius: 9999px; background: #8b5cf6; border: none; }
+    #replay-seek::-moz-range-thumb { width: 1rem; height: 1rem; border-radius: 9999px; background: #8b5cf6; border: none; }
   </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 h-full overflow-hidden">
@@ -248,6 +255,33 @@
 
     <!-- selection panel: bottom sheet on phones, card bottom-right on desktop -->
     <div id="panel" class="hidden absolute bottom-0 inset-x-0 sm:inset-x-auto sm:right-3 sm:bottom-3 sm:w-80 bg-zinc-900/95 backdrop-blur border-t sm:border border-zinc-700 sm:rounded-xl p-3 z-10 text-sm max-h-[60%] sm:max-h-[calc(100%-4.5rem)] overflow-y-auto">
+    </div>
+
+    <!-- replay transport (#223): visible only while a replay is open. The bar
+         owns its own play/pause + speed (the live top-bar pair is hidden in
+         replay mode) and the scrub slider spans the whole recorded match. -->
+    <div id="replay-bar" class="hidden absolute bottom-0 inset-x-0 z-30 flex flex-col gap-1 px-2 py-2 bg-zinc-950/90 backdrop-blur border-t border-zinc-800 select-none">
+      <div id="replay-notice" class="hidden text-xs text-amber-300 text-center"></div>
+      <!-- the scrub bar gets its own full-width row so a phone never squashes it
+           to nothing, and the control row wraps rather than clipping -->
+      <div class="flex items-center gap-2 text-sm flex-wrap">
+        <button id="replay-restart" aria-label="Restart replay" title="Restart replay" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">⏮</button>
+        <button id="replay-play" aria-label="Play or pause replay" class="btn-sm px-3 rounded bg-emerald-800 hover:bg-emerald-700">⏸</button>
+        <select id="replay-speed" aria-label="Replay speed" class="btn-sm px-2 rounded bg-zinc-800 hover:bg-zinc-700 font-mono text-zinc-100">
+          <option value="1">1×</option>
+          <option value="2" selected>2×</option>
+          <option value="4">4×</option>
+          <option value="8">8×</option>
+        </select>
+        <span id="replay-time" class="font-mono text-zinc-400 whitespace-nowrap">0:00 / 0:00</span>
+        <span class="flex-1"></span>
+        <button id="replay-fog" aria-label="Reveal map" title="Reveal map" class="btn-sm px-2 rounded bg-zinc-800 hover:bg-zinc-700 whitespace-nowrap text-xs">👁 Reveal map</button>
+        <button id="replay-exit" aria-label="Exit replay" title="Exit replay" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">✕</button>
+      </div>
+      <input id="replay-seek" type="range" min="0" max="100" value="0" step="1" aria-label="Seek within the replay"
+        class="w-full accent-violet-500">
+      <!-- keeps the bar clear of the phone's home-indicator strip -->
+      <div class="h-1"></div>
     </div>
   </div>
 
@@ -466,6 +500,9 @@
       <h2 id="end-title" class="text-2xl font-bold mb-1"></h2>
       <p id="end-detail" class="text-zinc-400 text-sm mb-5"></p>
       <p id="end-rating" class="hidden text-zinc-300 text-sm font-mono -mt-3 mb-5"></p>
+      <!-- rewatch the match that just ended (#223): always on the current
+           engine, so it never needs the version gate the history rows do -->
+      <button id="btn-end-replay" class="hidden btn w-full py-3 mb-2 rounded-xl bg-sky-700 hover:bg-sky-600 font-semibold">▶ Watch replay</button>
       <button id="btn-end-menu" class="btn w-full py-3 rounded-xl bg-violet-600 hover:bg-violet-500 font-semibold">Back to menu</button>
     </div>
   </div>

@@ -2,8 +2,34 @@
 // the `game` object so save/resume is a JSON round-trip (map regenerated
 // from its seed). Units exist only as counts inside blobs.
 
-import { generateMap, findPath, passable, dist, nearestPassable } from './mapgen.js';
+import { generateMap, findPath, passable, dist, nearestPassable, hashSeed } from './mapgen.js';
 import * as SUP from './supply.js';
+
+// Replay engine version (#223). Replays are order logs re-run through THIS
+// simulation, so a recording is only faithful while the sim behaves the way
+// it did when the match was played.
+//
+// !! BUMP THIS WHENEVER A CHANGE ALTERS SIMULATION BEHAVIOUR !!
+// The replay viewer refuses to play a recording whose stamped version differs
+// from this constant — that refusal is what stops a changed engine from
+// confidently showing a match that never happened. Forgetting the bump means
+// stale recordings keep looking playable and quietly replay wrong. The flip
+// side: bumping retires every existing replay, so it tracks real behaviour
+// changes, not cosmetic edits to sim files.
+export const SIM_VERSION = 1;
+
+// The sim's own seeded PRNG (#223). Every draw the simulation makes runs
+// through here so a match is a pure function of (seed, sizeKey, difficulty,
+// order log) — mulberry32's exact step, but with the state living on the game
+// object instead of a closure so it survives the save/snapshot round trip.
+export function simRand(game) {
+  let a = game.rngState | 0;
+  a = (a + 0x6D2B79F5) | 0;
+  game.rngState = a >>> 0;
+  let t = Math.imul(a ^ (a >>> 15), 1 | a);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
 
 export const C = {
   DT: 0.1,                 // seconds per tick
@@ -284,7 +310,10 @@ export function unitMaxHP(role) {
   if (role === 'supply') return C.UNIT_HP_SUPPLY;
   return C.UNIT_HP;
 }
-function newUnit(role) { return { role, hp: unitMaxHP(role), seed: Math.random() }; }
+// `seed` fixes the (invisible) order units absorb damage in, so it has to come
+// from the sim's own seeded stream — not Math.random — or a replay of the same
+// orders would consume different units (#223).
+function newUnit(game, role) { return { role, hp: unitMaxHP(role), seed: simRand(game) }; }
 // Role changes convert HP proportionally (a half-dead fighter becomes a
 // half-dead farmer, and vice versa).
 function convertRole(u, role) {
@@ -292,10 +321,10 @@ function convertRole(u, role) {
   u.hp = u.hp / unitMaxHP(u.role) * unitMaxHP(role);
   u.role = role;
 }
-function unitsFromCount(count) {
+function unitsFromCount(game, count) {
   const us = [];
   for (const role of ['deploy', 'supply', 'farm']) {
-    for (let k = 0; k < (count[role] | 0); k++) us.push(newUnit(role));
+    for (let k = 0; k < (count[role] | 0); k++) us.push(newUnit(game, role));
   }
   return us;
 }
@@ -374,7 +403,7 @@ function farmerGate(game, s) {
 // arrival (see farmYield).
 function spawnWorkingFarmer(game, s, unit, origin, spot) {
   const o = origin || farmerGate(game, s);
-  const b = makeBlob(game, s.owner, o.x, o.y, null, [unit || newUnit('farm')]);
+  const b = makeBlob(game, s.owner, o.x, o.y, null, [unit || newUnit(game, 'farm')]);
   b.working = s.id;
   let dest = spot || farmerSpot(game, s);
   if (dist(b.x, b.y, dest.x, dest.y) > 0.05) {
@@ -433,6 +462,7 @@ export function newGame(seedStr, sizeKey, difficulty, pvp) {
     map,
     tick: 0,
     nextId: 1,
+    rngState: hashSeed(String(seedStr) + ':sim'),  // seeded sim draws (#223)
     blobs: [],
     settlements: [],
     routes: [],
@@ -613,7 +643,7 @@ export function setViewer(game, me) {
 }
 
 function makeBlob(game, owner, x, y, count, units) {
-  const us = (units || unitsFromCount(count)).sort((a, z) => a.seed - z.seed);
+  const us = (units || unitsFromCount(game, count)).sort((a, z) => a.seed - z.seed);
   const b = {
     id: game.nextId++, owner, x, y,
     prevX: x, prevY: y,
@@ -3893,9 +3923,12 @@ export function serialize(game) {
   const fertDelta = {};
   for (const i of game.pillaged) fertDelta[i] = game.map.fert[i];
   const data = {
-    v: 4,
+    v: 5,
     seed: game.seed, sizeKey: game.sizeKey, difficulty: game.difficulty,
     tick: game.tick, nextId: game.nextId, result: game.result,
+    // the sim's PRNG cursor (#223): a resumed save / revived PvP runner has to
+    // carry on the same draw sequence, not restart it
+    rng: (game.rngState || 0) >>> 0,
     blobs: game.blobs.filter(b => !b.dead).map(b => ({
       id: b.id, owner: b.owner, x: b.x, y: b.y,
       count: b.count, food: b.food, order: b.order,
@@ -3961,6 +3994,9 @@ export function deserialize(data, prev) {
     seed: data.seed, sizeKey: data.sizeKey, difficulty: data.difficulty,
     map,
     tick: data.tick, nextId: data.nextId,
+    // pre-v5 payloads carry no PRNG cursor — derive the opening one from the
+    // seed, exactly as newGame does (#223)
+    rngState: data.rng != null ? (data.rng >>> 0) : hashSeed(String(data.seed) + ':sim'),
     blobs: [], settlements: [], routes: [],
     walls: [],
     wallAt: new Int32Array(map.w * map.h),
@@ -4098,7 +4134,7 @@ export function deserialize(data, prev) {
     const units = (bd.units && bd.units.length
       // clamp HP to the role's max: v2 saves stored farmers at up to 100 HP
       ? bd.units.map(u => ({ role: u.role, hp: Math.min(u.hp, unitMaxHP(u.role)), seed: u.seed }))
-      : unitsFromCount(bd.count || { deploy: 0, supply: 0, farm: 0 })
+      : unitsFromCount(game, bd.count || { deploy: 0, supply: 0, farm: 0 })
     ).sort((a, z) => a.seed - z.seed);
     const b = {
       id: bd.id, owner: bd.owner, x: bd.x, y: bd.y,

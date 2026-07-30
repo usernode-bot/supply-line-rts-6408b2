@@ -71,5 +71,16 @@ backdrop — it runs the same sim/AI modules via dynamic `import()`.
   it in `CHALLENGERS` *after* whatever it chains onto, and expect the
   artifact to record `opponent` / `opponent_rating` per persona and per
   log row so the arithmetic stays auditable.
+- **Replays are order logs, so `SIM_VERSION` is load-bearing.** A replay
+  (#223) stores only the orders a player gave and re-runs them through
+  the live sim, which is faithful *only* while the sim behaves as it did
+  when the match was played. **If you change simulation behaviour, bump
+  `SIM_VERSION` in `public/js/sim.js`** — the viewer refuses any
+  recording whose stamped version differs, and forgetting the bump means
+  stale logs still look playable and quietly replay wrong. The flip side:
+  a bump retires every existing replay, so it tracks real behaviour
+  changes, not cosmetic edits to sim files. Nothing in the sim may call
+  `Math.random()` — every draw goes through `S.simRand(game)` off the
+  serialized `rngState`, which is what makes a replay exact.
 - No build step and no new runtime dependencies — plain ES modules
   served from `public/`.
