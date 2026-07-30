@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Homescreen / manifest icon: the same 🌾 glyph as the inline favicon,
+       on the app's zinc-950 background. Sized with generous padding so the
+       maskable safe zone (the inner 80%) never clips the wheat. -->
+  <rect width="512" height="512" fill="#09090b"/>
+  <text x="256" y="352" font-size="256" text-anchor="middle"
+        font-family="'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">🌾</text>
+</svg>

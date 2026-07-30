@@ -88,6 +88,13 @@ function randomSeed() { return Math.random().toString(36).slice(2, 10); }
 // -- acquisition: server snapshot first, invisible warm-up as fallback --
 
 async function acquire(sid) {
+  // Known-offline (#221): skip the round trip entirely rather than burning
+  // FETCH_TIMEOUT on a fetch that cannot succeed — the menu's backdrop is
+  // the same local warm-up either way, just sooner.
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    beginWarmup();
+    return;
+  }
   // hold the controller locally: stopAttract can null `fetchCtl` (and
   // abort the fetch) before the timeout fires, and the timer outlives an
   // aborted fetch because the throw skips the clearTimeout below

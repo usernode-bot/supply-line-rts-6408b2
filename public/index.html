@@ -65,7 +65,16 @@
   </script>
   <title>Supply Line</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text x='50' y='72' font-size='64' text-anchor='middle'>🌾</text></svg>">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#09090b">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <!-- Tailwind's Play CDN, vendored so the app renders with no network
+       (offline solo play, #221). It is the unmodified build downloaded from
+       https://cdn.tailwindcss.com — it still compiles in the browser, so
+       there is no build step; upgrading means re-downloading that URL over
+       public/vendor/tailwind-play-cdn.js (and bumping CACHE_VERSION in
+       public/sw.js so cached clients pick the new file up). -->
+  <script src="/vendor/tailwind-play-cdn.js"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
   <style>
     html, body { height: 100%; overscroll-behavior: none; }
@@ -259,6 +268,13 @@
 
       <div id="menu-error" class="hidden text-red-400 text-sm text-center"></div>
 
+      <!-- offline banner (#221): shown whenever the server is unreachable.
+           Solo play is entirely client-side, so the menu says what still
+           works instead of showing three panels of failed fetches. -->
+      <div id="offline-badge" class="hidden bg-amber-950/60 border border-amber-800 rounded-xl px-3 py-2 text-sm text-amber-200 text-center">
+        📴 Offline — solo matches vs the AI still work. Results sync when you're back.
+      </div>
+
       <button id="btn-resume" class="hidden btn w-full py-3 rounded-xl bg-emerald-700 hover:bg-emerald-600 font-semibold text-lg">
         ▶ Resume Match
       </button>
@@ -298,6 +314,13 @@
       <div id="mp-section" class="bg-zinc-900 rounded-xl p-4 flex flex-col gap-3 border border-zinc-800">
         <h2 class="font-semibold text-zinc-200">Multiplayer</h2>
 
+        <!-- offline stand-in (#221): PvP is server-authoritative, so with no
+             connection the whole section collapses to this one line and the
+             3 s lobby poll stops. -->
+        <p id="mp-offline" class="hidden text-sm text-zinc-400">
+          Multiplayer needs a connection — you'll see lobbies and challenges again once you're back online.
+        </p>
+
         <!-- incoming challenges (hidden container is always present) -->
         <div id="challenge-inbox" class="flex flex-col gap-2"></div>
 
@@ -336,6 +359,25 @@
             <div id="lobby-list" class="space-y-1 text-sm text-zinc-400">Loading…</div>
           </div>
         </div>
+      </div>
+
+      <!-- Play offline (#221): the whole card is hidden where service workers
+           don't exist; #btn-install only appears once a beforeinstallprompt
+           has actually been captured (Chrome/Edge/Android). -->
+      <div id="offline-card" class="hidden bg-zinc-900 rounded-xl p-4 flex flex-col gap-3 border border-zinc-800">
+        <h2 class="font-semibold text-zinc-200">Play offline</h2>
+        <p class="text-sm text-zinc-400">
+          Solo matches against the AI commanders run entirely on your device. Once you've opened
+          the game here, it keeps working with no connection — results sync the next time you're online.
+        </p>
+        <button id="btn-install" class="hidden btn w-full py-3 rounded-xl bg-emerald-800 hover:bg-emerald-700 font-semibold">📥 Install app</button>
+        <a id="link-open-tab" href="/" target="_blank" rel="noopener"
+           class="btn w-full py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 font-semibold text-center text-zinc-100 flex items-center justify-center">
+          ↗ Open in its own tab
+        </a>
+        <p class="text-xs text-zinc-500">
+          On iPhone or iPad, open it in its own tab and use Share → Add to Home Screen.
+        </p>
       </div>
 
       <details class="bg-zinc-900 rounded-xl border border-zinc-800">

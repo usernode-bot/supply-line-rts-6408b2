@@ -9,9 +9,26 @@ const ratings = require('./ratings');
 
 const app = express();
 const port = process.env.PORT || 3000;
+let server = null;          // captured from app.listen so shutdown can drain it
+let shuttingDown = false;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const JWT_SECRET = process.env.JWT_SECRET;
 const IS_STAGING = process.env.USERNODE_ENV === 'staging';
+
+// Platform-issued user tokens are RS256, signed with a key whose PUBLIC half
+// is all we hold (USERNODE_JWT_PUBLIC_KEY; JWT_SECRET is its deprecated alias
+// carrying the same PEM). Pinning the algorithm is therefore mandatory, not
+// cosmetic: an unpinned verifier would also accept HS256 and treat that
+// public PEM as an HMAC secret, letting any caller forge any user.
+//
+// Issuer / audience / purpose are pinned too, but only when the environment
+// actually supplies them — this app predates that cutover, and refusing every
+// token because USERNODE_APP_ID is absent would lock out real users rather
+// than protect them.
+const JWT_PUBLIC_KEY = (process.env.USERNODE_JWT_PUBLIC_KEY || process.env.JWT_SECRET || '')
+  .replace(/\\n/g, '\n');
+const APP_AUDIENCE = process.env.USERNODE_APP_ID
+  ? 'usernode:app:' + process.env.USERNODE_APP_ID
+  : null;
 
 // Paths that stay open without authentication. Add a path here (and add it
 // with `app.get`/`app.post` below) if you deliberately want it public.
@@ -28,8 +45,17 @@ app.use(express.json({ limit: '2mb' }));
 // on subsequent fetches.
 app.use((req, res, next) => {
   const token = req.query.token || req.headers['x-usernode-token'];
-  if (token && JWT_SECRET) {
-    try { req.user = jwt.verify(token, JWT_SECRET); } catch {}
+  if (token && JWT_PUBLIC_KEY) {
+    try {
+      // Algorithm: always. Audience (the defence against another app's token
+      // being replayed here) whenever USERNODE_APP_ID is set. Issuer is left
+      // unpinned deliberately — with RS256 enforced, a token has to carry a
+      // real platform signature, and audience already scopes it to this app.
+      const opts = { algorithms: ['RS256'] };
+      if (APP_AUDIENCE) opts.audience = APP_AUDIENCE;
+      const claims = jwt.verify(token, JWT_PUBLIC_KEY, opts);
+      if (claims && (claims.pur == null || claims.pur === 'iframe')) req.user = claims;
+    } catch {}
   }
 
   // Static assets (CSS/JS/images) are always served; the API and the HTML
@@ -42,7 +68,12 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+// 503 once we're draining so anything polling readiness sees the container
+// leaving rotation instead of a reset connection mid-deploy.
+app.get('/health', (_req, res) => {
+  if (shuttingDown) return res.status(503).json({ status: 'shutting down' });
+  res.json({ status: 'ok' });
+});
 
 // The template ships no favicon file; index.html carries an inline SVG
 // icon instead. Answer 204 here so anything that still probes
@@ -76,16 +107,41 @@ const isDemoReq = (req) => IS_STAGING && req.query.demo === '1';
 // The rating update rides along in the same transaction: only the
 // player's row moves — the AI commander is a fixed anchor, and a
 // win/draw can only carry the player *up to* its rating, never past it.
+//
+// An optional `client_id` (#221) makes the whole call idempotent: a result
+// played offline is queued on the device and re-sent on reconnect, and a
+// response lost in transit must not double-record or double-rate the match.
+// Absent — pre-#221 clients, PvP — the endpoint behaves exactly as before.
 app.post('/api/match-result', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { result, difficulty, duration_seconds, map_seed } = req.body || {};
+    const { result, difficulty, duration_seconds, map_seed, client_id } = req.body || {};
     if (!RESULTS.has(result)) return res.status(400).json({ error: 'Bad result' });
     if (!DIFFICULTIES.has(difficulty) || difficulty === 'pvp') return res.status(400).json({ error: 'Bad difficulty' });
     const duration = Math.max(0, Math.min(86400, parseInt(duration_seconds, 10) || 0));
     const seed = typeof map_seed === 'string' ? map_seed.slice(0, 64) : null;
+    const clientId = typeof client_id === 'string' && client_id.trim()
+      ? client_id.trim().slice(0, 64) : null;
 
     await client.query('BEGIN');
+    // Already recorded? Answer with the player's current rating so the client
+    // can still render its line, and write nothing.
+    if (clientId) {
+      const dupe = await client.query(
+        `SELECT rating_delta, rating_after FROM matches WHERE user_id = $1 AND client_id = $2`,
+        [req.user.id, clientId]);
+      if (dupe.rows.length) {
+        await client.query('COMMIT');
+        const row = dupe.rows[0];
+        return res.json({
+          ok: true,
+          duplicate: true,
+          rating: row.rating_after == null ? null : Math.round(Number(row.rating_after)),
+          rating_delta: row.rating_delta == null ? null : Math.round(Number(row.rating_delta)),
+          ai_rating: null,
+        });
+      }
+    }
     const rated = ratings.soloRatable(req.user.id, result, duration);
     const out = rated
       ? await ratings.applySolo(client, {
@@ -93,10 +149,10 @@ app.post('/api/match-result', async (req, res) => {
       })
       : null;
     await client.query(`
-      INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, rating_delta, rating_after)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, rating_delta, rating_after, client_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     `, [req.user.id, req.user.username, result, difficulty, duration, seed,
-      out ? out.delta : null, out ? out.after : null]);
+      out ? out.delta : null, out ? out.after : null, clientId]);
     await client.query('COMMIT');
 
     res.json({
@@ -137,7 +193,7 @@ app.get('/api/ratings', async (req, res) => {
 app.get('/api/matches', async (req, res) => {
   try {
     const mine = await pool.query(`
-      SELECT result, difficulty, duration_seconds, map_seed, created_at, mode, opponent, rating_delta
+      SELECT result, difficulty, duration_seconds, map_seed, created_at, mode, opponent, rating_delta, client_id
       FROM matches WHERE user_id = $1
       ORDER BY created_at DESC LIMIT 10
     `, [req.user.id]);
@@ -518,6 +574,14 @@ async function start() {
   `);
   await pool.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS mode VARCHAR(16) NOT NULL DEFAULT 'solo'`);
   await pool.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS opponent VARCHAR(255)`);
+  // Offline solo play (#221): the client's own id for a finished match, so a
+  // result queued offline and re-sent on reconnect can't be recorded — or
+  // rated — twice. Nullable: PvP rows and pre-#221 clients never carry one.
+  await pool.query(`ALTER TABLE matches ADD COLUMN IF NOT EXISTS client_id VARCHAR(64)`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS matches_client_id_idx
+    ON matches (user_id, client_id) WHERE client_id IS NOT NULL
+  `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS lobbies (
@@ -640,8 +704,33 @@ async function start() {
   }
 
   matchRunner.init(pool); // server-authoritative PvP simulations
-  app.listen(port, () => console.log(`Listening on :${port}`));
+  server = app.listen(port, () => console.log(`Listening on :${port}`));
   attractPool.warmUp(); // fill the attract-snapshot pool in the background
 }
+
+// Graceful shutdown. Every deploy replaces this container by sending SIGTERM
+// and waiting a few seconds before SIGKILL, so stop accepting connections,
+// let in-flight requests land under a hard deadline, close the pool, exit.
+const DRAIN_MS = 3000;
+async function shutdown(signal) {
+  if (shuttingDown) return;   // a repeat signal during the drain is a no-op
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received, draining`);
+  if (server) {
+    server.close(() => { });
+    server.closeIdleConnections?.();
+    const t = setTimeout(() => server.closeAllConnections?.(), DRAIN_MS);
+    t.unref?.();
+  }
+  try {
+    await pool.end();
+  } catch (e) {
+    console.error('[shutdown] pool.end failed', e.message);
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 start().catch(err => { console.error(err); process.exit(1); });
