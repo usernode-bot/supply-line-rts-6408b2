@@ -10,6 +10,10 @@
 import * as S from '../public/js/sim.js';
 import * as SUP from '../public/js/supply.js';
 import { passable, fertTier } from '../public/js/mapgen.js';
+// the UI's pick geometry (#224) — the garrison cases below assert that a
+// near-miss click resolves to the wall tile, which is what makes the
+// snapped order a garrison push
+import { pickTol, tileDist } from '../public/js/pick.js';
 
 // routeHealth treats a topped-off destination as "keeping up" (#143) — for
 // a wall that means the SUPPLIES stash, not the garrison's bellies (#200).
@@ -1539,6 +1543,297 @@ function builderTile(game, p) {
       !g.walls.some(w => w.id === built.id) && g.tilledBy[p.i] === home.id && g.pillaged.has(p.i));
     parity('destroyed', false);
   }
+}
+
+// ------------------- 14. garrisoning a wall UNDER ATTACK (#222)
+
+// The reported bug: armies ordered onto their own wall while it is being
+// battered stop just short and never enter. Everything hinges on whether
+// the order's DESTINATION TILE is the wall tile — that is what makes
+// opMove flag the march as a garrison push (so contact can't halt it)
+// and what the arrival fold reads. These cases pin all four ways that
+// used to break, plus the UI-side snap that keeps it true.
+
+// A wall-legal tile a few tiles from the player's start with clear ground
+// either side, so the stage sits inside the player's permanent vision.
+function findSeenSpot(g) {
+  const start = g.map.starts[0];
+  for (let r = 3; r <= 7; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = start.x + 1 + dx, y = start.y + 1 + dy;
+        if (S.canPlaceWall(g, 0, x, y).err) continue;
+        // clear lane east and west: the march and the attacker both need it
+        let ok = true;
+        for (let k = -5; k <= 3 && ok; k++) {
+          if (k === 0) continue;
+          const i = y * g.map.w + (x + k);
+          if (!passable(g.map, x + k, y) || g.settAt[i] || g.wallAt[i]) ok = false;
+        }
+        if (ok) return { x, y };
+      }
+    }
+  }
+  return null;
+}
+
+// A farm blob (spawnBlob only makes deploy/supply), for the flee case.
+function spawnFarmBlob(game, owner, x, y, n) {
+  const b = spawnBlob(game, owner, x, y, 0, 0);
+  for (let k = 0; k < n; k++) {
+    b.units.push({ role: 'farm', hp: S.unitMaxHP('farm'), seed: (k + 1) / 100 });
+  }
+  b.count = { deploy: 0, supply: 0, farm: n };
+  b.food = n * 10;
+  return b;
+}
+
+// Stage: an own finished wall on clear ground, an enemy war party parked
+// adjacent battering it, and one of the player's groups a few tiles off
+// on the far side. `enemySide` puts the attacker between the group and
+// the wall when -1, so the march has to push THROUGH contact.
+//
+// `nearHome` puts the whole thing inside the player's own vision, which
+// is what real play looks like — and what the enemy-avoidance cases
+// below REQUIRE: avoidTiles skips enemies the mover's side can't see, so
+// a siege staged out in the fog exercises no avoidance at all.
+function siegeStage(opts) {
+  const o = opts || {};
+  const g = S.newGame('withdraw-smoke-1', 'small', 'normal');
+  const spot = o.nearHome ? findSeenSpot(g) : findOpenArea(g, 5, 11);
+  if (!spot) throw new Error('no open area for the siege stage');
+  const w = o.building
+    ? null
+    : injectWall(g, 0, spot.x, spot.y, o.garrison || { deploy: 0, supply: 0, farm: 0 },
+      { stock: 40 });
+  const side = o.enemySide != null ? o.enemySide : 1;
+  const enemy = spawnBlob(g, 1, spot.x + 0.5 + side * 1.5, spot.y + 0.5, o.enemyN || 8, 0);
+  const mine = o.farm
+    ? spawnFarmBlob(g, 0, spot.x + 0.5 - 4, spot.y + 0.5, o.mineN || 6)
+    : spawnBlob(g, 0, spot.x + 0.5 - 4, spot.y + 0.5, o.mineN || 6, 0);
+  return { g, spot, w, enemy, mine };
+}
+
+// Hold the attacker on its tile so the case under test is the MARCH, not
+// whatever the enemy decides to chase; then step until the wall's
+// garrison grows (or we give up).
+function marchUntilGarrisoned(g, enemy, wall, spot, ticks) {
+  const base = wall ? S.wallGarrisonTotal(wall) : 0;
+  const ex = enemy.x, ey = enemy.y;
+  for (let t = 0; t < (ticks || 400); t++) {
+    if (!enemy.dead) { enemy.order = null; enemy.path = null; enemy.x = ex; enemy.y = ey; }
+    S.step(g);
+    const live = wall || g.walls.find(x => x.x === spot.x && x.y === spot.y);
+    if (live && S.wallGarrisonTotal(live) > base) return t;
+  }
+  return -1;
+}
+
+{
+  console.log('an army ordered onto its own wall garrisons it under attack (#222):');
+  // both sidings, and both in the fog and inside the player's own vision
+  // (only the latter engages enemy avoidance — see the pathing case below)
+  for (const [side, nearHome] of [[1, false], [-1, false], [1, true], [-1, true]]) {
+    const tag = `${side === 1 ? 'enemy beyond the wall' : 'enemy blocking the approach'}`
+      + `${nearHome ? ', in vision' : ''}`;
+    const { g, spot, w, enemy, mine } = siegeStage({ enemySide: side, nearHome, enemyN: 12 });
+    const r = S.opMove(g, mine, spot.x + 0.5, spot.y + 0.5);
+    check(`${tag}: the order is accepted`, !!r.ok, r.err);
+    check(`${tag}: it is flagged a garrison push`, !!(mine.order && mine.order.garrison));
+    const at = marchUntilGarrisoned(g, enemy, w, spot);
+    check(`${tag}: the group folded into the wall`, at >= 0,
+      `garrison ${JSON.stringify(w.garrison)} after 400 ticks`);
+    check(`${tag}: the arrivals are real units`, S.wallGarrisonTotal(w) > 0);
+  }
+}
+
+{
+  console.log('\nenemy avoidance may not move the destination (#222):');
+  // The mechanism behind the reported "armies stop just short" symptom.
+  // findPath RETARGETS a blocked goal to the nearest passable tile within
+  // 6 and reports success, so the soft-avoidance ring around the wall's
+  // attacker (blobRadius + 1 ≈ 2.4 tiles for a 10-stack, which covers the
+  // wall tile) used to come back as a fine path to somewhere ELSE. The
+  // march then "arrived" two tiles out, the fold found no wall, and the
+  // order was quietly cleared — no event, no toast, full-strength army.
+  const { g, spot, w, enemy, mine } = siegeStage({ enemyN: 12, nearHome: true });
+  check('the attacker\'s avoidance ring covers the wall tile',
+    Math.hypot(enemy.x - (spot.x + 0.5), enemy.y - (spot.y + 0.5)) <= S.blobRadius(enemy) + 1,
+    `${Math.hypot(enemy.x - (spot.x + 0.5), enemy.y - (spot.y + 0.5)).toFixed(2)} vs reach ${(S.blobRadius(enemy) + 1).toFixed(2)}`);
+  // avoidance only applies to enemies the mover can SEE — assert that, or
+  // the case silently tests nothing (this is why it must be staged in vision)
+  run(g, 1);
+  check('the attacker is visible to the player',
+    g.fog[Math.floor(enemy.y) * g.map.w + Math.floor(enemy.x)] === 2);
+  S.opMove(g, mine, spot.x + 0.5, spot.y + 0.5);
+  const last = mine.path && mine.path[mine.path.length - 1];
+  check('the planned path ENDS on the wall tile', !!last
+    && Math.floor(last.x) === spot.x && Math.floor(last.y) === spot.y,
+    last ? `ends at ${Math.floor(last.x)},${Math.floor(last.y)} not ${spot.x},${spot.y}` : 'no path');
+  check('and the march folds into the wall', marchUntilGarrisoned(g, enemy, w, spot) >= 0,
+    `garrison ${JSON.stringify(w.garrison)}, blob at ${mine.dead ? 'dead' : `${mine.x.toFixed(1)},${mine.y.toFixed(1)}`}`);
+
+  // the exemption is scoped to GARRISON destinations on purpose: the
+  // wider "avoidance never moves any goal" rule re-routes AI marches
+  // fleet-wide and would need a recalibration (CLAUDE.md). Ordinary moves
+  // keep today's retarget-toward behaviour — assert both halves so the
+  // scope is deliberate rather than accidental.
+  const s2 = siegeStage({ enemyN: 12, nearHome: true });
+  run(s2.g, 1);
+  S.opMove(s2.g, s2.mine, s2.spot.x + 0.5, s2.spot.y + 0.5);
+  const pg = s2.mine.path[s2.mine.path.length - 1];
+  check('a garrison destination is never substituted',
+    Math.floor(pg.x) === s2.spot.x && Math.floor(pg.y) === s2.spot.y,
+    `ends ${Math.floor(pg.x)},${Math.floor(pg.y)}`);
+  check('pathGoal always records what was asked for',
+    Math.abs(s2.mine.pathGoal.x - (s2.spot.x + 0.5)) < 1e-9
+    && Math.abs(s2.mine.pathGoal.y - (s2.spot.y + 0.5)) < 1e-9);
+  // an ordinary tile inside the ring keeps the old behaviour untouched
+  const plain = { x: s2.spot.x + 1.5, y: s2.spot.y + 0.5 };
+  if (passable(s2.g.map, Math.floor(plain.x), Math.floor(plain.y))) {
+    const r = S.opMove(s2.g, s2.mine, plain.x, plain.y);
+    check('an ordinary move into the ring is still accepted', !r.err, r.err);
+    check('and is NOT a garrison push', !s2.mine.order.garrison);
+  }
+}
+
+{
+  console.log('\na near-miss click still garrisons once the UI snaps it (#222):');
+  // The sim is tile-exact by design: a destination one tile short is an
+  // ordinary move and correctly stops there. What must hold is that a
+  // click inside the pick band resolves to the wall's own tile centre —
+  // the snap main.js's ownGarrisonTargetAt now applies — so the order
+  // the sim receives is the garrison push the player meant.
+  const { g, spot, w, enemy, mine } = siegeStage({});
+  const nearMiss = { x: spot.x + 1 + 0.2, y: spot.y + 0.5 }; // 0.2 tiles off the tile
+  check('the near-miss lands inside the wall tile\'s pick band',
+    tileDist(spot.x, spot.y, nearMiss.x, nearMiss.y) <= pickTol(14),
+    `${tileDist(spot.x, spot.y, nearMiss.x, nearMiss.y)} > ${pickTol(14)}`);
+  // ...and is NOT on the wall tile itself, so the raw point would miss
+  check('the near-miss is not on the wall tile itself',
+    Math.floor(nearMiss.x) !== spot.x);
+  check('the raw point would NOT be a garrison spot',
+    !S.opMove(g, mine, nearMiss.x, nearMiss.y).err && !mine.order.garrison);
+  // snap it exactly the way ownGarrisonTargetAt does, then re-order
+  const snapped = { x: w.x + 0.5, y: w.y + 0.5 };
+  S.opMove(g, mine, snapped.x, snapped.y);
+  check('the snapped point IS a garrison push', !!mine.order.garrison);
+  check('the snapped order reaches the wall', marchUntilGarrisoned(g, enemy, w, spot) >= 0,
+    `garrison ${JSON.stringify(w.garrison)}`);
+}
+
+{
+  console.log('\na garrison destination drops any attack target (#222):');
+  // An order carrying o.tkind is driven by tickTargetedMove, which stops
+  // at melee range and NEVER reaches the arrival fold — so `garrison +
+  // tkind` was a silent dead end whichever way the click resolved.
+  const { g, spot, w, enemy, mine } = siegeStage({});
+  S.opMove(g, mine, spot.x + 0.5, spot.y + 0.5, { kind: 'blob', id: enemy.id });
+  check('the attack target was dropped', mine.order.tkind == null,
+    `tkind ${mine.order.tkind}`);
+  check('the order is still a garrison push', !!mine.order.garrison);
+  check('and it garrisons instead of stalling at melee range',
+    marchUntilGarrisoned(g, enemy, w, spot) >= 0, `garrison ${JSON.stringify(w.garrison)}`);
+
+  // a plain enemy destination still becomes a real attack order
+  const s2 = siegeStage({});
+  S.opMove(s2.g, s2.mine, s2.enemy.x, s2.enemy.y, { kind: 'blob', id: s2.enemy.id });
+  check('an ordinary attack order keeps its target', s2.mine.order.tkind === 'blob');
+}
+
+{
+  console.log('\nreinforcements hold an unfinished wall and fold when it completes (#222):');
+  const g = S.newGame('withdraw-smoke-1', 'small', 'normal');
+  const spot = findOpenArea(g, 5, 11);
+  // stake out a site the honest way: a builder crew standing beside it
+  const crew = spawnBlob(g, 0, spot.x + 1.5, spot.y + 0.5, 1, 0);
+  S.opBuildWalls(g, crew, [{ x: spot.x, y: spot.y }]);
+  run(g, 5);
+  const site = g.walls.find(w => w.x === spot.x && w.y === spot.y);
+  check('the site exists and is still building', !!site && site.building);
+
+  const mine = spawnBlob(g, 0, spot.x + 0.5 - 4, spot.y + 0.5, 4, 0);
+  S.opMove(g, mine, spot.x + 0.5, spot.y + 0.5);
+  check('an unfinished wall is not a garrison spot yet', !mine.order.garrison);
+  // march in and wait on the tile. NOTE: the sim never trims game.events
+  // (main.js drains it per frame), so count the array ONCE at the end —
+  // summing per tick counts every event as many times as it lingers.
+  g.events.length = 0;
+  let held = false;
+  for (let t = 0; t < 200 && site.building; t++) {
+    S.step(g);
+    if (!mine.dead && Math.floor(mine.x) === spot.x && Math.floor(mine.y) === spot.y
+      && mine.order) held = true;
+  }
+  const warned = g.events.filter(e => e.msg.includes('isn\'t finished')).length;
+  check('it says the wall isn\'t finished, exactly once', warned === 1, `${warned} times`);
+  check('the group holds the tile with its order alive', held);
+  check('the wall finished', !site.building);
+  // once complete, tickOrder's re-derivation turns it into a garrison push
+  run(g, 5);
+  check('the waiting group folded in on completion', S.wallGarrisonTotal(site) > 0,
+    `garrison ${JSON.stringify(site.garrison)}`);
+  check('and the blob is gone (absorbed)', mine.dead);
+}
+
+{
+  console.log('\nfarm hands sent to a wall under attack stop being pulled home (#222):');
+  const { g, spot, w, enemy, mine } = siegeStage({ farm: true, mineN: 6 });
+  S.opMove(g, mine, spot.x + 0.5, spot.y + 0.5);
+  check('the farm group is flagged a garrison push', !!mine.order.garrison);
+  let fled = false;
+  const at = marchUntilGarrisoned(g, enemy, w, spot);
+  if (mine.order && mine.order.flee) fled = true;
+  check('it never acquired a flee order', !fled);
+  check('it garrisoned the wall', at >= 0, `garrison ${JSON.stringify(w.garrison)}`);
+  check('the wall holds farm hands', w.garrison.farm > 0, JSON.stringify(w.garrison));
+
+  // the reflex itself is intact: an UNORDERED farm group near a hit
+  // farmer group still runs for cover
+  const s2 = siegeStage({ farm: true, mineN: 4, enemySide: -1 });
+  s2.mine.x = s2.spot.x + 0.5 - 1.4; s2.mine.y = s2.spot.y + 0.5;
+  for (let t = 0; t < 120 && !(s2.mine.order && s2.mine.order.flee) && !s2.mine.dead; t++) {
+    S.step(s2.g);
+  }
+  check('an unordered farm group under fire still flees',
+    s2.mine.dead || !!(s2.mine.order && s2.mine.order.flee));
+}
+
+{
+  console.log('\nsupply and mixed groups garrison a wall under attack too (#222):');
+  for (const kind of ['supply', 'mixed']) {
+    const { g, spot, w, enemy, mine } = siegeStage({});
+    if (kind === 'supply') {
+      mine.units.forEach(u => { u.role = 'supply'; });
+      mine.count = { deploy: 0, supply: mine.units.length, farm: 0 };
+    } else {
+      mine.units.slice(0, 3).forEach(u => { u.role = 'farm'; });
+      mine.count = { deploy: mine.units.length - 3, supply: 0, farm: 3 };
+    }
+    S.opMove(g, mine, spot.x + 0.5, spot.y + 0.5);
+    check(`${kind}: garrisons the wall`, marchUntilGarrisoned(g, enemy, w, spot) >= 0,
+      `garrison ${JSON.stringify(w.garrison)}`);
+  }
+}
+
+{
+  console.log('\na full wall still turns arrivals away, once (#201 regression):');
+  const { g, spot, w, enemy, mine } = siegeStage({
+    garrison: { deploy: S.C.WALL_GARRISON_CAP, supply: 0, farm: 0 },
+  });
+  S.opMove(g, mine, spot.x + 0.5, spot.y + 0.5);
+  const ex = enemy.x, ey = enemy.y;
+  g.events.length = 0;
+  for (let t = 0; t < 200; t++) {
+    if (!enemy.dead) { enemy.order = null; enemy.path = null; enemy.x = ex; enemy.y = ey; }
+    S.step(g);
+    if (mine.dead) break;
+  }
+  const full = g.events.filter(e => e.msg.includes('garrison is full')).length;
+  check('it warned that the garrison is full, exactly once', full === 1, `${full} times`);
+  check('and never exceeded the cap', S.wallGarrisonTotal(w) <= S.C.WALL_GARRISON_CAP,
+    `${S.wallGarrisonTotal(w)}`);
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall checks passed');
