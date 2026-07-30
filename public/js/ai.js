@@ -1452,6 +1452,11 @@ function planShield(game, S, s, bearing, span, owner) {
       while (da > Math.PI) da -= 2 * Math.PI;
       while (da < -Math.PI) da += 2 * Math.PI;
       if (Math.abs(da) > WALL_ARC) continue;
+      // walls may stand on own farmland (#219), but the commander never
+      // spends its own plots on a shield — the shield band (3.2–4.4)
+      // clears its own farm ring (2.7) anyway, so this only pins the
+      // behaviour the calibrated ratings were measured with.
+      if (game.tilledBy[ty * w + tx]) continue;
       const r = S.canPlaceWall(game, owner, tx, ty);
       if (r.err) continue;
       cand.push({ x: tx, y: ty, da, resume: r.resume ? 1 : 0 });
@@ -1517,6 +1522,9 @@ function planChoke(game, S, s, bearing, owner, maxNew) {
         if (wl && wl.owner === owner && wl.building) { fresh.push(t); continue; } // resume
         ok = false; break;
       }
+      // a choke seal never eats own farmland either (#219) — same reason
+      // as planShield: keep AI siting bit-identical to the calibration
+      if (game.tilledBy[t.y * game.map.w + t.x]) { ok = false; break; }
       if (S.canPlaceWall(game, owner, t.x, t.y).err) { ok = false; break; }
       fresh.push(t);
     }

@@ -87,6 +87,8 @@
     { "name": "Desktop tutorial prelude renders the controls card", "path": "/?shot=tutorial-prelude-desktop&demo=1", "expectSelector": "#controls-tour-card" },
     { "name": "Desktop tutorial prelude shows the four mouse & keyboard pages", "path": "/?shot=tutorial-prelude-desktop&demo=1", "expectText": "Step 1 of 4" },
     { "name": "Desktop tutorial prelude hands over to the tutorial", "path": "/?shot=tutorial-prelude-desktop-end&demo=1", "expectText": "Start the tutorial" },
-    { "name": "Desktop tutorial prelude names the right-click order button", "path": "/?shot=tutorial-prelude-desktop&demo=1", "expectText": "right-click is the order button" }
+    { "name": "Desktop tutorial prelude names the right-click order button", "path": "/?shot=tutorial-prelude-desktop&demo=1", "expectText": "right-click is the order button" },
+    { "name": "How to Play says walls may cross your own farmland", "path": "/?demo=1", "expectText": "your own farmland" },
+    { "name": "How to Play says a walled plot is tilled again if the wall falls", "path": "/?demo=1", "expectText": "tilled again if the wall ever falls" }
   ]
 }

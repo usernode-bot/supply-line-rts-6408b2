@@ -1086,13 +1086,14 @@ export function createRenderer(canvas, minimap) {
         const own = viewer(game);
         ctx.setLineDash([5, 3]);
         for (const t of S.wallLineTiles(startT.x, startT.y, end.x, end.y)) {
-          const ok = !S.canPlaceWall(game, own, t.x, t.y).err;
+          // three states (#219): green free ground, amber legal but it
+          // ploughs one of your own plots under, red refused.
+          const r = S.canPlaceWall(game, own, t.x, t.y);
+          const rgb = r.err ? '248,113,113' : r.farm ? '251,191,36' : '74,222,128';
           const isStart = !!(ui.wallStart && t.x === ui.wallStart.x && t.y === ui.wallStart.y);
-          ctx.fillStyle = ok ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.15)';
+          ctx.fillStyle = `rgba(${rgb},0.15)`;
           ctx.fillRect(wx(t.x), wy(t.y), s, s);
-          ctx.strokeStyle = ok
-            ? `rgba(74,222,128,${isStart ? 1 : 0.8})`
-            : `rgba(248,113,113,${isStart ? 1 : 0.8})`;
+          ctx.strokeStyle = `rgba(${rgb},${isStart ? 1 : 0.8})`;
           ctx.lineWidth = isStart ? 2.5 : 1.5;
           ctx.strokeRect(wx(t.x) + 0.5, wy(t.y) + 0.5, s - 1, s - 1);
           // 🧱 on the anchored start (#214): at a phone's default zoom

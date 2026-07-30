@@ -2354,15 +2354,20 @@ function showWallConfirm(screen) {
   CT.signal('ask-popup');
   ui.orderTarget = null;
   ui.orderTargetEnt = null;
-  let okCount = 0;
+  let okCount = 0, plots = 0;
   if (ui.wallStart && ui.wallEnd) {
     for (const t of S.wallLineTiles(ui.wallStart.x, ui.wallStart.y, ui.wallEnd.x, ui.wallEnd.y)) {
-      if (!S.canPlaceWall(game, me, t.x, t.y).err) okCount++;
+      const r = S.canPlaceWall(game, me, t.x, t.y);
+      if (r.err) continue;
+      okCount++;
+      if (r.farm) plots++; // your own farmland — the wall takes the plot (#219)
     }
   }
   const ok = okCount > 0;
+  // the plot cost rides on the label so it's read before committing
+  const cost = plots ? ` · ${plots} plot${plots === 1 ? '' : 's'}` : '';
   orderPopup.innerHTML = `
-    <button data-act="pwall" class="btn px-3 rounded-lg text-left ${ok ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-500 opacity-40'}" ${ok ? '' : 'disabled'}>✓ Build wall (${okCount})</button>
+    <button data-act="pwall" class="btn px-3 rounded-lg text-left ${ok ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-500 opacity-40'}" ${ok ? '' : 'disabled'}>✓ Build wall (${okCount})${cost}</button>
     <button data-act="pwallx" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Cancel</button>`;
   orderPopup.classList.remove('hidden');
   const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
@@ -2402,7 +2407,9 @@ function confirmWall() {
   updateHint();
   if (!start || !end || !blobs.length) { renderPanel(true); return; }
   const tiles = S.wallLineTiles(start.x, start.y, end.x, end.y);
-  const valid = tiles.filter(t => !S.canPlaceWall(game, me, t.x, t.y).err);
+  const checked = tiles.map(t => ({ t, r: S.canPlaceWall(game, me, t.x, t.y) }));
+  const valid = checked.filter(c => !c.r.err).map(c => c.t);
+  const plots = checked.filter(c => !c.r.err && c.r.farm).length;
   const skipped = tiles.length - valid.length;
   if (!valid.length) { toast('🧱 No buildable tiles there'); renderPanel(true); return; }
   // deterministic founder ordering, like dispatchBuild (#130)
@@ -2420,7 +2427,10 @@ function confirmWall() {
   }
   if (ok) {
     pingOrder({ x: start.x + 0.5, y: start.y + 0.5 }, null);
-    toast(`🧱 Building ${ok} wall tile${ok === 1 ? '' : 's'}${skipped ? ` — ${skipped} skipped` : ''}`);
+    // plots is capped at the queued count so the toast never claims more
+    // farmland than the order can actually take (#219)
+    const lost = Math.min(plots, ok);
+    toast(`🧱 Building ${ok} wall tile${ok === 1 ? '' : 's'}${lost ? ` — ${lost} plot${lost === 1 ? '' : 's'} ploughed under` : ''}${skipped ? ` — ${skipped} skipped` : ''}`);
   } else if (err) toast(err);
   renderPanel(true);
 }
@@ -3655,7 +3665,10 @@ function shotWallGarrison() {
       for (let dx = -r; dx <= r && !spot; dx++) {
         if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
         const x = start.x + 1 + dx, y = start.y + 1 + dy;
-        if (S.canPlaceWall(g, 0, x, y).ok) spot = { x, y };
+        // never on own farmland (#219): legal now, but untilling the
+        // plot would shift the screenshot's pixels
+        const res = S.canPlaceWall(g, 0, x, y);
+        if (res.ok && !res.farm) spot = { x, y };
       }
     }
   }
@@ -3697,7 +3710,8 @@ function shotWallStart() {
         if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
         const x = Math.floor(mine.x) + dx, y = Math.floor(mine.y) + dy;
         if (x < 0 || y < 0 || x >= g.map.w || y >= g.map.h) continue;
-        if (!S.canPlaceWall(g, 0, x, y).err) spot = { x, y };
+        const res = S.canPlaceWall(g, 0, x, y); // farmland skipped (#219): pixel-stable shot
+        if (res.ok && !res.farm) spot = { x, y };
       }
     }
   }
@@ -3901,7 +3915,8 @@ function bootShot(name) {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
           const x = home.x + 1 + dx, y = home.y + 1 + dy;
           if (x < 0 || y < 0 || x >= g.map.w || y >= g.map.h) continue;
-          if (S.canPlaceWall(g, 0, x, y).err) continue;
+          const res = S.canPlaceWall(g, 0, x, y);
+          if (res.err || res.farm) continue; // farmland skipped (#219)
           if (S.inTerritory(g, home, x + 0.5, y + 0.5)) spot = { x, y };
         }
       }

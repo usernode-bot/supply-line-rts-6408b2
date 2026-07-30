@@ -944,6 +944,7 @@ export function wallRationTicks(w) {
 export function placeFinishedWall(game, owner, x, y, garrison, food) {
   const i = y * game.map.w + x;
   if (game.wallAt[i]) return null;
+  clearFarmTile(game, i);
   const g = garrison || { deploy: 0, supply: 0, farm: 0 };
   const garr = { deploy: g.deploy || 0, supply: g.supply || 0, farm: g.farm || 0 };
   const gcap = (garr.deploy + garr.supply + garr.farm) * C.FOOD_PER_UNIT;
@@ -995,16 +996,29 @@ export function wallLineTiles(x0, y0, x1, y1) {
 }
 
 // Whether `owner` may start (or resume) a wall on tile (tx, ty): clear
-// passable ground — never mountains, settlement grounds, farmland,
+// passable ground — never mountains, settlement grounds, ENEMY farmland,
 // another wall (except resuming an own construction site), or a tile
 // inside an ENEMY settlement's territory.
+//
+// YOUR OWN farmland is legal but costs the plot (#219): the answer comes
+// back as { ok: true, farm: true, plot: <settlementId> } so the preview
+// can warn (amber, not green) and the confirm step can count what the
+// order will plough under. clearFarmTile does the actual taking when the
+// site is staked out.
 export function canPlaceWall(game, owner, tx, ty) {
   const { w, h } = game.map;
   if (tx < 0 || ty < 0 || tx >= w || ty >= h) return { err: 'Off the map' };
   const i = ty * w + tx;
   if (game.map.mountain[i]) return { err: 'Mountains' };
   if (game.settAt[i]) return { err: 'Settlement grounds' };
-  if (game.tilledBy[i]) return { err: 'Farmland' };
+  const farmed = game.tilledBy[i];
+  if (farmed) {
+    const fs = game.settlements.find(x => x.id === farmed);
+    // explicit refusal rather than leaning on the territory rule below:
+    // TERRITORY (5) covers FARM_RING (2.7), but the message should name
+    // the thing you actually pointed at.
+    if (fs && fs.owner !== owner) return { err: 'Enemy farmland' };
+  }
   if (game.wallAt[i]) {
     const ex = game.walls.find(x => x.id === game.wallAt[i]);
     if (ex && ex.owner === owner && ex.building) return { ok: true, resume: ex.id };
@@ -1016,7 +1030,41 @@ export function canPlaceWall(game, owner, tx, ty) {
     const ts = game.settlements.find(x => x.id === tid);
     if (ts && ts.owner !== owner) return { err: 'Enemy territory' };
   }
+  if (farmed) return { ok: true, farm: true, plot: farmed };
   return { ok: true };
+}
+
+// A wall site takes the plot it stands on (#219): the tile leaves its
+// settlement's `tilled` list — which is the whole economic effect, since
+// farmYield reads nothing else — reverts to plain land, and any field
+// hand working it is re-plotted. Natural fertility (map.fert) is
+// untouched, so the ground comes back intact if the wall ever falls.
+//
+// Called the moment a site is STAKED OUT, never on completion:
+// previewFields already skips scaffolds and deserialize loads walls
+// before it re-tills, so a save taken mid-construction has to find the
+// plot already gone or live and loaded state would diverge.
+function clearFarmTile(game, i) {
+  const sid = game.tilledBy[i];
+  if (!sid) return;
+  game.tilledBy[i] = 0;
+  game.dirty.add(i);
+  const s = game.settlements.find(x => x.id === sid);
+  if (!s) return;
+  s.tilled = s.tilled.filter(t => t !== i);
+  // field hands standing on (or walking to) the lost plot take another —
+  // tickFarmerSpread only unstacks, so nobody would move them otherwise.
+  // Deliberate orders (a builder's own wall order) are left alone.
+  const w = game.map.w;
+  for (const b of game.blobs) {
+    if (b.dead || b.working !== sid) continue;
+    if (b.order && b.order.type !== 'move') continue;
+    const g = b.pathGoal || b;
+    if (Math.floor(g.y) * w + Math.floor(g.x) !== i) continue;
+    const spot = farmerSpot(game, s);
+    b.order = { type: 'move', x: spot.x, y: spot.y };
+    if (!ensurePath(game, b, spot.x, spot.y)) { b.order = null; b.path = null; b.pathGoal = null; }
+  }
 }
 
 // A friendly garrison within Chebyshev 1 of the wall tile — an adjacent
@@ -1049,6 +1097,7 @@ export function wallProtected(game, w) {
 export function spawnFinishedWall(game, owner, x, y, garrison) {
   const i = y * game.map.w + x;
   if (game.wallAt[i]) return game.walls.find(w => w.id === game.wallAt[i]);
+  clearFarmTile(game, i);
   const w = {
     id: game.nextId++, owner, x, y, hp: C.WALL_HP, building: false,
     garrison: { deploy: 0, supply: 0, farm: 0, ...(garrison || {}) },
@@ -1064,6 +1113,15 @@ function destroyWall(game, w, byCombat) {
   const i = w.y * game.map.w + w.x;
   if (game.wallAt[i] === w.id) game.wallAt[i] = 0;
   game.walls = game.walls.filter(x => x.id !== w.id);
+  game.dirty.add(i);
+  // the rubble goes back to plain ground, so whoever's ring reaches it
+  // ploughs it again (#219) — including a plot the wall itself took.
+  // Ascending id, exactly like destroySettlement: that's the sequence
+  // deserialize's array-order re-till replays, so live state and
+  // save/load stay byte-identical.
+  for (const o of [...game.settlements].sort((a, b) => a.id - b.id)) {
+    if (!o.building) tillFields(game, o);
+  }
   delete game.wallMemo[w.id];
   if (game.pvp) { delete game.wallMemos[0][w.id]; delete game.wallMemos[1][w.id]; }
   if (game.ai && game.ai.knownWalls) delete game.ai.knownWalls[w.id];
@@ -1201,6 +1259,7 @@ function tickWallOrder(game, b, o) {
   b.path = null; b.pathGoal = null;
   const i = t.y * wmap + t.x;
   if (!game.wallAt[i]) {
+    clearFarmTile(game, i); // staking out the site ploughs the plot under (#219)
     const w = {
       id: game.nextId++, owner: b.owner, x: t.x, y: t.y, hp: 0, building: true,
       garrison: { deploy: 0, supply: 0, farm: 0 }, garrFood: 0, stock: 0,

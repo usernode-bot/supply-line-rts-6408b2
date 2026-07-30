@@ -423,8 +423,10 @@ export function begin(game, d) {
   const camp = e0 ? { x: Math.floor(e0.x), y: Math.floor(e0.y) } : { x: o.x, y: o.y };
   const mtn = (x, y) => x >= 0 && y >= 0 && x < game.map.w && y < game.map.h
     && !!game.map.mountain[y * game.map.w + x];
+  // farmland is placeable since #219, but the scripted line must stay
+  // exactly where it always was — so plots are excluded here
   const placeable = (x, y) => x >= 0 && y >= 0 && x < game.map.w && y < game.map.h
-    && !S.canPlaceWall(game, 0, x, y).err;
+    && !S.canPlaceWall(game, 0, x, y).err && !game.tilledBy[y * game.map.w + x];
   let A = null;
   for (const dy of [0, -1, 1]) {
     const ry = camp.y + dy;
