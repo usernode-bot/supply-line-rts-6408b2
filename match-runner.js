@@ -55,6 +55,7 @@ function newRunner(row, game, nextCmdId, nextEvId) {
     hostUserId: row.host_user_id, hostUsername: row.host_username,
     guestUserId: row.guest_user_id, guestUsername: row.guest_username,
     seed: row.seed,
+    sizeKey: row.size_key || 'medium',   // replay rows need it to rebuild the map
     game,
     status: 'active', winnerOwner: null, endReason: null,
     nextCmdId, nextEvId,
@@ -64,7 +65,41 @@ function newRunner(row, game, nextCmdId, nextEvId) {
     snapObj: null, snapTick: -1, snapAtTick: -1, snapDirty: true,
     lastPersist: now, persisting: false,
     finishedAt: null,
+    // Replay log (#223): every command this runner applies, stamped with the
+    // tick it landed on and the side that gave it. In-memory only until
+    // finalize() writes one row per participant — a match that dies with the
+    // container simply has no replay, which is the same trade the snapshot
+    // flush already makes for progress.
+    replayLog: [],
+    replayFull: false,
+    lastCheckTick: -1,
   };
+}
+
+const REPLAY_MAX_ENTRIES = 4000;      // mirrors LOG_MAX_ENTRIES in replay.js
+const REPLAY_MAX_BYTES = 256 * 1024;  // mirrors LOG_MAX_BYTES
+
+function recordCmd(r, owner, c) {
+  if (r.replayFull) return;
+  if (r.replayLog.length >= REPLAY_MAX_ENTRIES) { r.replayFull = true; return; }
+  r.replayLog.push({ t: r.game.tick, o: owner, c });
+  if (r.replayLog.length % 50 === 0) {
+    try {
+      if (JSON.stringify(r.replayLog).length > REPLAY_MAX_BYTES) r.replayFull = true;
+    } catch { r.replayFull = true; }
+  }
+}
+
+// Integrity checkpoint, on the same 600-tick cadence the client recorder uses,
+// so playback can notice it has diverged from what actually happened.
+const REPLAY_CHECK_TICKS = 600;
+function recordCheck(r) {
+  const { S } = mods;
+  if (r.replayFull || r.game.tick % REPLAY_CHECK_TICKS !== 0) return;
+  if (r.lastCheckTick === r.game.tick) return;
+  r.lastCheckTick = r.game.tick;
+  const a = S.unitCounts(r.game, 0), b = S.unitCounts(r.game, 1);
+  r.replayLog.push({ t: r.game.tick, u0: a.units, u1: b.units, s0: a.setts, s1: b.setts });
 }
 
 function drainEvents(r) {
@@ -120,6 +155,12 @@ async function finalize(r, winnerOwner, reason) {
   }
   drainEvents(r);
   buildSnapshot(r);
+  // Terminal replay entry (#223): an abandon-forfeit is decided out here rather
+  // than by the sim, so the log states the outcome instead of relying on
+  // playback reaching it on its own.
+  if (!r.replayFull && r.replayLog.length) {
+    r.replayLog.push({ t: r.game.tick, end: winnerOwner === 0 ? 'p0-win' : 'p1-win' });
+  }
   try {
     const upd = await pool.query(`
       UPDATE lobbies SET status = 'finished', winner_owner = $2, end_reason = $3,
@@ -144,15 +185,44 @@ async function finalize(r, winnerOwner, reason) {
             winnerOwner === 0 ? 1 : 0);
           host = out.a; guest = out.b;
         }
+        // Replays (#223): one row per participant, each seen from its own side
+        // of the fog. Written before the match rows so each can carry its
+        // replay_id. A log that overran its caps simply yields no replay.
+        const replayIds = [null, null];
+        if (!r.replayFull && r.replayLog.length) {
+          const logJson = JSON.stringify(r.replayLog);
+          const sides = [
+            { owner: 0, userId: r.hostUserId, username: r.hostUsername },
+            { owner: 1, userId: r.guestUserId, username: r.guestUsername },
+          ];
+          for (const side of sides) {
+            if (!(side.userId > 0)) continue;
+            const ins = await client.query(`
+              INSERT INTO replays (user_id, username, mode, lobby_id, seed, size_key,
+                                   difficulty, viewer_owner, result, duration_seconds,
+                                   end_tick, sim_version, log, bytes)
+              VALUES ($1, $2, 'pvp', $3, $4, $5, 'normal', $6, $7, $8, $9, $10, $11, $12)
+              RETURNING id
+            `, [side.userId, side.username, r.lobbyId, r.seed, r.sizeKey, side.owner,
+              rowResult(side.owner), duration, r.game.tick, S.SIM_VERSION, logJson, logJson.length]);
+            replayIds[side.owner] = ins.rows[0].id;
+            await client.query(`
+              DELETE FROM replays WHERE user_id = $1 AND id NOT IN (
+                SELECT id FROM replays WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT 20
+              )
+            `, [side.userId]);
+          }
+        }
         await client.query(`
-          INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, mode, opponent, rating_delta, rating_after)
-          VALUES ($1, $2, $3, 'pvp', $4, $5, 'pvp', $6, $11, $12),
-                 ($7, $8, $9, 'pvp', $4, $5, 'pvp', $10, $13, $14)
+          INSERT INTO matches (user_id, username, result, difficulty, duration_seconds, map_seed, mode, opponent, rating_delta, rating_after, replay_id)
+          VALUES ($1, $2, $3, 'pvp', $4, $5, 'pvp', $6, $11, $12, $15),
+                 ($7, $8, $9, 'pvp', $4, $5, 'pvp', $10, $13, $14, $16)
         `, [
           r.hostUserId, r.hostUsername, rowResult(0), duration, r.seed, r.guestUsername,
           r.guestUserId, r.guestUsername, rowResult(1), r.hostUsername,
           host ? host.delta : null, host ? host.after : null,
           guest ? guest.delta : null, guest ? guest.after : null,
+          replayIds[0], replayIds[1],
         ]);
         await client.query('COMMIT');
       } catch (err) {
@@ -207,6 +277,7 @@ function beat() {
     if (r.acc >= TICK_MS) r.acc = 0; // fell far behind (event-loop stall); drop backlog
     if (steps) {
       drainEvents(r);
+      recordCheck(r);
       if (r.game.tick - r.snapAtTick >= SNAP_TICKS) r.snapDirty = true;
     }
     if (r.game.result) {
@@ -283,6 +354,7 @@ async function sync(row, owner, body) {
     const id = ++r.nextCmdId;
     if (r.status === 'active') {
       try { CMD.applyCommand(r.game, owner, c); } catch { }
+      recordCmd(r, owner, c);   // replay log (#223)
       r.snapDirty = true;
     }
     commandIds.push(id);

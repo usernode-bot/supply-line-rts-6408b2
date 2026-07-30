@@ -110,6 +110,19 @@
     { "name": "Offline multiplayer notice explains the connection", "path": "/?shot=offline-menu&demo=1", "expectText": "Multiplayer needs a connection" },
     { "name": "Offline menu marks unsent results pending", "path": "/?shot=offline-menu&demo=1", "expectText": "pending" },
     { "name": "Offline menu counts the results waiting to sync", "path": "/?shot=offline-menu&demo=1", "expectText": "waiting to sync" },
-    { "name": "Offline menu reads the rating as unavailable", "path": "/?shot=offline-menu&demo=1", "expectText": "Your rating: — (offline)" }
+    { "name": "Offline menu reads the rating as unavailable", "path": "/?shot=offline-menu&demo=1", "expectText": "Your rating: — (offline)" },
+    { "name": "Replay bar container present", "path": "/?demo=1", "expectSelector": "#replay-bar" },
+    { "name": "Replay speed selector offers 8×", "path": "/?demo=1", "expectSelector": "#replay-speed option[value=\"8\"]" },
+    { "name": "End-of-match rewatch button present", "path": "/?demo=1", "expectSelector": "#btn-end-replay" },
+    { "name": "Replay deep link opens the viewer", "path": "/?shot=replay&demo=1", "expectSelector": "#replay-bar:not(.hidden)" },
+    { "name": "Replay viewer has a scrub bar", "path": "/?shot=replay&demo=1", "expectSelector": "#replay-seek" },
+    { "name": "Replay viewer offers the reveal-map toggle", "path": "/?shot=replay&demo=1", "expectText": "Reveal map" },
+    { "name": "Replay viewer hides the surrender flag", "path": "/?shot=replay&demo=1", "expectSelector": "#btn-surrender.hidden" },
+    { "name": "Match history rows offer a replay button", "path": "/?shot=replay-list&demo=1", "expectSelector": "#history-mine-rows button[data-replay]" },
+    { "name": "Replay button is labelled", "path": "/?shot=replay-list&demo=1", "expectText": "▶ Replay" },
+    { "name": "Older-engine history row marks its replay unavailable", "path": "/?shot=replay-list&demo=1", "expectSelector": "#history-mine-rows button[data-replay-stale]" },
+    { "name": "Older-engine replay row reads unavailable", "path": "/?shot=replay-list&demo=1", "expectText": "unavailable" },
+    { "name": "Older-engine replay explains itself in a dialog", "path": "/?shot=replay-stale&demo=1", "expectSelector": "#confirm-modal:not(.hidden)" },
+    { "name": "Engine-changed dialog names the reason", "path": "/?shot=replay-stale&demo=1", "expectText": "game engine has changed" }
   ]
 }

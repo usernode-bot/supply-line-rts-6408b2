@@ -104,6 +104,12 @@ export function applyCommand(g, owner, c) {
       if (w) S.opWallGarrisonRole(g, w.id, c.role);
       break;
     }
+    // "back to work" (#223): a whole-side op with no entity argument, so it
+    // needs no validation beyond the owner check above. Added for the replay
+    // log, which has to be able to express every order the UI can give — and
+    // it closes a PvP parity gap: before this the button only ever moved the
+    // local predicted sim.
+    case 'backToWork': S.opBackToWork(g, owner); break;
     case 'setMode': if (st) S.opSetMode(g, st, c.mode); break;
     case 'fieldGarrison': if (st) S.opFieldGarrison(g, st); break;
     case 'fieldRole': if (st) S.opFieldRole(g, st, c.role, Math.max(1, c.n | 0)); break;

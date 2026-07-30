@@ -562,8 +562,9 @@ function pickSite(game, S, setts, state, diff) {
       }
       let score = fert - nearest * 0.15 - danger * 0.2 - wallPen;
       // a sloppy surveyor mis-judges land quality, so the best site
-      // doesn't reliably win (easy)
-      if (diff.siteNoise) score *= 1 - Math.random() * diff.siteNoise;
+      // doesn't reliably win (easy). Drawn from the sim's seeded stream, not
+      // Math.random, so the same match replays identically (#223).
+      if (diff.siteNoise) score *= 1 - S.simRand(game) * diff.siteNoise;
       if (score > bestScore) { bestScore = score; best = { x, y }; }
     }
   }
@@ -671,16 +672,17 @@ function scout(game, S, setts, mine, state, diff, owner) {
     tx = p.x; ty = p.y;
   } else {
     // probe toward a known enemy settlement, else the mirrored start,
-    // else a random quadrant
+    // else a random quadrant. Every draw comes from the sim's seeded stream
+    // (#223) so this commander's scouting replays identically.
     const knowns = Object.values(state.known);
-    if (knowns.length && Math.random() < 0.6) {
-      const k = knowns[Math.floor(Math.random() * knowns.length)];
+    if (knowns.length && S.simRand(game) < 0.6) {
+      const k = knowns[Math.floor(S.simRand(game) * knowns.length)];
       tx = k.x; ty = k.y;
-    } else if (Math.random() < 0.6) {
+    } else if (S.simRand(game) < 0.6) {
       tx = game.map.starts[1 - owner].x; ty = game.map.starts[1 - owner].y;
     } else {
-      tx = 4 + Math.random() * (game.map.w - 8);
-      ty = 4 + Math.random() * (game.map.h - 8);
+      tx = 4 + S.simRand(game) * (game.map.w - 8);
+      ty = 4 + S.simRand(game) * (game.map.h - 8);
     }
   }
   if (S.opMove(game, r.blob, tx, ty).ok) {
