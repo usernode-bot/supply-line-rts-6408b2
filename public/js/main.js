@@ -11,6 +11,7 @@ import { createInput } from './input.js';
 import { startAttract, stopAttract } from './attract.js';
 import * as TUT from './tutorial.js';
 import * as CT from './controls-tour.js';
+import * as OFF from './offline.js';
 import { dist, fertTier, FERT_TIERS } from './mapgen.js';
 
 const $ = (id) => document.getElementById(id);
@@ -20,6 +21,44 @@ const apiHeaders = token ? { 'x-usernode-token': token } : {};
 const SAVE_KEY = 'supply-line-save-v1';
 const IS_DEMO = params.get('demo') === '1';
 const SHOT = params.get('shot') || ''; // screenshot-state deep link (#199)
+
+// ---------------------------------------------------------------- offline (#221)
+// The sim, the map generator and all four AI commanders are client-side, so a
+// solo match needs the server for exactly three things: recording the result,
+// the ratings panel and cross-device resume. When it's unreachable we say so
+// and keep playing — finished matches queue in `offStore` and flush on
+// reconnect (see flushOutbox).
+//
+// A ?shot= boot must never write to storage, so those get a memory-only store
+// (createStore(null)), mirroring how visOverride pins the onboarding flags.
+const offStore = OFF.createStore(SHOT ? null : (() => {
+  try { return window.localStorage; } catch { return null; }
+})());
+
+let netDown = false;           // is the server currently unreachable?
+let offlineShot = null;        // ?shot=offline-menu override; see bootOfflineMenu
+let installPrompt = null;      // captured beforeinstallprompt event
+
+// Everything that reads "are we offline" goes through here so the screenshot
+// deep link can force the state without faking a real network failure.
+function isOffline() {
+  if (offlineShot) return true;
+  return netDown;
+}
+
+// Any successful request proves we're back; any network-level failure (as
+// opposed to a 401/400 answer) proves we're not. `navigator.onLine === false`
+// is trusted immediately — false negatives there are rare and cheap.
+function noteApiSuccess() {
+  if (!netDown) return;
+  netDown = false;
+  refreshOfflineUi();
+}
+function noteApiFailure() {
+  if (netDown) return;
+  netDown = true;
+  refreshOfflineUi();
+}
 
 // ---------------------------------------------------------------- player state (#212)
 // Onboarding progress — which controls page sets have been read, and whether
@@ -195,7 +234,14 @@ async function api(path, body) {
   const opts = body !== undefined
     ? { method: 'POST', headers: { 'Content-Type': 'application/json', ...apiHeaders }, body: JSON.stringify(body) }
     : { headers: apiHeaders };
-  const res = await fetch(path, opts);
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (e) {
+    noteApiFailure();   // network-level: we're offline, not unauthorised
+    throw e;
+  }
+  noteApiSuccess();     // the server answered — even a 401 proves reachability
   let data = {};
   try { data = await res.json(); } catch { }
   if (!res.ok) {
@@ -208,24 +254,60 @@ async function api(path, body) {
 
 // ---------------------------------------------------------------- menu
 
+// "Yours" always renders from the merge of the server's rows and this
+// device's own log (#221), so a match finished offline shows up at once and
+// stays visible — marked pending — until it has been recorded.
+function localHistoryRows() {
+  if (offlineShot) return offlineShot.local;
+  return OFF.readHistory(offStore);
+}
+
+function renderMineRows(serverRows) {
+  const mineEl = $('history-mine-rows');
+  lastServerHistory = Array.isArray(serverRows) ? serverRows : [];
+  const rows = OFF.mergeHistory(lastServerHistory, localHistoryRows());
+  const tag = (m) => m.mode === 'pvp' ? `vs ${esc(m.opponent || '?')}` : esc(diffLabel(m.difficulty));
+  if (!rows.length) {
+    mineEl.innerHTML = '<span class="text-zinc-600">No matches yet — start one above!</span>';
+    return;
+  }
+  mineEl.innerHTML = rows.map(m => `
+      <div class="flex justify-between gap-2">
+        <span class="${m.result === 'win' ? 'text-emerald-400' : 'text-red-400'}">${m.result === 'win' ? 'Victory' : m.result === 'surrender' ? 'Surrendered' : 'Defeat'}</span>
+        <span class="text-zinc-500 truncate">${tag(m)}</span>
+        ${m.pending ? '<span class="text-amber-400 text-xs shrink-0">pending</span>'
+      : m.dropped ? '<span class="text-zinc-600 text-xs shrink-0">not recorded</span>'
+        : `<span class="font-mono ${deltaClass(m.rating_delta)} w-10 text-right">${fmtDelta(m.rating_delta)}</span>`}
+        <span class="font-mono text-zinc-500">${fmtDur(m.duration_seconds)}</span>
+      </div>`).join('');
+  const waiting = offlineShot ? offlineShot.pending : OFF.pendingCount(offStore);
+  if (waiting > 0) {
+    mineEl.innerHTML += `<div class="text-xs text-amber-500/80 pt-1">${waiting} result${waiting === 1 ? '' : 's'} waiting to sync${isOffline() ? '' : '…'}</div>`;
+  }
+}
+
 async function loadHistory() {
-  const mineEl = $('history-mine-rows'), recentEl = $('history-recent-rows');
+  const recentEl = $('history-recent-rows');
+  if (isOffline()) {
+    renderMineRows([]);
+    recentEl.textContent = '—';
+    return;
+  }
   try {
     const res = await fetch('/api/matches', { headers: apiHeaders });
+    noteApiSuccess();
     if (!res.ok) {
-      mineEl.textContent = 'Sign in via Usernode to see your matches.';
+      // Reachable but not authorised: local rows still stand on their own.
+      renderMineRows([]);
+      if (!localHistoryRows().length) {
+        $('history-mine-rows').textContent = 'Sign in via Usernode to see your matches.';
+      }
       recentEl.textContent = '—';
       return;
     }
     const { mine, recent } = await res.json();
     const tag = (m) => m.mode === 'pvp' ? `vs ${esc(m.opponent || '?')}` : esc(diffLabel(m.difficulty));
-    mineEl.innerHTML = mine.length ? mine.map(m => `
-      <div class="flex justify-between gap-2">
-        <span class="${m.result === 'win' ? 'text-emerald-400' : 'text-red-400'}">${m.result === 'win' ? 'Victory' : m.result === 'surrender' ? 'Surrendered' : 'Defeat'}</span>
-        <span class="text-zinc-500 truncate">${tag(m)}</span>
-        <span class="font-mono ${deltaClass(m.rating_delta)} w-10 text-right">${fmtDelta(m.rating_delta)}</span>
-        <span class="font-mono text-zinc-500">${fmtDur(m.duration_seconds)}</span>
-      </div>`).join('') : '<span class="text-zinc-600">No matches yet — start one above!</span>';
+    renderMineRows(mine);
     recentEl.innerHTML = recent.length ? recent.map(m => `
       <div class="flex justify-between gap-2">
         <span class="truncate">${esc(m.username)}</span>
@@ -233,7 +315,8 @@ async function loadHistory() {
         <span class="font-mono text-zinc-500">${fmtDur(m.duration_seconds)}</span>
       </div>`).join('') : '<span class="text-zinc-600">No wins recorded yet.</span>';
   } catch {
-    mineEl.textContent = 'Could not load match history.';
+    noteApiFailure();
+    renderMineRows([]);
     recentEl.textContent = '—';
   }
 }
@@ -266,26 +349,43 @@ let myRating = null;
 // The commander anchors come from a public endpoint (committed
 // constants), the player rows from the authenticated one — so the panel
 // and the difficulty hint still say something useful without an account.
+// The commander anchors are committed constants, so the last copy this device
+// saw is still true — cache it (#221) and seed from the cache before the first
+// fetch resolves, which is what keeps the difficulty hint's Elo and the
+// Ratings panel alive on a cold offline boot.
+function applyAiRatings(ai) {
+  if (!Array.isArray(ai) || !ai.length) return false;
+  aiRatings = {};
+  for (const a of ai) aiRatings[a.participant.replace('ai:', '')] = a;
+  return true;
+}
+applyAiRatings(OFF.readAiRatings(offStore));
+
 async function loadRatings() {
   const rowsEl = $('ratings-rows'), mineEl = $('my-rating');
-  let ai = [], me = null, top = [], signedIn = false;
-  try {
-    ai = (await (await fetch('/api/ai-ratings')).json()).ai || [];
-    aiRatings = {};
-    for (const a of ai) aiRatings[a.participant.replace('ai:', '')] = a;
-  } catch { aiRatings = null; }
-  try {
-    const res = await fetch('/api/ratings', { headers: apiHeaders });
-    if (res.ok) {
-      const data = await res.json();
-      me = data.me; top = data.top || []; signedIn = true;
-      if (data.ai && data.ai.length) ai = data.ai;
-    }
-  } catch { /* menu never blocks on ratings */ }
+  const cached = (offlineShot && offlineShot.ai) || OFF.readAiRatings(offStore) || [];
+  let ai = cached, me = null, top = [], signedIn = false;
+  if (!isOffline()) {
+    try {
+      const fresh = (await (await fetch('/api/ai-ratings')).json()).ai || [];
+      if (fresh.length) { ai = fresh; OFF.cacheAiRatings(offStore, fresh); }
+    } catch { /* offline / 503 — the cache stands in */ }
+    try {
+      const res = await fetch('/api/ratings', { headers: apiHeaders });
+      if (res.ok) {
+        const data = await res.json();
+        me = data.me; top = data.top || []; signedIn = true;
+        if (data.ai && data.ai.length) { ai = data.ai; OFF.cacheAiRatings(offStore, data.ai); }
+      }
+    } catch { /* menu never blocks on ratings */ }
+  }
+  if (!applyAiRatings(ai)) aiRatings = null;
 
   myRating = me ? me.rating : null;
+  if (me && me.username) currentUsername = me.username;
   mineEl.textContent = me ? `Your rating: ${me.rating}`
-    : signedIn ? 'Your rating: 1000 (unrated)' : 'Your rating: —';
+    : isOffline() ? 'Your rating: — (offline)'
+      : signedIn ? 'Your rating: 1000 (unrated)' : 'Your rating: —';
 
   const rows = ai.map(a => ({
     name: a.username, rating: a.rating, ai: true,
@@ -358,9 +458,10 @@ async function refreshServerSave() {
   if (!token) return; // no account outside the platform shell — local only
   try {
     const r = await fetch('/api/save', { headers: apiHeaders });
+    noteApiSuccess();
     const j = r.ok ? await r.json() : null;
     serverSaveData = j && j.save ? j.save.data : null;
-  } catch { serverSaveData = null; }
+  } catch { serverSaveData = null; noteApiFailure(); }
   refreshMenu();
 }
 
@@ -375,6 +476,113 @@ function clearSaves() {
 function refreshMenu() {
   $('btn-resume').classList.toggle('hidden', !bestSave());
 }
+
+// ---------------------------------------------------------------- offline UI (#221)
+
+// The offline badge and the multiplayer stand-in. Solo play needs nothing from
+// the server, so the menu's job offline is to say which panels are asleep —
+// not to show three failed fetches.
+function refreshOfflineUi() {
+  const off = isOffline();
+  $('offline-badge').classList.toggle('hidden', !off);
+  $('mp-offline').classList.toggle('hidden', !off);
+  $('mp-forms').classList.toggle('hidden', off);
+  $('challenge-inbox').classList.toggle('hidden', off);
+  if (off) {
+    $('btn-mp-rejoin').classList.add('hidden');
+    $('mp-waiting').classList.add('hidden');
+    stopMenuPolling();
+  }
+}
+
+// The "Play offline" card. The install button only exists once the browser has
+// actually offered a prompt (Chrome/Edge/Android); everyone else gets the
+// open-in-its-own-tab link, which is the path that works on iOS too. The whole
+// card is pointless where service workers don't exist.
+function refreshOfflineCard() {
+  const supported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
+  $('offline-card').classList.toggle('hidden', !supported);
+  $('btn-install').classList.toggle('hidden', !installPrompt);
+}
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  refreshOfflineCard();
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  refreshOfflineCard();
+  toast('📥 Installed — launch it any time, online or not');
+});
+
+$('btn-install').addEventListener('click', async () => {
+  if (!installPrompt) return;
+  const p = installPrompt;
+  installPrompt = null;
+  refreshOfflineCard();
+  try { await p.prompt(); } catch { }
+});
+
+// Connectivity events. `online` is the cue to catch up on everything the menu
+// skipped while it was down — including the queued results.
+window.addEventListener('offline', () => { noteApiFailure(); });
+window.addEventListener('online', () => {
+  netDown = false;
+  refreshOfflineUi();
+  flushOutbox();
+  if (!game) {
+    refreshServerSave();
+    loadHistory();
+    loadRatings();
+    startMenuPolling();
+  }
+});
+
+// Queued solo results, oldest first — Elo is order-dependent, so a failure
+// stops the flush rather than skipping ahead. No token means no account to
+// credit: the records simply wait.
+let flushing = false;
+async function flushOutbox() {
+  if (flushing || offlineShot || !token || isOffline()) return;
+  flushing = true;
+  try {
+    while (true) {
+      const queue = OFF.readOutbox(offStore);
+      if (!queue.length) break;
+      const rec = queue[0];
+      if (OFF.syncDecision(rec, currentUsername) === 'drop') { OFF.dropRecord(offStore, rec.client_id); continue; }
+      let data;
+      try {
+        data = await api('/api/match-result', {
+          result: rec.result,
+          difficulty: rec.difficulty,
+          duration_seconds: rec.duration_seconds,
+          map_seed: rec.map_seed,
+          client_id: rec.client_id,
+        });
+      } catch (e) {
+        // A 400 means the server will never accept this record — drop it
+        // instead of wedging the queue behind it. Anything else is transient.
+        if (e && e.status === 400) { OFF.dropRecord(offStore, rec.client_id); continue; }
+        break;
+      }
+      OFF.markSynced(offStore, rec.client_id);
+      lastFlushResult = { client_id: rec.client_id, data };
+      if (data && data.rating != null) myRating = data.rating;
+    }
+  } finally {
+    flushing = false;
+  }
+  if (!game) renderMineRows(lastServerHistory);
+}
+
+// Whose results these are. Learned from /api/ratings (the only endpoint that
+// echoes the caller's username back), and only used to refuse crediting one
+// account's offline match to another.
+let currentUsername = null;
+let lastServerHistory = [];   // the newest /api/matches rows, for re-renders
+let lastFlushResult = null;   // { client_id, data } of the last accepted result
 
 // Every difficulty plays by the player's economic rules — the levels
 // differ only in how well the AI commander plays (see DIFF in sim.js).
@@ -692,6 +900,9 @@ function showMenuError(msg) {
 
 function startMenuPolling() {
   stopMenuPolling();
+  // No point polling a server we can't reach — the `online` handler restarts
+  // this the moment we're back (#221).
+  if (isOffline()) { refreshOfflineUi(); return; }
   refreshLobbies();
   menuTimer = setInterval(refreshLobbies, 3000);
 }
@@ -701,13 +912,16 @@ function stopMenuPolling() {
 
 async function refreshLobbies() {
   if (game) return;
+  if (isOffline()) { stopMenuPolling(); refreshOfflineUi(); return; }
   let data;
   try {
     data = await api('/api/lobbies' + (IS_DEMO ? '?demo=1' : ''));
   } catch (e) {
+    if (isOffline()) { stopMenuPolling(); refreshOfflineUi(); return; }
     $('lobby-list').innerHTML = '<span class="text-zinc-600">Sign in via Usernode to play multiplayer.</span>';
     return;
   }
+  refreshOfflineUi();   // reachable again — bring the section back
   renderLobbyList(data.open || []);
   renderChallenges(data.challenges || []);
   handleMine(data.mine || null);
@@ -1274,10 +1488,13 @@ function backToMenu() {
   refreshMenu();
   refreshTutorialButton();
   refreshControlsVisibility();
+  refreshOfflineUi();
+  refreshOfflineCard();
   refreshServerSave();
   loadHistory();
   loadRatings();
   startMenuPolling();
+  flushOutbox();   // a result recorded during the match we just left (#221)
   startAttract();
 }
 
@@ -1339,18 +1556,52 @@ function endMatch(result) {
   $('end-rating').classList.add('hidden');   // filled in once the post answers
   $('end-modal').classList.remove('hidden');
   if (game.sandbox) return;
-  // fire-and-forget record; the response carries this match's Elo change
-  // (the modal is already up — the line just arrives a moment later)
-  fetch('/api/match-result', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...apiHeaders },
-    body: JSON.stringify({
-      result,
-      difficulty: game.difficulty,
-      duration_seconds: Math.round(S.gameSeconds(game.tick)),
-      map_seed: game.seed,
-    }),
-  }).then(r => r.ok ? r.json() : null).then(showRatingLine).catch(() => { });
+  // The result is written to this device FIRST (#221), so a match finished
+  // with no connection is never lost: it shows in "Yours" as pending and the
+  // outbox flushes it on reconnect. The post below is that same flush running
+  // immediately when we're online, so the modal still gets its Elo line.
+  const clientId = newMatchId(game);
+  OFF.recordResult(offStore, {
+    client_id: clientId,
+    result,
+    difficulty: game.difficulty,
+    duration_seconds: Math.round(S.gameSeconds(game.tick)),
+    map_seed: game.seed,
+    ended_at: Date.now(),
+    username: currentUsername,
+  });
+  if (!token) {
+    showOfflineRatingLine('Recorded on this device — sign in via Usernode to have it rated.');
+    return;
+  }
+  if (isOffline()) {
+    showOfflineRatingLine("Recorded — your rating updates next time you're online.");
+    return;
+  }
+  flushOutbox().then(() => {
+    // Still queued after a flush attempt: the send failed, so say so rather
+    // than leaving the line blank.
+    if (OFF.readOutbox(offStore).some(r => r.client_id === clientId)) {
+      showOfflineRatingLine("Recorded — your rating updates next time you're online.");
+    } else {
+      showRatingLine(lastFlushResult && lastFlushResult.client_id === clientId ? lastFlushResult.data : null);
+    }
+  });
+}
+
+// A stable id for this finished match, so a re-send can never double-record
+// it. crypto.randomUUID where available; the sim's own seed+tick otherwise.
+function newMatchId(g) {
+  try {
+    if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+  } catch { }
+  return OFF.newClientId(g.seed, g.tick, Math.random);
+}
+
+function showOfflineRatingLine(text) {
+  const el = $('end-rating');
+  el.textContent = text;
+  el.classList.remove('hidden');
 }
 
 // Appends "Rating: R (+D)" to the end modal, spelling out the ceiling
@@ -3905,6 +4156,61 @@ function shotControlsTour(desc) {
   CT.open(opts);
 }
 
+// ---------------------------------------------------------------- offline boot (#221)
+
+// `?shot=offline-menu` renders the menu exactly as it looks with no
+// connection: the badge, the multiplayer stand-in, the cached commander
+// anchors and a "Yours" list with two pending results and one already
+// recorded. In-memory only — like every ?shot= boot it writes nothing, so it
+// is safe (and identical) in every environment.
+// Set BEFORE the boot block below, so the offline shot never fires the very
+// requests it is meant to depict.
+function initOfflineShot() {
+  const now = Date.now();
+  offlineShot = {
+    pending: 2,
+    // stands in for the anchors this device would have cached from an earlier
+    // online visit — the endpoint is public committed constants
+    ai: [],
+    local: [
+      { client_id: 'staging-demo-off-1', result: 'win', difficulty: 'normal',
+        duration_seconds: 1632, map_seed: 'staging-demo-off-1', ended_at: now - 60_000, synced: false },
+      { client_id: 'staging-demo-off-2', result: 'loss', difficulty: 'veryhard',
+        duration_seconds: 2480, map_seed: 'staging-demo-off-2', ended_at: now - 3_600_000, synced: false },
+      { client_id: 'staging-demo-off-3', result: 'surrender', difficulty: 'hard',
+        duration_seconds: 940, map_seed: 'staging-demo-off-3', ended_at: now - 7_200_000, synced: false, dropped: true },
+    ],
+  };
+}
+
+// The anchors come from the one public endpoint, then the panel re-renders —
+// standing in for the copy a real device would have cached on an earlier
+// online visit.
+async function bootOfflineMenu() {
+  try {
+    const r = await fetch('/api/ai-ratings');
+    if (r.ok) offlineShot.ai = (await r.json()).ai || [];
+  } catch { /* the panel reads "unavailable", same as a real cold boot */ }
+  await loadRatings();
+}
+
+// The service worker is what makes an offline boot possible at all. Skipped on
+// ?shot= / ?demo=1 boots so the platform's screenshot states and previews
+// behave exactly as they did before this landed.
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  if (SHOT || IS_DEMO) return;
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => { });
+  });
+}
+
+if (typeof navigator !== 'undefined' && navigator.onLine === false) netDown = true;
+if (SHOT === 'offline-menu') initOfflineShot();
+refreshOfflineUi();
+refreshOfflineCard();
+registerServiceWorker();
+
 // ---------------------------------------------------------------- boot
 
 refreshMenu();
@@ -3915,6 +4221,10 @@ refreshPlayerState(); // account-backed onboarding flags; re-renders when it lan
 loadHistory();
 loadRatings();
 startMenuPolling();
+flushOutbox();        // anything played offline since the last visit
+if (SHOT === 'offline-menu') {
+  try { bootOfflineMenu(); } catch (e) { console.warn('shot link failed', e); }
+}
 // a `?shot=` boot goes straight into a match — the menu backdrop would
 // only fetch a snapshot for a screen nobody sees
 if (!params.get('shot')) startAttract();

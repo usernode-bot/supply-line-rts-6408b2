@@ -93,6 +93,17 @@
     { "name": "Razed-wall screenshot state selects the reclaimed tile", "path": "/?shot=wall-razed&demo=1", "expectSelector": "#panel" },
     { "name": "A razed wall's plot reads as the lowest fertility tier", "path": "/?shot=wall-razed&demo=1", "expectText": "Barren land" },
     { "name": "A razed wall's plot reads as scorched", "path": "/?shot=wall-razed&demo=1", "expectText": "Scorched" },
-    { "name": "The scorched plot is farmland again", "path": "/?shot=wall-razed&demo=1", "expectText": "Farmland of your settlement" }
+    { "name": "The scorched plot is farmland again", "path": "/?shot=wall-razed&demo=1", "expectText": "Farmland of your settlement" },
+    { "name": "Web app manifest is linked (installable offline app)", "path": "/?demo=1", "expectSelector": "link[rel=manifest]" },
+    { "name": "Play offline card renders on the menu", "path": "/?demo=1", "expectSelector": "#offline-card" },
+    { "name": "Play offline card offers the own-tab link", "path": "/?demo=1", "expectSelector": "#link-open-tab" },
+    { "name": "Play offline card explains local solo play", "path": "/?demo=1", "expectText": "entirely on your device" },
+    { "name": "Offline menu deep link shows the offline badge", "path": "/?shot=offline-menu&demo=1", "expectSelector": "#offline-badge:not(.hidden)" },
+    { "name": "Offline badge says solo matches still work", "path": "/?shot=offline-menu&demo=1", "expectText": "solo matches vs the AI still work" },
+    { "name": "Offline menu replaces multiplayer with a notice", "path": "/?shot=offline-menu&demo=1", "expectSelector": "#mp-offline:not(.hidden)" },
+    { "name": "Offline multiplayer notice explains the connection", "path": "/?shot=offline-menu&demo=1", "expectText": "Multiplayer needs a connection" },
+    { "name": "Offline menu marks unsent results pending", "path": "/?shot=offline-menu&demo=1", "expectText": "pending" },
+    { "name": "Offline menu counts the results waiting to sync", "path": "/?shot=offline-menu&demo=1", "expectText": "waiting to sync" },
+    { "name": "Offline menu reads the rating as unavailable", "path": "/?shot=offline-menu&demo=1", "expectText": "Your rating: — (offline)" }
   ]
 }
