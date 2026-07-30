@@ -16,7 +16,7 @@ import * as SUP from './supply.js';
 // stale recordings keep looking playable and quietly replay wrong. The flip
 // side: bumping retires every existing replay, so it tracks real behaviour
 // changes, not cosmetic edits to sim files.
-export const SIM_VERSION = 1;
+export const SIM_VERSION = 2;
 
 // The sim's own seeded PRNG (#223). Every draw the simulation makes runs
 // through here so a match is a pure function of (seed, sizeKey, difficulty,
@@ -90,8 +90,20 @@ export const C = {
   LOOT_FX_FOOD: 0.5,       // food foraged per loot particle (pillaged land → army)
   SEP_PUSH: 1.2,           // max separation push speed, tiles/sec (= SPEED_DEPLOY)
   SEP_SLACK: 0.03,         // minimum overlap before separation acts (damps jitter)
-  MERGE_FRAC: 0.6,         // merge when centers are within this fraction of touching distance (rA + rB)
+  MERGE_FRAC: 0.45,        // merge when centers are within this fraction of touching distance (rA + rB).
+                           // 0.45, not the old 0.6 (#227): merging is an automatic event the player
+                           // never asked for, so it only fires for groups genuinely piled on one spot
   MERGE_MIN: 0.8,          // floor on the merge trigger — tiny blobs keep the old fixed-0.8 feel
+  MERGE_ARC: Math.PI * 7 / 12, // 105° (#227): two groups whose bearings from a SHARED FOE differ by
+                           // more than this are attacking from meaningfully different directions —
+                           // a pincer — and never fold together. Deliberately equal to REAR_ARC:
+                           // if a group is placed to earn the rear-attack bonus, it never merges.
+                           // Its own constant so the two can be tuned apart later.
+  MERGE_HEAD_ARC: Math.PI / 3, // 60° (#227): max heading difference for two MARCHING groups to
+                           // count as one column rather than two converging ones
+  MERGE_STACK: 0.5,        // (#227) centers this close are co-located beyond doubt — always merge,
+                           // pincer veto included. Keeps "order one group onto the other" a
+                           // reliable manual join, and stops a pair from stacking forever unmerged
   // -- #108 combat overhaul --
   MELEE_RANGE: 1.2,        // blob-center-to-center engagement distance; attackers close to this
   SIEGE_RANGE: 2.4,        // blob center to settlement footprint center — "at the walls"
@@ -3784,6 +3796,95 @@ function sameRouteCarriers(a, b) {
     && oa.routeId === ob.routeId && oa.phase === ob.phase);
 }
 
+// -- pincer awareness (#227) ------------------------------------------
+// Merging used to be blind to WHERE two groups were fighting from, so a
+// deliberate front-and-back attack fused into one stack the moment the
+// circles touched — which, for any army of ~10 units, happened before
+// either half reached the fight and always once both were in contact
+// (two 10-unit blobs touch at 2.81 tiles; opposite sides of the 1.2
+// melee ring are only 2.4 apart). The pincer the combat model rewards
+// was therefore unreachable. These helpers make merging read intent:
+// geometry only, no new state, so save/resume and PvP prediction are
+// unaffected.
+
+// The center a contact range is measured from, per target kind. Mirrors
+// targetPos, but resolves the entity itself from the live game.
+function contactCenter(game, kind, id) {
+  if (kind === 'blob') {
+    const t = game.blobs.find(x => x.id === id && !x.dead);
+    return t ? { x: t.x, y: t.y } : null;
+  }
+  if (kind === 'wall') {
+    const w = game.walls.find(x => x.id === id);
+    return w ? { x: w.x + 0.5, y: w.y + 0.5 } : null;
+  }
+  const s = game.settlements.find(x => x.id === id);
+  return s ? settCenter(s) : null;
+}
+
+// Is `b` standing at the range this kind of target is fought from? The
+// same thresholds tickTargetedMove halts at and tickCombat fights at:
+// melee for a blob, siege range for a settlement, Chebyshev 1 for a wall.
+function atContact(game, b, kind, id) {
+  if (kind === 'wall') {
+    const w = game.walls.find(x => x.id === id);
+    return !!w && Math.max(Math.abs(Math.floor(b.x) - w.x), Math.abs(Math.floor(b.y) - w.y)) <= 1;
+  }
+  const c = contactCenter(game, kind, id);
+  if (!c) return false;
+  const range = kind === 'blob' ? C.MELEE_RANGE + 0.2 : C.SIEGE_RANGE;
+  return dist(b.x, b.y, c.x, c.y) <= range;
+}
+
+// Bearings from a shared point differ by more than the merge arc ⇒ the
+// two groups are covering different faces of it.
+function splitAround(c, a, b) {
+  return angDiff(Math.atan2(a.y - c.y, a.x - c.x),
+    Math.atan2(b.y - c.y, b.x - c.x)) > C.MERGE_ARC;
+}
+
+// The pincer veto: true when a and b are both in contact with the SAME
+// enemy entity and stand more than MERGE_ARC apart around it. Purely
+// geometric — game.combat is deliberately not consulted, so a resumed
+// save behaves identically on its very first tick. Only reached for
+// pairs that already passed their distance test and are both freshly
+// engaged, so the enemy scan costs nothing in the common case.
+function pincerVeto(game, a, b) {
+  if (game.tick - a.engagedT >= 5 || game.tick - b.engagedT >= 5) return false;
+  for (const e of game.blobs) {
+    if (e.dead || e.owner === a.owner) continue;
+    if (!atContact(game, a, 'blob', e.id) || !atContact(game, b, 'blob', e.id)) continue;
+    if (splitAround(e, a, b)) return true;
+  }
+  for (const s of game.settlements) {
+    if (s.owner === a.owner) continue;
+    if (!atContact(game, a, 'settlement', s.id) || !atContact(game, b, 'settlement', s.id)) continue;
+    if (splitAround(settCenter(s), a, b)) return true;
+  }
+  for (const w of game.walls) {
+    if (w.owner === a.owner) continue;
+    if (!atContact(game, a, 'wall', w.id) || !atContact(game, b, 'wall', w.id)) continue;
+    if (splitAround({ x: w.x + 0.5, y: w.y + 0.5 }, a, b)) return true;
+  }
+  return false;
+}
+
+// Which way a group is walking: the bearing to its next waypoint, else
+// the step it actually took this tick. Never b.facing — combat
+// overwrites that with the direction the group is FIGHTING, which is a
+// different question. Null when the group isn't going anywhere.
+function headingOf(b) {
+  if (b.path && b.path.length) {
+    const wp = b.path[0];
+    const dx = wp.x - b.x, dy = wp.y - b.y;
+    if (dx * dx + dy * dy > 1e-6) return Math.atan2(dy, dx);
+  }
+  const dx = b.x - (b.prevX != null ? b.prevX : b.x);
+  const dy = b.y - (b.prevY != null ? b.prevY : b.y);
+  if (dx * dx + dy * dy > 1e-6) return Math.atan2(dy, dx);
+  return null;
+}
+
 function tickMerge(game) {
   const alive = game.blobs.filter(b => !b.dead);
   for (let i = 0; i < alive.length; i++) {
@@ -3793,18 +3894,40 @@ function tickMerge(game) {
       const b = alive[j];
       if (b.dead || b.working != null || a.owner !== b.owner) continue;
       if (a.noMerge && b.noMerge) continue; // freshly split pair — stays apart
-      // eligible pairs: both idle (deep-overlap trigger — scales with
-      // blob size, not mere touching), or both attacking the same
-      // target (#93 — touching distance, since attackers halt at
-      // contact/siege range and rarely overlap deeply). Mixed pairs
-      // never merge: a marching army must not slurp up idle blobs.
-      let trigger;
+      // eligible pairs, all four gated on intent (#227):
+      //   both idle          — deep-overlap trigger (scales with blob size,
+      //                        not mere touching)
+      //   same target, both in contact with it — touching distance, which is
+      //                        how a reinforcing wave folds into a live
+      //                        assault (#93, #207); no longer fires halfway
+      //                        across the map, only at the fight
+      //   same target, still marching — one column, not two: deep overlap
+      //                        AND the same heading
+      //   same-route carriers — unchanged (#133): logistics, no combat intent
+      // Mixed pairs never merge: a marching army must not slurp up idle blobs.
+      const deep = Math.max(C.MERGE_MIN, C.MERGE_FRAC * (blobRadius(a) + blobRadius(b)));
+      const touching = blobRadius(a) + blobRadius(b);
+      let trigger, carriers = false;
       if ((!a.order || buildWaiting(a)) && (!b.order || buildWaiting(b))) {
-        trigger = Math.max(C.MERGE_MIN, C.MERGE_FRAC * (blobRadius(a) + blobRadius(b)));
-      } else if (sameAttackTarget(a, b) || sameRouteCarriers(a, b)) {
-        trigger = blobRadius(a) + blobRadius(b);
+        trigger = deep;
+      } else if (sameRouteCarriers(a, b)) {
+        trigger = touching; carriers = true;
+      } else if (sameAttackTarget(a, b)) {
+        const kind = a.order.tkind, tid = a.order.tid;
+        if (atContact(game, a, kind, tid) && atContact(game, b, kind, tid)) {
+          trigger = touching;
+        } else {
+          // still on the road: only genuinely one column consolidates
+          const ha = headingOf(a), hb = headingOf(b);
+          if (ha == null || hb == null || angDiff(ha, hb) > C.MERGE_HEAD_ARC) continue;
+          trigger = deep;
+        }
       } else continue;
-      if (dist(a.x, a.y, b.x, b.y) > trigger) continue;
+      const d = dist(a.x, a.y, b.x, b.y);
+      if (d > trigger) continue;
+      // stacked beyond doubt (a deliberate join) always merges; otherwise a
+      // pair straddling a shared foe is a pincer and is left alone
+      if (d > C.MERGE_STACK && !carriers && pincerVeto(game, a, b)) continue;
       const keep = total(a) >= total(b) ? a : b;
       const gone = keep === a ? b : a;
       // group build (#130): the survivor adopts a waiting founding order
