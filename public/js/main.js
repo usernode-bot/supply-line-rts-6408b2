@@ -4088,13 +4088,22 @@ function frame(ts) {
   if (!game) return;
 
   if (game.replay) {
-    // Replay playback (#223). Its own transport: the bar's 1×/2×/4×/8× are
-    // multiples of the sim's native rate, so 1× runs the match back in exactly
-    // the wall-clock time it originally took. The player owns the stepping (it
-    // has to apply the log's orders at the right tick), and a seek in flight
-    // holds the clock still.
+    // A backward seek REPLACES player.game (rewindTo deserializes a keyframe,
+    // reset builds a fresh one), so re-adopt it before anything reads `game`
+    // this frame — otherwise we step the new object and draw the abandoned
+    // one, which is what made units jitter in place forever (#228).
+    if (player && game !== player.game) adoptReplayGame();
+    // one source of truth for the reveal-map overlay: the player's flag, read
+    // by render.js off ui.reveal (never written into the sim's fog) (#228)
+    if (player) ui.reveal = player.reveal;
+    // Replay playback (#223). Its own transport: the bar's 1×/2×/4×/8× mean
+    // exactly what the same labels mean on the live speed selector, so 1× runs
+    // the match back in the wall-clock time it originally took and the 2×
+    // default is the sim's native rate. The player owns the stepping (it has to
+    // apply the log's orders at the right tick), and a seek in flight holds the
+    // clock still.
     if (!paused && player && !player.seeking && !RP.atEnd(player)) {
-      acc += dt * replaySpeed;
+      acc += dt * replaySpeed * 0.5;
       let iter = 0;
       while (acc >= 100 && iter++ < 60) {
         if (!RP.stepPlayer(player)) break;
@@ -4239,6 +4248,7 @@ function openReplay(payload) {
   paused = false;
   acc = 0;
   lastReplayUi = -1;
+  ui.reveal = false;           // render-only fog override, off on every open (#228)
   $('replay-play').textContent = '⏸';
   $('replay-fog').classList.remove('bg-sky-800', 'text-sky-100');
   $('replay-seek').max = String(Math.max(1, p.endTick));
@@ -4257,6 +4267,30 @@ function closeReplay() {
   backToMenu();   // owns the teardown, including the bar and the player
 }
 
+// Re-point every module-level read at the player's CURRENT game (#228).
+// replay.js hands out a new object on any backward seek — rewindTo deserializes
+// a keyframe, reset regenerates from the seed — and main.js used to keep the
+// one startMatch was handed. The stale object was then drawn while the player
+// stepped the live one: the clock advanced, nothing moved, and because the
+// renderer keeps interpolating `lerp(prevX, x, acc/100)` on a frozen world,
+// every unit slid a step forward and snapped back once per tick, forever.
+// The reveal-map toggle died the same way — it wrote the live game's fog while
+// the renderer read the abandoned one's.
+//
+// Selection and control groups hold ids, not references, so they survive the
+// swap (a blob that doesn't exist yet at the seeked-to tick simply deselects).
+// `acc` restarts so the first frame after a seek isn't drawn at a stale
+// interpolation fraction.
+function adoptReplayGame() {
+  if (!player) return;
+  game = player.game;
+  acc = 0;
+  lastReplayUi = -1;
+  ui.reveal = player.reveal;
+  updateHUD();
+  renderPanel(true);
+}
+
 // The outcome card at the end of a playback: the same Victory / Defeat /
 // Surrendered wording the player saw the first time, minus the rating line
 // (nothing is being rated) and minus the rewatch button (they're already here).
@@ -4266,11 +4300,19 @@ let replayEndShown = false;
 function showReplayEndCard() {
   if (replayEndShown || !player) return;
   replayEndShown = true;
-  const r = player.meta.result;
-  const win = r === 'win' || r === 'p0-win' && (player.meta.viewer_owner | 0) === 0
-    || r === 'p1-win' && (player.meta.viewer_owner | 0) === 1;
-  $('end-emoji').textContent = win ? '🏆' : '🏳️';
-  $('end-title').textContent = win ? 'Victory!' : r === 'surrender' ? 'Surrendered' : 'Defeat';
+  // The log's terminal {t, end} entry is what actually decides the outcome, and
+  // it lands on the game before atEnd goes true — so read it there first (#228).
+  // finishRecording() never emitted a `result` field, so meta.result is
+  // undefined for the end card's ▶ Watch replay and for any log still sitting on
+  // the device, and every such rewatch used to claim "Defeat". Only the server's
+  // replay row carries meta.result, which stays the fallback.
+  const r = player.game.result || player.meta.result || null;
+  const me0 = (player.meta.viewer_owner | 0) === 0;
+  const win = r === 'win' || (r === 'p0-win' && me0) || (r === 'p1-win' && !me0);
+  const lost = r === 'loss' || (r === 'p0-win' && !me0) || (r === 'p1-win' && me0);
+  $('end-emoji').textContent = !r ? '🎬' : win ? '🏆' : '🏳️';
+  $('end-title').textContent = !r ? 'Replay complete'
+    : win ? 'Victory!' : r === 'surrender' ? 'Surrendered' : lost ? 'Defeat' : 'Replay complete';
   $('end-detail').textContent = `Replay complete — ${fmtDur(S.gameSeconds(player.game.tick))} of play.`;
   $('end-rating').classList.add('hidden');
   $('btn-end-replay').classList.add('hidden');
@@ -4315,6 +4357,7 @@ $('replay-speed').addEventListener('change', () => {
 $('replay-fog').addEventListener('click', () => {
   if (!player) return;
   RP.setReveal(player, !player.reveal);
+  ui.reveal = player.reveal;   // the frame loop re-asserts this; this makes it immediate
   $('replay-fog').classList.toggle('bg-sky-800', player.reveal);
   $('replay-fog').classList.toggle('text-sky-100', player.reveal);
 });
@@ -4338,11 +4381,18 @@ async function doReplaySeek(tick) {
     if (game && game.replay) $('end-modal').classList.add('hidden');
   }
   await RP.seek(player, target, () => {
-    // yield to the frame loop between slices so a long rewind stays responsive
+    // yield to the frame loop between slices so a long rewind stays responsive.
+    // A rewind has already swapped in a new game object by the time the first
+    // slice yields, so adopt it here too — otherwise the frames drawn DURING a
+    // long rewind still show the abandoned scene (#228).
+    if (game !== player.game) adoptReplayGame();
     refreshReplayUi();
     return new Promise((r) => requestAnimationFrame(() => r()));
   });
   if (player) {
+    // and once more on completion: renderPanel/refreshReplayUi below run outside
+    // the frame loop, so they'd otherwise read the pre-seek game once
+    if (game !== player.game) adoptReplayGame();
     if (player.game.tick <= 0 || !RP.atEnd(player)) $('replay-play').textContent = paused ? '▶' : '⏸';
     lastReplayUi = -1;
     refreshReplayUi();
@@ -4360,13 +4410,21 @@ async function doReplaySeek(tick) {
 // The replay viewer only exists once a recorded match is open, and the history
 // list's ▶ Replay buttons only exist once there are recordings — so plain
 // navigation reaches neither, and before/after screenshots (plus the dapp.json
-// tests) would only ever see the main menu. These three boots build fixed
-// payloads IN CODE and never touch the network or storage, so they render
-// identically in every environment.
+// tests) would only ever see the main menu. These boots build fixed payloads IN
+// CODE and never touch the network or storage, so they render identically in
+// every environment.
 
-// A short, valid solo log on a fixed seed. Home settlement is id 1 and the
-// opening war party is blobs 2/3/4 on any fresh game (newGame assigns ids in a
-// fixed order), so the orders below can be written literally.
+// A short, valid solo log on a fixed seed.
+//
+// newGame assigns ids in ONE fixed order per side: the settlement, then its two
+// working farmers, then the war party. So owner 0 is settlement 1, farmhands
+// 2/3, WAR PARTY 4 — and owner 1 is settlement 5, farmhands 6/7, war party 8.
+// (The old comment here said "the war party is blobs 2/3/4" and this log
+// accordingly marched two farmhands around while the army never moved a tile,
+// which is exactly what "the replay is broken, units just jitter" looks like.)
+//
+// xsmall is 36×36 with fixed starts at (9,9) and (27,27) for every seed, so the
+// destinations below are literal and still land in enemy country.
 function shotReplayPayload(version) {
   return {
     mode: 'solo',
@@ -4375,26 +4433,48 @@ function shotReplayPayload(version) {
     difficulty: 'normal',
     viewer_owner: 0,
     result: 'win',
-    duration_seconds: 240,
-    end_tick: 1200,
+    duration_seconds: 360,
+    end_tick: 1800,
     sim_version: version == null ? S.SIM_VERSION : version,
     log: [
       { t: 20, c: { op: 'setMode', settlementId: 1, mode: 'farm' } },
-      { t: 60, c: { op: 'move', blobId: 2, x: 16, y: 14 } },
-      { t: 240, c: { op: 'move', blobId: 3, x: 13, y: 16 } },
-      { t: 420, c: { op: 'pillage', blobId: 2, on: true } },
-      { t: 600, c: { op: 'setRole', blobId: 4, role: 'farm' } },
-      { t: 1200, end: 'win' },
+      { t: 60, c: { op: 'move', blobId: 4, x: 23, y: 23 } },
+      { t: 500, c: { op: 'pillage', blobId: 4, on: true } },
+      { t: 760, c: { op: 'setMode', settlementId: 1, mode: 'deploy' } },
+      { t: 900, c: { op: 'move', blobId: 4, x: 28, y: 28, target: { kind: 'settlement', id: 5 } } },
+      { t: 1300, c: { op: 'backToWork' } },
+      { t: 1800, end: 'win' },
     ],
   };
 }
 
 // `?shot=replay` — open the viewer on that log, run it to a fixed tick and
 // pause, so the whole transport (clock, scrub position, speed, fog toggle)
-// renders from a URL alone.
+// renders from a URL alone. The seek target sits mid-march, so the shot shows
+// the war party out in the field rather than a still home camp.
 async function shotReplay() {
   openReplay(shotReplayPayload());
   await doReplaySeek(600);
+  paused = true;
+  $('replay-play').textContent = '▶';
+  lastReplayUi = -1;
+  refreshReplayUi();
+  renderPanel(true);
+}
+
+// `?shot=replay-rewound` (#228) — the state no URL could reach before: a replay
+// that has been played forward and then SEEKED BACK, with Reveal map on.
+// That is the exact path that used to strand main.js on the game object
+// replay.js had already thrown away — units vibrating on the spot forever and a
+// dead reveal toggle. Both the screenshots and the dapp.json checks now cover
+// it: the clock reads 0m 00s, the map is drawn, and the fog toggle is lit.
+async function shotReplayRewound() {
+  openReplay(shotReplayPayload());
+  RP.setReveal(player, true);
+  ui.reveal = true;
+  $('replay-fog').classList.add('bg-sky-800', 'text-sky-100');
+  await doReplaySeek(900);   // forward past a keyframe…
+  await doReplaySeek(0);     // …then all the way back, through reset()
   paused = true;
   $('replay-play').textContent = '▶';
   lastReplayUi = -1;
@@ -4909,6 +4989,10 @@ if (TOUR_SHOTS[SHOT]) {
 }
 if (SHOT === 'replay') {
   try { shotReplay().catch((e) => console.warn('shot link failed', e)); }
+  catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'replay-rewound') {
+  try { shotReplayRewound().catch((e) => console.warn('shot link failed', e)); }
   catch (e) { console.warn('shot link failed', e); }
 }
 if (SHOT === 'replay-stale') {

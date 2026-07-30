@@ -123,6 +123,9 @@
     { "name": "Older-engine history row marks its replay unavailable", "path": "/?shot=replay-list&demo=1", "expectSelector": "#history-mine-rows button[data-replay-stale]" },
     { "name": "Older-engine replay row reads unavailable", "path": "/?shot=replay-list&demo=1", "expectText": "unavailable" },
     { "name": "Older-engine replay explains itself in a dialog", "path": "/?shot=replay-stale&demo=1", "expectSelector": "#confirm-modal:not(.hidden)" },
-    { "name": "Engine-changed dialog names the reason", "path": "/?shot=replay-stale&demo=1", "expectText": "game engine has changed" }
+    { "name": "Engine-changed dialog names the reason", "path": "/?shot=replay-stale&demo=1", "expectText": "game engine has changed" },
+    { "name": "Rewound replay still has a live viewer", "path": "/?shot=replay-rewound&demo=1", "expectSelector": "#replay-bar:not(.hidden)" },
+    { "name": "Rewound replay is back at the start", "path": "/?shot=replay-rewound&demo=1", "expectText": "0m 00s" },
+    { "name": "Rewound replay keeps reveal map switched on", "path": "/?shot=replay-rewound&demo=1", "expectSelector": "#replay-fog.bg-sky-800" }
   ]
 }

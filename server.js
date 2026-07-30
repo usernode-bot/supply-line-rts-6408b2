@@ -121,28 +121,38 @@ const REPLAY_MAX_BYTES = 256 * 1024; // mirrors LOG_MAX_BYTES
 // ---- staging demo replays -------------------------------------------------
 // `replays` is a brand-new table, so staging copies it EMPTY and both the
 // ▶ Replay buttons and the viewer itself would be unreviewable in a preview.
-// These four rows fix that. The logs are hand-authored but genuinely valid: on
-// a fresh game the player's home settlement is id 1 and their opening war party
-// is blobs 2/3/4 (newGame assigns ids in a fixed order), so the orders below
-// resolve and the AI commander plays its own game around them.
+// These four rows fix that. The logs are hand-authored but genuinely valid.
+//
+// newGame assigns ids in ONE fixed order per side: the settlement, then its two
+// working farmers, then the war party. So owner 0 is settlement 1, farmhands
+// 2/3, WAR PARTY 4 — and owner 1 is settlement 5, farmhands 6/7, war party 8.
+// (These logs used to say "the war party is blobs 2/3/4" and accordingly sent
+// two farmhands on errands while the army never received a single order — a
+// preview showed a motionless camp and some shuffling field hands, which is
+// indistinguishable from "the replay is broken", see #228.)
+//
+// Starts are fixed per map size for every seed: xsmall is 36×36 with (9,9) and
+// (27,27); small is 72×72 with (18,18) and (54,54). The destinations below are
+// literal and reach enemy country on any seed of that size.
 const DEMO_REPLAY_IDS = new Set([900201, 900202, 900203, 900204]);
 
-// setMode → march the war party out → pillage → put a hand on the fields, then
-// the terminal result. Not good play; just watchable, and every entry applies.
+// setMode → march the war party out → pillage → assault the enemy settlement →
+// call the farmhands back, then the terminal result. Not good play; just
+// watchable, and every entry applies.
 const DEMO_LOG_SOLO = [
   { t: 20, c: { op: 'setMode', settlementId: 1, mode: 'farm' } },
-  { t: 60, c: { op: 'move', blobId: 2, x: 16, y: 14 } },
-  { t: 240, c: { op: 'move', blobId: 3, x: 13, y: 16 } },
-  { t: 420, c: { op: 'pillage', blobId: 2, on: true } },
-  { t: 600, c: { op: 'setRole', blobId: 4, role: 'farm' } },
-  { t: 900, c: { op: 'move', blobId: 2, x: 20, y: 18 } },
+  { t: 60, c: { op: 'move', blobId: 4, x: 23, y: 23 } },
+  { t: 500, c: { op: 'pillage', blobId: 4, on: true } },
+  { t: 760, c: { op: 'setMode', settlementId: 1, mode: 'deploy' } },
+  { t: 900, c: { op: 'move', blobId: 4, x: 28, y: 28, target: { kind: 'settlement', id: 5 } } },
+  { t: 1100, c: { op: 'backToWork' } },
   { t: 1200, end: 'win' },
 ];
 const DEMO_LOG_PVP = [
   { t: 30, o: 0, c: { op: 'setMode', settlementId: 1, mode: 'supply' } },
-  { t: 120, o: 0, c: { op: 'move', blobId: 2, x: 30, y: 28 } },
-  { t: 300, o: 1, c: { op: 'move', blobId: 6, x: 40, y: 40 } },
-  { t: 700, o: 0, c: { op: 'pillage', blobId: 2, on: true } },
+  { t: 120, o: 0, c: { op: 'move', blobId: 4, x: 44, y: 44 } },
+  { t: 300, o: 1, c: { op: 'move', blobId: 8, x: 46, y: 46 } },
+  { t: 700, o: 0, c: { op: 'pillage', blobId: 4, on: true } },
   { t: 1100, end: 'p0-win' },
 ];
 
