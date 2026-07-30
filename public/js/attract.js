@@ -29,7 +29,7 @@ const $ = (id) => document.getElementById(id);
 
 // Frozen selection stub: covers every ui.* read in render.js so the
 // renderer draws no selection chrome, pings or placement outlines.
-const UI = Object.freeze({ selected: null, pending: null, ping: null, hover: null, buildSite: null });
+const UI = Object.freeze({ selected: null, pending: null, ping: null, hover: null, buildSite: null, reveal: false });
 
 let active = false;
 let session = 0;          // bumped by stop(); async callbacks check it

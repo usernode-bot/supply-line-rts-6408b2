@@ -27,17 +27,22 @@ function check(name, cond, detail) {
 
 const snap = (g) => JSON.stringify(S.serialize(g));
 
-// A short scripted match. The home settlement is id 1 and the opening war party
-// is blobs 2/3/4 on any fresh game (newGame assigns ids in a fixed order).
+// A short scripted match.
+//
+// newGame assigns ids in ONE fixed order per side: the settlement, then its two
+// working farmers, then the war party. So owner 0 is settlement 1, farmhands
+// 2/3, WAR PARTY 4 — and owner 1 is settlement 5, farmhands 6/7, war party 8.
+// The id-layout check further down pins that, because ordering the farmhands by
+// mistake produces a "replay" in which the army never moves (#228).
 function script(size) {
-  const far = size === 'xsmall' ? 16 : 30;
+  const far = size === 'xsmall' ? 23 : 44;
   return [
     [20, { op: 'setMode', settlementId: 1, mode: 'farm' }],
-    [60, { op: 'move', blobId: 2, x: far, y: far - 2 }],
-    [240, { op: 'move', blobId: 3, x: 13, y: 16 }],
-    [420, { op: 'pillage', blobId: 2, on: true }],
-    [600, { op: 'setRole', blobId: 4, role: 'farm' }],
+    [60, { op: 'move', blobId: 4, x: far, y: far }],
+    [420, { op: 'pillage', blobId: 4, on: true }],
+    [600, { op: 'setMode', settlementId: 1, mode: 'deploy' }],
     [800, { op: 'backToWork' }],
+    [900, { op: 'move', blobId: 4, x: far + 5, y: far + 5, target: { kind: 'settlement', id: 5 } }],
   ];
 }
 
@@ -58,6 +63,38 @@ function play(seed, size, diff, ticks, orders) {
   }
   RP.recordEnd(rec, g, g.result || 'surrender');
   return { g, rec, payload: RP.finishRecording(rec) };
+}
+
+// ---------------------------------------------------------------- id layout
+
+// The scripted logs above, the staging demo logs in server.js and the ?shot=
+// payload in main.js all address entities by literal id, so the opening layout
+// is a contract. It was mis-documented as "the war party is blobs 2/3/4", which
+// made every hand-written log order farmhands about while the army stood still
+// (#228) — pin it so that can't come back.
+console.log('opening ids — settlement, two farmhands, then the war party');
+{
+  const g = S.newGame('ids-1', 'xsmall', 'normal');
+  const sett = g.settlements.find((s) => s.owner === 0);
+  const mine = g.blobs.filter((b) => b.owner === 0).sort((a, b) => a.id - b.id);
+  const theirs = g.blobs.filter((b) => b.owner === 1).sort((a, b) => a.id - b.id);
+  check('owner 0\'s home settlement is id 1', sett && sett.id === 1, sett && String(sett.id));
+  check('blobs 2 and 3 are working farmhands',
+    mine.length === 3 && mine[0].id === 2 && mine[1].id === 3
+    && mine[0].working != null && mine[1].working != null,
+    mine.map((b) => `${b.id}${b.working != null ? 'F' : ''}`).join(','));
+  check('blob 4 is the war party', mine[2].id === 4 && mine[2].count.deploy > 0,
+    `${mine[2].id} deploy=${mine[2].count.deploy}`);
+  const foeSett = g.settlements.find((s) => s.owner === 1);
+  check('owner 1 mirrors it: settlement 5, farmhands 6/7, war party 8',
+    foeSett.id === 5 && theirs[0].id === 6 && theirs[1].id === 7
+    && theirs[2].id === 8 && theirs[2].count.deploy > 0);
+  // and the scripted log actually marches that war party somewhere
+  const { g: played } = play('ids-2', 'xsmall', 'normal', 1200, script('xsmall'));
+  const army = played.blobs.find((b) => b.id === 4 && !b.dead);
+  const moved = !army || Math.hypot(army.x - 11.5, army.y - 9.5) > 4;
+  check('the scripted war party actually leaves camp', moved,
+    army ? `${army.x.toFixed(1)},${army.y.toFixed(1)}` : 'died in the field');
 }
 
 // ---------------------------------------------------------------- determinism
@@ -122,6 +159,25 @@ console.log('fidelity — a replay reproduces the match it recorded');
   while (RP.stepPlayer(p)) { /* run it out */ }
   check('a mismatched checkpoint is detected as drift', p.drift === true);
 }
+{
+  // The end-of-playback card (#228). finishRecording emits no `result` field —
+  // only the server's replay row carries one — so a card that read meta.result
+  // announced "Defeat" for every local rewatch, including a match just won.
+  // The log's terminal entry is the real source, and it lands on the game.
+  const { payload } = play('end-1', 'xsmall', 'normal', 900, script('xsmall'));
+  check('a local payload carries no result field', payload.result === undefined);
+  const recorded = payload.log.find((e) => e.end) || null;
+  check('the log states the outcome instead', !!recorded && !!recorded.end);
+  const p = RP.createPlayer(payload);
+  while (RP.stepPlayer(p)) { /* run it out */ }
+  check('the outcome is readable off the played-out game', p.game.result === recorded.end,
+    `${p.game.result} vs ${recorded.end}`);
+  check('atEnd only goes true once that terminal entry has applied', RP.atEnd(p));
+  // and a win reads back as a win, which is what the card renders
+  const won = RP.createPlayer({ ...payload, log: payload.log.map((e) => (e.end ? { ...e, end: 'win' } : e)) });
+  while (RP.stepPlayer(won)) { /* run it out */ }
+  check('a winning recording plays back as a win', won.game.result === 'win', String(won.game.result));
+}
 
 // ---------------------------------------------------------------- seeking
 
@@ -149,17 +205,62 @@ console.log('seeking — keyframes and re-simulation land on the same state');
   check('atEnd reports a finished replay', RP.atEnd(p));
 }
 {
-  // Reveal-map must not change the simulation — only what is drawn.
-  const { payload } = play('seek-2', 'xsmall', 'normal', 900, script('xsmall'));
-  const plain = RP.createPlayer(payload);
-  RP.runTicks(plain, 600);
-  const lit = RP.createPlayer(payload);
-  RP.setReveal(lit, true);
-  RP.runTicks(lit, 600);
-  const a = S.serialize(plain.game), b = S.serialize(lit.game);
-  a.fog = b.fog = null;   // fog is the one thing reveal is allowed to touch
-  a.known = b.known = null;
-  check('revealing the map leaves the simulation untouched', JSON.stringify(a) === JSON.stringify(b));
+  // The invariant main.js relies on (#228): a seek hands back the player's
+  // CURRENT game, which a rewind has replaced. Holding the pre-seek object is
+  // what made the viewer draw a frozen world while the player stepped a live
+  // one — units interpolating back and forth on the spot forever.
+  const { payload } = play('seek-3', 'xsmall', 'normal', 1500, script('xsmall'));
+  const p = RP.createPlayer(payload);
+  const first = p.game;
+  const fwd = await RP.seek(p, 900);
+  check('a forward seek returns the live game object', fwd === p.game);
+  const back = await RP.seek(p, 100);
+  check('a rewind returns the live game object', back === p.game);
+  check('a rewind really does replace it', back !== first);
+  check('the replayed game keeps its replay flag after a rewind', p.game.replay === true);
+}
+
+// ---------------------------------------------------------------- reveal map
+
+console.log('reveal map — a drawing override, never a change to the match');
+{
+  // game.fog is SIMULATION state: the player's pathfinder reads it for known
+  // mountains, remembered enemy settlements and known enemy wall tiles. Filling
+  // it to "visible" handed the recorded player knowledge they never had, so the
+  // playback re-pathed and drifted off the match it was replaying. Run it long
+  // enough on a big enough map that the divergence would actually show — the
+  // old 600-tick xsmall check passed straight through it.
+  for (const [seed, size, ticks] of [['rev-1', 'small', 3000], ['rev-2', 'medium', 3000]]) {
+    const { payload } = play(seed, size, 'normal', ticks, script(size));
+    const plain = RP.createPlayer(payload);
+    const lit = RP.createPlayer(payload);
+    RP.setReveal(lit, true);
+    RP.runTicks(plain, ticks);
+    RP.runTicks(lit, ticks);
+    check(`${seed}/${size}: revealing the map leaves the whole state byte-identical`,
+      JSON.stringify(S.serialize(plain.game)) === JSON.stringify(S.serialize(lit.game)));
+    check(`${seed}/${size}: revealing the map never trips the drift checkpoint`,
+      lit.drift === false);
+  }
+}
+{
+  // …and it is inert on the sim's own fog array, so keyframes always hold the
+  // real fog and turning it back off restores exactly what the player saw.
+  const { payload } = play('rev-3', 'xsmall', 'normal', 900, script('xsmall'));
+  const p = RP.createPlayer(payload);
+  RP.runTicks(p, 300);
+  const before = Array.from(p.game.fog).join(',');
+  RP.setReveal(p, true);
+  check('setReveal does not touch game.fog', Array.from(p.game.fog).join(',') === before);
+  RP.runTicks(p, 300);
+  check('stepping with reveal on still leaves unseen tiles unseen',
+    Array.from(p.game.fog).some((v) => v === 0));
+  check('reveal is reported back by setReveal', RP.setReveal(p, true) === true);
+  await RP.seek(p, 0);   // through reset(), the deepest rewind there is
+  check('reveal survives a rewind past the oldest keyframe', p.reveal === true);
+  check('a rebuilt game still has real fog', Array.from(p.game.fog).some((v) => v === 0));
+  RP.setReveal(p, false);
+  check('reveal turns back off', p.reveal === false);
 }
 
 // ---------------------------------------------------------------- version gate
@@ -281,7 +382,7 @@ console.log('pvp — both sides\' orders replay from one log');
     { t: 40, o: 0, c: { op: 'setMode', settlementId: 1, mode: 'supply' } },
     { t: 80, o: 1, c: { op: 'setMode', settlementId: 5, mode: 'deploy' } },
     { t: 120, o: 1, c: { op: 'setMode', settlementId: 1, mode: 'off' } },
-    { t: 200, o: 1, c: { op: 'move', blobId: 6, x: 40, y: 40 } },
+    { t: 200, o: 1, c: { op: 'move', blobId: 8, x: 44, y: 44 } },   // owner 1's WAR PARTY is 8, not 6
     { t: 400, end: 'p0-win' },
   ];
   const payload = {

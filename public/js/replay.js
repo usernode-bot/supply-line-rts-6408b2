@@ -153,7 +153,7 @@ export function createPlayer(meta) {
     keyframes: [],    // [{ tick, data, i }] — bounded, newest last
     drift: false,     // a checkpoint didn't match what was recorded
     seeking: false,
-    reveal: false,
+    reveal: false,   // render-only fog override — see setReveal (#228)
   };
   reset(p);
   return p;
@@ -170,7 +170,6 @@ export function reset(p) {
   p.i = 0;
   p.keyframes = [];
   applyAt(p, 0);          // tick-0 orders, if the log has any
-  if (p.reveal) g.fog.fill(2);
   return g;
 }
 
@@ -211,7 +210,6 @@ export function stepPlayer(p) {
   if (g.result || g.tick >= p.endTick) return false;
   advance(g);
   applyAt(p, g.tick);
-  if (p.reveal) g.fog.fill(2);
   keyframe(p);
   return true;
 }
@@ -267,11 +265,17 @@ export async function seek(p, tick, onSlice) {
   return p.game;
 }
 
+// Reveal-map is bookkeeping ONLY (#228). It used to fill game.fog with 2, but
+// that array is simulation state — the player's pathfinder reads it for known
+// mountains, remembered enemy settlements and known enemy wall tiles (pathFog
+// in sim.js) — so revealing gave the recorded player knowledge they never had
+// and the playback diverged from the match it was replaying (three of four
+// measured matches tripped the integrity checkpoint). The renderer honours
+// this flag via ui.reveal instead, which also makes it instantly reversible
+// and independent of whether the player is stepping, paused or seeking.
 export function setReveal(p, on) {
   p.reveal = !!on;
-  // Turning it on takes effect at once; turning it off waits for the sim's own
-  // updateVision pass (every 5 ticks) to redraw the real fog.
-  if (p.reveal) p.game.fog.fill(2);
+  return p.reveal;
 }
 
 // ---------------------------------------------------------------- local store

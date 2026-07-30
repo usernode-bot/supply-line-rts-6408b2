@@ -29,6 +29,17 @@ function ownerDark(game, o) { return OWNER_DARK[o === viewer(game) ? 0 : 1]; }
 function ownerBody(game, o) { return OWNER_BODY[o === viewer(game) ? 0 : 1]; }
 function knownOf(game) { return game.pvp ? game.knowns[viewer(game)] : game.known; }
 
+// Reveal-map (#228): a RENDER-ONLY override, never a write to game.fog.
+// game.fog is simulation state — the player's pathfinder reads it for known
+// mountains, enemy settlements and enemy walls (see pathFog in sim.js) — so
+// filling it to "visible" made a replay diverge from the match it recorded.
+// The flag below is set from ui.reveal at the top of draw() and every fog read
+// in this module goes through fogAt / seesAt / settSeen instead.
+let revealing = false;
+function fogAt(game, i) { return revealing ? 2 : game.fog[i]; }
+function seesAt(game, x, y) { return revealing || S.isVisible(game, x, y); }
+function settSeen(game, s) { return revealing || S.settVisible(game, s); }
+
 function lerp(a, b, t) { return a + (b - a) * t; }
 function mix(c1, c2, t) {
   return [lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t)];
@@ -43,7 +54,7 @@ function terrainKnown(game, i) {
   if (!sid) return true;
   const s = game.settlements.find(x => x.id === sid);
   if (!s || s.owner === viewer(game)) return true;
-  return knownOf(game)[sid] != null || game.fog[i] === 2;
+  return knownOf(game)[sid] != null || fogAt(game, i) === 2;
 }
 
 function tileRGB(game, i) {
@@ -101,6 +112,11 @@ export function createRenderer(canvas, minimap) {
   let pendingDirty = new Set();
   let dpr = 1, cssW = 0, cssH = 0;
   let lastFrameT = 0;
+  // reveal-map transitions (#228): the terrain canvas is persistent, so the
+  // fog-secrecy rules baked into its pixels (terrainKnown) have to be repainted
+  // whenever the flag flips — in BOTH directions, or enemy farmland uncovered
+  // while revealed would stay drawn after the toggle goes off again.
+  let revealRef = false;
   // per-settlement territory border segments derived from the exclusive
   // ownership map (#188), cached until the sim rebuilds it (terrVer)
   let terrEdges = null, terrEdgesVer = -1, terrEdgesGame = null;
@@ -162,14 +178,21 @@ export function createRenderer(canvas, minimap) {
   resize();
 
   function ensureLayers(game) {
-    if (mapRef === game.map) return;
+    // A reveal toggle keeps the same map but changes what the terrain layer is
+    // allowed to show, so it forces the same full repaint a new map does.
+    if (mapRef === game.map && revealRef === revealing) return;
+    const sameMap = mapRef === game.map;
     mapRef = game.map;
+    revealRef = revealing;
     pendingDirty.clear();
     const { w, h } = game.map;
-    terrain = document.createElement('canvas');
-    terrain.width = w * T; terrain.height = h * T;
-    tctx = terrain.getContext('2d');
+    if (!sameMap || !terrain) {
+      terrain = document.createElement('canvas');
+      terrain.width = w * T; terrain.height = h * T;
+      tctx = terrain.getContext('2d');
+    }
     for (let i = 0; i < w * h; i++) paintTile(game, i);
+    if (sameMap && fogCanvas) return;   // reveal flip: fog layer eases itself
     fogCanvas = document.createElement('canvas');
     fogCanvas.width = w * FOG_T; fogCanvas.height = h * FOG_T;
     fctx = fogCanvas.getContext('2d');
@@ -179,7 +202,7 @@ export function createRenderer(canvas, minimap) {
     // seed alphas from the current fog so resumes don't fade in from black
     fogAlpha = new Float32Array(w * h);
     for (let i = 0; i < w * h; i++) {
-      fogAlpha[i] = fogTarget(game.fog[i]);
+      fogAlpha[i] = fogTarget(fogAt(game, i));
       writeFogBlock(game, i, fogAlpha[i]);
     }
     fctx.putImageData(fogData, 0, 0);
@@ -311,7 +334,7 @@ export function createRenderer(canvas, minimap) {
     const k = Math.min(1, dt / 120);
     let changed = false;
     for (let i = 0; i < fog.length; i++) {
-      const t = fogTarget(fog[i]);
+      const t = fogTarget(fogAt(game, i));
       let a = fogAlpha[i];
       if (a === t) continue;
       a += (t - a) * k;
@@ -324,19 +347,21 @@ export function createRenderer(canvas, minimap) {
 
   function draw(game, view, ui, alpha) {
     if (alpha == null) alpha = 1;
+    // reveal-map (#228): one flag, read once per frame, honoured by every fog
+    // gate below. The replay viewer is the only caller that ever sets it.
+    revealing = !!(ui && ui.reveal);
     ensureLayers(game);
     // fog memory (#182): repaint a dirty tile only while the viewer sees
     // it; everything else waits in pendingDirty so fogged terrain keeps
     // its last-seen pixels. (Own terrain changes always happen in vision —
     // VISION_SETT exceeds the farm ring — so nothing of ours is delayed.)
-    const fog = game.fog;
     for (const i of game.dirty) {
-      if (fog[i] === 2) paintTile(game, i);
+      if (fogAt(game, i) === 2) paintTile(game, i);
       else pendingDirty.add(i);
     }
     game.dirty.clear();
     for (const i of pendingDirty) {
-      if (fog[i] === 2) { paintTile(game, i); pendingDirty.delete(i); }
+      if (fogAt(game, i) === 2) { paintTile(game, i); pendingDirty.delete(i); }
     }
     const now = performance.now();
     const dt = Math.min(100, now - lastFrameT || 16);
@@ -389,7 +414,7 @@ export function createRenderer(canvas, minimap) {
         : r.targetKind === 'wall' ? { x: tgt.x + 0.5, y: tgt.y + 0.5 } // (#187)
           : S.settCenter(tgt);
       if (r.owner !== viewer(game)) {
-        const seen = S.settVisible(game, src) || S.isVisible(game, tp.x, tp.y);
+        const seen = settSeen(game, src) || seesAt(game, tp.x, tp.y);
         if (!seen) continue;
       }
       const health = SUP.routeHealth(game, r);
@@ -436,7 +461,7 @@ export function createRenderer(canvas, minimap) {
     const edges = ensureTerrEdges(game);
     for (const st of game.settlements) {
       if (st.building) continue; // construction sites feed nobody — no ring yet (#95)
-      if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
+      if (st.owner !== viewer(game) && !settSeen(game, st)) continue;
       const e = edges.get(st.id);
       if (!e) continue;
       ctx.strokeStyle = ownerColor(game, st.owner);
@@ -461,7 +486,7 @@ export function createRenderer(canvas, minimap) {
     }
     ctx.lineWidth = 2;
     for (const k of Object.values(knownOf(game))) {
-      if (S.settVisible(game, k)) continue;
+      if (settSeen(game, k)) continue;
       ctx.strokeStyle = OWNER_COLOR[1];
       ctx.globalAlpha = 0.25;
       strokeTerritory(k.x, k.y);
@@ -489,7 +514,7 @@ export function createRenderer(canvas, minimap) {
       let seen = 0; // 0 unseen, 1 explored, 2 visible
       for (let dy = 0; dy <= 1; dy++) {
         for (let dx = 0; dx <= 1; dx++) {
-          seen = Math.max(seen, game.fog[(r.y + dy) * game.map.w + (r.x + dx)]);
+          seen = Math.max(seen, fogAt(game, (r.y + dy) * game.map.w + (r.x + dx)));
         }
       }
       if (seen > 0) drawRuin(r, wx, wy, s, seen === 2);
@@ -497,7 +522,7 @@ export function createRenderer(canvas, minimap) {
 
     // ghost settlements (remembered but not visible)
     for (const [id, k] of Object.entries(knownOf(game))) {
-      if (S.settVisible(game, k)) continue;
+      if (settSeen(game, k)) continue;
       const gsel = ui.selected && ui.selected.kind === 'enemy-settlement' && ui.selected.id === +id;
       drawSettlement(game, { x: k.x, y: k.y, owner: 1 - viewer(game), hp: S.C.SETT_HP, name: k.name }, wx, wy, s, true, gsel, 0);
     }
@@ -509,14 +534,14 @@ export function createRenderer(canvas, minimap) {
     // as dimmed ghosts from the viewer's wall memory.
     {
       for (const w of game.walls || []) {
-        const vis = game.fog[w.y * game.map.w + w.x] === 2;
+        const vis = fogAt(game, w.y * game.map.w + w.x) === 2;
         if (w.owner !== viewer(game) && !vis) continue; // ghosted below if remembered
         const wsel = ui.selected && (ui.selected.kind === 'wall' || ui.selected.kind === 'enemy-wall') && ui.selected.id === w.id;
         drawWall(game, w, wx, wy, s, false, wsel);
       }
       for (const [id, k] of Object.entries(game.wallMemo || {})) {
         const live = (game.walls || []).find(x => x.id === +id);
-        if (live && game.fog[live.y * game.map.w + live.x] === 2) continue; // drawn live above
+        if (live && fogAt(game, live.y * game.map.w + live.x) === 2) continue; // drawn live above
         const wsel = ui.selected && ui.selected.kind === 'enemy-wall' && ui.selected.id === +id;
         drawWall(game, {
           id: +id, x: k.x, y: k.y,
@@ -535,7 +560,7 @@ export function createRenderer(canvas, minimap) {
     const crossingFarmers = [];
     for (const b of game.blobs) {
       if (b.dead || b.working == null) continue;
-      if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
+      if (b.owner !== viewer(game) && !seesAt(game, b.x, b.y)) continue;
       const ti = Math.floor(by(b)) * game.map.w + Math.floor(bx(b));
       if (game.settAt && game.settAt[ti]) { crossingFarmers.push(b); continue; }
       drawWorkingFarmer(game, b, wx, wy, s, alpha, selSet);
@@ -547,7 +572,7 @@ export function createRenderer(canvas, minimap) {
       if (!b.dead && b.working != null) workingBy.set(b.working, (workingBy.get(b.working) || 0) + S.total(b));
     }
     for (const st of game.settlements) {
-      if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
+      if (st.owner !== viewer(game) && !settSeen(game, st)) continue;
       const sel = ui.selected && (ui.selected.kind === 'settlement' || ui.selected.kind === 'enemy-settlement') && ui.selected.id === st.id;
       drawSettlement(game, st, wx, wy, s, false, sel, workingBy.get(st.id) || 0);
     }
@@ -572,7 +597,7 @@ export function createRenderer(canvas, minimap) {
         if (r.owner !== viewer(game)) {
           // same fog gate as the line itself — markers never reveal more
           const tp2 = r.targetKind === 'blob' ? { x: bx(rtgt), y: by(rtgt) } : S.settCenter(rtgt);
-          if (!S.settVisible(game, rsrc) && !S.isVisible(game, tp2.x, tp2.y)) continue;
+          if (!settSeen(game, rsrc) && !seesAt(game, tp2.x, tp2.y)) continue;
         }
         markSett(rsrc);
         if (r.targetKind === 'blob') {
@@ -610,7 +635,7 @@ export function createRenderer(canvas, minimap) {
     // blobs
     for (const b of game.blobs) {
       if (b.dead || b.working != null) continue;
-      if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
+      if (b.owner !== viewer(game) && !seesAt(game, b.x, b.y)) continue;
       const r = Math.max(10, S.blobRadius(b) * s);
       const px = wx(bx(b)), py = wy(by(b));
       const isSupply = b.count.supply > 0 && b.count.deploy === 0 && b.count.farm === 0;
@@ -753,7 +778,7 @@ export function createRenderer(canvas, minimap) {
     // boundary around the group, faint interior grid lines.
     for (const b of game.blobs) {
       if (b.dead || !b.pillaging) continue;
-      if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
+      if (b.owner !== viewer(game) && !seesAt(game, b.x, b.y)) continue;
       const cells = S.pillageCells(game, b);
       const set = new Set(cells);
       const w = game.map.w;
@@ -788,9 +813,9 @@ export function createRenderer(canvas, minimap) {
       for (const st of game.settlements) settById.set(st.id, st);
       const wallById = new Map();
       for (const w of game.walls || []) wallById.set(w.id, w);
-      const blobSeen = b => b.owner !== 1 || S.isVisible(game, b.x, b.y);
-      const settSeen = st => st.owner !== 1 || S.settVisible(game, st);
-      const wallSeen = w => w.owner === viewer(game) || S.isVisible(game, w.x + 0.5, w.y + 0.5);
+      const blobSeen = b => b.owner !== 1 || seesAt(game, b.x, b.y);
+      const settLinkSeen = st => st.owner !== 1 || settSeen(game, st);
+      const wallSeen = w => w.owner === viewer(game) || seesAt(game, w.x + 0.5, w.y + 0.5);
       const blobPxR = b => b.working != null ? Math.max(2, s * 0.13) * 2 : Math.max(10, S.blobRadius(b) * s);
       const pulse = 0.55 + 0.45 * Math.sin((game.tick + alpha) * 2.2);
       const arrowAt = (x, y, ang, size) => {
@@ -882,7 +907,7 @@ export function createRenderer(canvas, minimap) {
         let tx3, ty3, boxHalf;
         if (l.kind === 'bs') {
           const st = settById.get(l.s);
-          if (!b || !st || !blobSeen(b) || !settSeen(st)) continue;
+          if (!b || !st || !blobSeen(b) || !settLinkSeen(st)) continue;
           tx3 = st.x + 1; ty3 = st.y + 1; boxHalf = half;
         } else {
           // walls (#187): same siege-line treatment onto the wall tile
@@ -940,7 +965,7 @@ export function createRenderer(canvas, minimap) {
           const e = p * p; // ease-in: drawn toward the destination
           const lift = Math.sin(p * Math.PI) * (f.kind === 'wheat' ? 0.4 : 0.15);
           const cx2 = lerp(f.x, tx2, e), cy2 = lerp(f.y, ty2, e) - lift;
-          if (!S.isVisible(game, cx2, cy2)) continue; // same fog rule as damage numbers
+          if (!seesAt(game, cx2, cy2)) continue; // same fog rule as damage numbers
           const fade = p < 0.15 ? p / 0.15 : p > 0.8 ? (1 - p) / 0.2 : 1;
           ctx.beginPath();
           ctx.arc(wx(cx2), wy(cy2), Math.max(1.5, 0.09 * s), 0, Math.PI * 2);
@@ -951,7 +976,7 @@ export function createRenderer(canvas, minimap) {
           continue;
         }
         if (age < 0 || age > 12) continue;
-        if (!S.isVisible(game, f.x, f.y)) continue;
+        if (!seesAt(game, f.x, f.y)) continue;
         const fade = Math.max(0, 1 - age / 12);
         ctx.font = `bold ${Math.max(11, Math.min(16, s * 0.9))}px system-ui`;
         const fyPx = wy(f.y) - s * 0.6 - age * s * 0.09;
@@ -1544,11 +1569,11 @@ export function createRenderer(canvas, minimap) {
     // ruins: dim grey dots on explored ground, under the settlement dots
     mctx.fillStyle = 'rgba(82,82,91,0.5)';
     for (const r of game.ruins || []) {
-      if (game.fog[r.y * game.map.w + r.x] === 0) continue;
+      if (fogAt(game, r.y * game.map.w + r.x) === 0) continue;
       mctx.fillRect((r.x + 1) * sx - 2, (r.y + 1) * sy - 2, 4, 4);
     }
     for (const st of game.settlements) {
-      if (st.owner !== viewer(game) && !S.settVisible(game, st)) continue;
+      if (st.owner !== viewer(game) && !settSeen(game, st)) continue;
       mctx.fillStyle = ownerColor(game, st.owner);
       mctx.fillRect((st.x + 1) * sx - 3, (st.y + 1) * sy - 3, 6, 6);
     }
@@ -1559,7 +1584,7 @@ export function createRenderer(canvas, minimap) {
     // walls (#187): small owner-colored marks — own always, enemy while
     // visible; remembered enemy walls draw dimmer from the wall memory
     for (const w of game.walls || []) {
-      if (w.owner !== viewer(game) && game.fog[w.y * game.map.w + w.x] !== 2) continue;
+      if (w.owner !== viewer(game) && fogAt(game, w.y * game.map.w + w.x) !== 2) continue;
       mctx.fillStyle = ownerColor(game, w.owner);
       mctx.globalAlpha = 0.75;
       mctx.fillRect((w.x + 0.5) * sx - 1, (w.y + 0.5) * sy - 1, 2, 2);
@@ -1572,7 +1597,7 @@ export function createRenderer(canvas, minimap) {
     mctx.globalAlpha = 1;
     for (const b of game.blobs) {
       if (b.dead) continue;
-      if (b.owner !== viewer(game) && !S.isVisible(game, b.x, b.y)) continue;
+      if (b.owner !== viewer(game) && !seesAt(game, b.x, b.y)) continue;
       mctx.fillStyle = ownerColor(game, b.owner);
       mctx.fillRect(b.x * sx - 2, b.y * sy - 2, 4, 4);
     }
