@@ -2354,15 +2354,20 @@ function showWallConfirm(screen) {
   CT.signal('ask-popup');
   ui.orderTarget = null;
   ui.orderTargetEnt = null;
-  let okCount = 0;
+  let okCount = 0, plots = 0;
   if (ui.wallStart && ui.wallEnd) {
     for (const t of S.wallLineTiles(ui.wallStart.x, ui.wallStart.y, ui.wallEnd.x, ui.wallEnd.y)) {
-      if (!S.canPlaceWall(game, me, t.x, t.y).err) okCount++;
+      const r = S.canPlaceWall(game, me, t.x, t.y);
+      if (r.err) continue;
+      okCount++;
+      if (r.farm) plots++; // your own farmland — the wall takes the plot (#219)
     }
   }
   const ok = okCount > 0;
+  // the plot cost rides on the label so it's read before committing
+  const cost = plots ? ` · ${plots} plot${plots === 1 ? '' : 's'}` : '';
   orderPopup.innerHTML = `
-    <button data-act="pwall" class="btn px-3 rounded-lg text-left ${ok ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-500 opacity-40'}" ${ok ? '' : 'disabled'}>✓ Build wall (${okCount})</button>
+    <button data-act="pwall" class="btn px-3 rounded-lg text-left ${ok ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-500 opacity-40'}" ${ok ? '' : 'disabled'}>✓ Build wall (${okCount})${cost}</button>
     <button data-act="pwallx" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Cancel</button>`;
   orderPopup.classList.remove('hidden');
   const w = orderPopup.offsetWidth, h = orderPopup.offsetHeight;
@@ -2402,7 +2407,9 @@ function confirmWall() {
   updateHint();
   if (!start || !end || !blobs.length) { renderPanel(true); return; }
   const tiles = S.wallLineTiles(start.x, start.y, end.x, end.y);
-  const valid = tiles.filter(t => !S.canPlaceWall(game, me, t.x, t.y).err);
+  const checked = tiles.map(t => ({ t, r: S.canPlaceWall(game, me, t.x, t.y) }));
+  const valid = checked.filter(c => !c.r.err).map(c => c.t);
+  const plots = checked.filter(c => !c.r.err && c.r.farm).length;
   const skipped = tiles.length - valid.length;
   if (!valid.length) { toast('🧱 No buildable tiles there'); renderPanel(true); return; }
   // deterministic founder ordering, like dispatchBuild (#130)
@@ -2420,7 +2427,10 @@ function confirmWall() {
   }
   if (ok) {
     pingOrder({ x: start.x + 0.5, y: start.y + 0.5 }, null);
-    toast(`🧱 Building ${ok} wall tile${ok === 1 ? '' : 's'}${skipped ? ` — ${skipped} skipped` : ''}`);
+    // plots is capped at the queued count so the toast never claims more
+    // farmland than the order can actually take (#219)
+    const lost = Math.min(plots, ok);
+    toast(`🧱 Building ${ok} wall tile${ok === 1 ? '' : 's'}${lost ? ` — ${lost} plot${lost === 1 ? '' : 's'} ploughed under` : ''}${skipped ? ` — ${skipped} skipped` : ''}`);
   } else if (err) toast(err);
   renderPanel(true);
 }
@@ -3655,7 +3665,10 @@ function shotWallGarrison() {
       for (let dx = -r; dx <= r && !spot; dx++) {
         if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
         const x = start.x + 1 + dx, y = start.y + 1 + dy;
-        if (S.canPlaceWall(g, 0, x, y).ok) spot = { x, y };
+        // never on own farmland (#219): legal now, but untilling the
+        // plot would shift the screenshot's pixels
+        const res = S.canPlaceWall(g, 0, x, y);
+        if (res.ok && !res.farm) spot = { x, y };
       }
     }
   }
@@ -3697,7 +3710,8 @@ function shotWallStart() {
         if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
         const x = Math.floor(mine.x) + dx, y = Math.floor(mine.y) + dy;
         if (x < 0 || y < 0 || x >= g.map.w || y >= g.map.h) continue;
-        if (!S.canPlaceWall(g, 0, x, y).err) spot = { x, y };
+        const res = S.canPlaceWall(g, 0, x, y); // farmland skipped (#219): pixel-stable shot
+        if (res.ok && !res.farm) spot = { x, y };
       }
     }
   }
@@ -3716,6 +3730,62 @@ function shotWallStart() {
   input.clampView();
   updateHint();
   renderPanel(true);
+}
+
+// Scorched reclaimed farmland (#219) only exists after a wall standing on
+// your own plot is razed mid-match, so no plain URL reaches it.
+// `?shot=wall-razed` boots a solo match on a FIXED seed, drops a finished
+// wall on the home settlement's outermost plot (which ploughs it under),
+// then razes it off honest sim output — a hair of structure left and the
+// enemy's opening war party moved in beside it — so the reclaimed tile is
+// selected with the real burnt-earth paint and the inspector's Barren +
+// 🔥 Scorched lines. Pure local UI state, no DB writes: works everywhere.
+function shotWallRazed() {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot219', 'xsmall', 'normal');
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  if (!home) return;
+  // the fertile own plot furthest from the keep, scanned in a fixed order
+  // so the same seed always burns the same tile
+  let spot = null, bd = -1;
+  for (const i of [...home.tilled].sort((a, b) => a - b)) {
+    const x = i % g.map.w, y = (i / g.map.w) | 0;
+    if (!g.map.fert[i]) continue;
+    const res = S.canPlaceWall(g, 0, x, y);
+    if (!res.ok || !res.farm) continue;
+    const d = Math.hypot(x + 0.5 - (home.x + 1), y + 0.5 - (home.y + 1));
+    if (d > bd) { bd = d; spot = { x, y, i }; }
+  }
+  if (!spot) return;
+  const w = S.spawnFinishedWall(g, 0, spot.x, spot.y, { deploy: 0, supply: 0, farm: 0 });
+  if (!w) return;
+  startMatch(g);
+  const foe = g.blobs.find(b => b.owner === 1 && b.count.deploy > 0);
+  if (foe) {
+    foe.x = spot.x + 1.5; foe.y = spot.y + 0.5;
+    foe.prevX = foe.x; foe.prevY = foe.y;
+    foe.order = null; foe.path = null; foe.pathGoal = null;
+    // foraging off: otherwise the raiders strip the tiles they stand on
+    // and the shot has scorch marks that aren't the wall's
+    foe.pillaging = false;
+    w.hp = 0.5; // an unmanned wall on its last legs: one contact ends it
+    for (let i = 0; i < 20 && g.walls.some(x => x.id === w.id); i++) S.step(g);
+    // the raiders pull back off the rubble so the burnt tile — the whole
+    // subject of the shot — isn't hidden under their sprite
+    foe.x = spot.x + 4.5; foe.y = spot.y + 0.5;
+    foe.prevX = foe.x; foe.prevY = foe.y;
+    foe.order = null; foe.path = null; foe.pathGoal = null;
+  }
+  ui.selected = { kind: 'tile', i: spot.i };
+  view.cx = spot.x + 0.5;
+  view.cy = spot.y + 0.5;
+  view.scale = 34;
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
 }
 
 // The in-combat / rear-attack panel lines (#201) exist only while a
@@ -3857,6 +3927,9 @@ if (SHOT === 'in-combat') {
 if (SHOT === 'wall-start') {
   try { shotWallStart(); } catch (e) { console.warn('shot link failed', e); }
 }
+if (SHOT === 'wall-razed') {
+  try { shotWallRazed(); } catch (e) { console.warn('shot link failed', e); }
+}
 if (BTN_SHOTS[SHOT]) {
   try { shotControlsButton(BTN_SHOTS[SHOT]); } catch (e) { console.warn('shot link failed', e); }
 }
@@ -3901,7 +3974,8 @@ function bootShot(name) {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
           const x = home.x + 1 + dx, y = home.y + 1 + dy;
           if (x < 0 || y < 0 || x >= g.map.w || y >= g.map.h) continue;
-          if (S.canPlaceWall(g, 0, x, y).err) continue;
+          const res = S.canPlaceWall(g, 0, x, y);
+          if (res.err || res.farm) continue; // farmland skipped (#219)
           if (S.inTerritory(g, home, x + 0.5, y + 0.5)) spot = { x, y };
         }
       }

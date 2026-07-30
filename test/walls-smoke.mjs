@@ -9,7 +9,7 @@
 
 import * as S from '../public/js/sim.js';
 import * as SUP from '../public/js/supply.js';
-import { passable } from '../public/js/mapgen.js';
+import { passable, fertTier } from '../public/js/mapgen.js';
 
 // routeHealth treats a topped-off destination as "keeping up" (#143) — for
 // a wall that means the SUPPLIES stash, not the garrison's bellies (#200).
@@ -1197,6 +1197,348 @@ function hpOf(b) { return b.units.reduce((a, u) => a + u.hp, 0); }
   check('training is never blocked by missing rations', S.garrisonTotal(home) >= before,
     `${before} → ${S.garrisonTotal(home)}`);
   check('the stockpile never goes negative', home.stockpile >= -1e-9, `stockpile=${home.stockpile}`);
+}
+
+// ---------------------------------------- 13. walls over own farmland (#219)
+
+// Farmland is just `tilledBy` — no separate tile type — so every case
+// below is really about when a plot leaves (and rejoins) its
+// settlement's `tilled` list, which is the only thing farmYield reads.
+
+function freshFarm() {
+  return S.newGame('walls-farm-219', 'small', 'normal');
+}
+
+// The settlement's own plot furthest from its keep that a wall may stand
+// on: far out so the builder never brawls with the settlement, and
+// fertile so losing it has to move the income.
+function farmPlot(game, s) {
+  const mw = game.map.w;
+  let best = null, bd = -1;
+  for (const i of [...s.tilled].sort((a, b) => a - b)) {
+    const x = i % mw, y = (i / mw) | 0;
+    if (game.map.fert[i] <= 0) continue;
+    const r = S.canPlaceWall(game, s.owner, x, y);
+    if (!r.ok || !r.farm) continue;
+    const d = Math.hypot(x + 0.5 - (s.x + 1), y + 0.5 - (s.y + 1));
+    if (d > bd) { bd = d; best = { x, y, i }; }
+  }
+  return best;
+}
+
+// A tile a builder can stand on to work `p`, never `p` itself.
+function builderTile(game, p) {
+  const mw = game.map.w;
+  for (const dy of [0, -1, 1]) {
+    for (const dx of [0, -1, 1]) {
+      if (!dx && !dy) continue;
+      const x = p.x + dx, y = p.y + dy, i = y * mw + x;
+      if (!passable(game.map, x, y) || game.settAt[i] || game.wallAt[i]) continue;
+      return { x: x + 0.5, y: y + 0.5 };
+    }
+  }
+  return null;
+}
+
+{
+  console.log('own farmland is buildable, the enemy\'s is not:');
+  const g = freshFarm();
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  const foeHome = g.settlements.find(s => s.owner === 1 && !s.building);
+  const p = farmPlot(g, home);
+  const fp = farmPlot(g, foeHome);
+  check('found an own plot and an enemy plot', !!p && !!fp);
+  if (p && fp) {
+    const mine = S.canPlaceWall(g, 0, p.x, p.y);
+    check('a wall may go on your own plot', !!mine.ok && !mine.err, JSON.stringify(mine));
+    check('the answer flags the plot it would cost',
+      mine.farm === true && mine.plot === home.id, JSON.stringify(mine));
+    const theirs = S.canPlaceWall(g, 0, fp.x, fp.y);
+    check('enemy farmland is refused by name', theirs.err === 'Enemy farmland', JSON.stringify(theirs));
+    check('and refused symmetrically', S.canPlaceWall(g, 1, p.x, p.y).err === 'Enemy farmland');
+    const foeOwn = S.canPlaceWall(g, 1, fp.x, fp.y);
+    check('each side may take its own', !!foeOwn.ok && foeOwn.farm === true, JSON.stringify(foeOwn));
+    // plain ground stays plain green — no cost flag
+    const clear = findClearPair(g);
+    check('free ground carries no plot flag',
+      S.canPlaceWall(g, 0, clear.x, clear.y).farm === undefined);
+  }
+}
+
+{
+  console.log('staking the site ploughs the plot under:');
+  const g = freshFarm();
+  g.blobs.length = 0;
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  const p = farmPlot(g, home);
+  const stand = p && builderTile(g, p);
+  check('found a plot and a builder tile', !!p && !!stand);
+  if (p && stand) {
+    const plotsBefore = home.tilled.length;
+    const baseBefore = S.farmYield(g, home).base;
+    const b = spawnBlob(g, 0, stand.x, stand.y, 4, 0);
+    const r = S.opBuildWalls(g, b, [{ x: p.x, y: p.y }]);
+    check('the order is accepted', !!r.ok && r.queued === 1, JSON.stringify(r));
+    run(g, 1);
+    check('a site was staked out', !!g.wallAt[p.i]);
+    check('the site is still a scaffold', g.walls.some(w => w.x === p.x && w.y === p.y && w.building));
+    check('the tile is no longer farmland', g.tilledBy[p.i] === 0);
+    check('the plot left the settlement', !home.tilled.includes(p.i) && home.tilled.length === plotsBefore - 1);
+    const baseAfter = S.farmYield(g, home).base;
+    check(`income falls by exactly that plot (${baseBefore.toFixed(5)} → ${baseAfter.toFixed(5)})`,
+      Math.abs(baseBefore - baseAfter - g.map.fert[p.i] * S.C.FARM_PER_FARMER * S.C.FARM_BASE_FARMERS) < 1e-9);
+    check('income really is lower', baseAfter < baseBefore);
+    // raising a wall never damages the soil — only tearing one out does
+    check('the ground keeps its natural fertility', g.map.fert[p.i] === g.map.orig[p.i]);
+    check('the tile is not scorched by construction', !g.pillaged.has(p.i));
+    check('the lost tile is queued for a repaint', g.dirty.has(p.i));
+    run(g, 600);
+    check('the wall finishes', g.walls.some(w => w.x === p.x && w.y === p.y && !w.building));
+    check('the plot stays lost under masonry', g.tilledBy[p.i] === 0 && !home.tilled.includes(p.i));
+    check('previewFields never grants a walled tile',
+      !S.previewFields(g, home.x, home.y, 0).includes(p.i));
+  }
+}
+
+{
+  console.log('the field hand standing on the site is re-plotted:');
+  const g = freshFarm();
+  g.blobs.length = 0;
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  const p = farmPlot(g, home);
+  const stand = p && builderTile(g, p);
+  check('found a plot and a builder tile', !!p && !!stand);
+  if (p && stand && home.tilled.length > 1) {
+    const farmer = spawnBlob(g, 0, p.x + 0.5, p.y + 0.5, 0, 1);
+    farmer.working = home.id;
+    farmer.noMerge = true;
+    farmer.food = 100;
+    run(g, 1);
+    check('the farmer works the doomed plot', S.farmYield(g, home).workedCells === 1,
+      JSON.stringify(S.farmYield(g, home)));
+    const b = spawnBlob(g, 0, stand.x, stand.y, 4, 0);
+    b.noMerge = true;
+    S.opBuildWalls(g, b, [{ x: p.x, y: p.y }]);
+    run(g, 1);
+    check('the site was staked', !!g.wallAt[p.i]);
+    check('the displaced farmer is walking to another plot',
+      !!(farmer.order && farmer.order.type === 'move'), JSON.stringify(farmer.order));
+    if (farmer.order) {
+      const dest = Math.floor(farmer.order.y) * g.map.w + Math.floor(farmer.order.x);
+      check('the destination is a surviving plot of the same settlement',
+        dest !== p.i && home.tilled.includes(dest), `dest=${dest} plot=${p.i}`);
+    }
+    check('it still works for the settlement', farmer.working === home.id);
+    run(g, 200);
+    const here = Math.floor(farmer.y) * g.map.w + Math.floor(farmer.x);
+    check('it arrived and is earning again',
+      !farmer.dead && home.tilled.includes(here) && S.farmYield(g, home).workedCells >= 1,
+      `here=${here} yield=${JSON.stringify(S.farmYield(g, home))}`);
+  }
+}
+
+{
+  console.log('a wall that falls hands the plot back scorched:');
+  const g = freshFarm();
+  g.blobs.length = 0;
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  const p = farmPlot(g, home);
+  check('found a plot', !!p);
+  if (p) {
+    const plotsBefore = [...home.tilled].sort((a, b) => a - b);
+    const baseBefore = S.farmYield(g, home).base;
+    const origBefore = g.map.orig[p.i];
+    const worthBefore = S.farmYield(g, home).worthwhileCells;
+    const share = origBefore * S.C.FARM_PER_FARMER * S.C.FARM_BASE_FARMERS;
+    const w = S.spawnFinishedWall(g, 0, p.x, p.y, { deploy: 0, supply: 0, farm: 0 });
+    check('the finished wall took the plot too', !!w && g.tilledBy[p.i] === 0 && !home.tilled.includes(p.i));
+    // an unmanned wall on its last legs: one adjacent attacker ends it
+    w.hp = 0.5;
+    spawnBlob(g, 1, p.x + 1.5, p.y + 0.5, 3, 0);
+    run(g, 30);
+    check('the wall was destroyed', !g.walls.some(x => x.id === w.id) && g.wallAt[p.i] === 0);
+    check('the tile is tilled again', g.tilledBy[p.i] === home.id && home.tilled.includes(p.i));
+    check('the field ring is exactly as it was',
+      JSON.stringify([...home.tilled].sort((a, b) => a - b)) === JSON.stringify(plotsBefore));
+    // ...but scorched: lowest tier, earning ~nothing (#219). The regen tick
+    // has already nudged it a hair off zero by now — that's the point of
+    // the mechanism — so the assertion is on the TIER, and on being under
+    // the floor below which pillaging itself refuses to harvest.
+    check('the reclaimed tile is stripped to the lowest tier',
+      fertTier(g.map.fert[p.i]) === 0 && g.map.fert[p.i] < S.C.FERT_LEVEL / 2,
+      `fert=${g.map.fert[p.i]}`);
+    check('its original fertility is remembered', g.map.orig[p.i] === origBefore);
+    check('it is registered as scorched land', g.pillaged.has(p.i));
+    check('the burnt tile is queued for a repaint', g.dirty.has(p.i));
+    const baseAfter = S.farmYield(g, home).base;
+    check(`income is NOT restored — the plot earns nothing (${baseBefore.toFixed(5)} → ${baseAfter.toFixed(5)})`,
+      Math.abs(baseAfter - (baseBefore - share)) < 1e-4 && baseAfter < baseBefore,
+      `expected ≈ ${(baseBefore - share).toFixed(5)}`);
+    check('the barren plot is below the break-even fertility',
+      g.map.fert[p.i] < S.FERT_WORTHWHILE, `${g.map.fert[p.i]} vs ${S.FERT_WORTHWHILE}`);
+    check('so it no longer counts as a worthwhile plot to man',
+      S.farmYield(g, home).worthwhileCells === worthBefore - 1,
+      `${worthBefore} → ${S.farmYield(g, home).worthwhileCells}`);
+    check('the ring still counts the plot even though it pays nothing',
+      home.tilled.length === plotsBefore.length);
+    // a farmer standing on the barren plot adds exactly nothing
+    g.blobs.length = 0;
+    const hand = spawnBlob(g, 0, p.x + 0.5, p.y + 0.5, 0, 1);
+    hand.working = home.id;
+    hand.food = 100;
+    const y2 = S.farmYield(g, home);
+    const wasWorth = origBefore * S.C.FARM_PER_CELL; // what the plot used to pay
+    check('a farmer on the barren plot earns ~nothing (under 2% of the old plot)',
+      y2.workedCells === 1 && y2.farmers < wasWorth * 0.02,
+      `${y2.farmers} vs ${wasWorth}`);
+  }
+}
+
+{
+  console.log('scorched farmland heals back through the regen tick:');
+  const g = freshFarm();
+  g.blobs.length = 0;
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  const p = farmPlot(g, home);
+  check('found a plot', !!p);
+  if (p) {
+    const orig = g.map.orig[p.i];
+    const baseBefore = S.farmYield(g, home).base;
+    const w = S.spawnFinishedWall(g, 0, p.x, p.y, { deploy: 0, supply: 0, farm: 0 });
+    w.hp = 0.5;
+    const foe = spawnBlob(g, 1, p.x + 1.5, p.y + 0.5, 3, 0);
+    run(g, 30);
+    check('the plot came back scorched', g.tilledBy[p.i] === home.id && fertTier(g.map.fert[p.i]) === 0);
+    foe.dead = true; // clear the field so the farmer can work in peace
+    g.blobs.length = 0;
+    // worked recovery (#110): FERT_REGEN_WORKED restores a full level per
+    // 225 ticks, so a stripped plot is whole again in ~4 levels' worth
+    const hand = spawnBlob(g, 0, p.x + 0.5, p.y + 0.5, 0, 1);
+    hand.working = home.id;
+    hand.food = 1e6;
+    let last = g.map.fert[p.i];
+    let monotone = true;
+    const budget = Math.ceil(orig / S.C.FERT_REGEN_WORKED) + 40;
+    for (let t = 0; t < budget; t++) {
+      S.step(g);
+      const f = g.map.fert[p.i];
+      if (f < last - 1e-12) monotone = false;
+      last = f;
+      if (f >= orig - 0.0001) break;
+    }
+    check('a worked plot recovers monotonically', monotone);
+    check(`a worked plot is whole again within ${budget} ticks (${last.toFixed(3)} of ${orig.toFixed(3)})`,
+      last >= orig - 0.0001, `fert=${last}`);
+    check('a healed tile stops being scorched', !g.pillaged.has(p.i));
+    check('income is back to its pre-wall value',
+      Math.abs(S.farmYield(g, home).base - baseBefore) < 1e-9,
+      `${baseBefore} → ${S.farmYield(g, home).base}`);
+  }
+}
+
+{
+  console.log('fallow scorched land crawls back far slower than a worked plot:');
+  const g = freshFarm();
+  g.blobs.length = 0;
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  const p = farmPlot(g, home);
+  check('found a plot', !!p);
+  if (p) {
+    const orig = g.map.orig[p.i];
+    const w = S.spawnFinishedWall(g, 0, p.x, p.y, { deploy: 0, supply: 0, farm: 0 });
+    w.hp = 0.5;
+    const foe = spawnBlob(g, 1, p.x + 1.5, p.y + 0.5, 3, 0);
+    run(g, 30);
+    check('the plot came back scorched', fertTier(g.map.fert[p.i]) === 0 && g.pillaged.has(p.i));
+    foe.dead = true;
+    g.blobs.length = 0; // nobody farms it
+    run(g, 600);
+    const f = g.map.fert[p.i];
+    check('fallow land does creep back', f > 0, `fert=${f}`);
+    check(`but is nowhere near whole (${f.toFixed(4)} of ${orig.toFixed(3)})`, f < orig * 0.25, `fert=${f}`);
+    check('and is still scorched', g.pillaged.has(p.i));
+    // the worked rate is an order of magnitude faster (#110)
+    check('the worked rate far outpaces the fallow one',
+      S.C.FERT_REGEN_WORKED > S.C.FERT_REGEN * 20);
+  }
+}
+
+{
+  console.log('a wall razed on naturally barren ground is not marked scorched:');
+  const g = freshFarm();
+  g.blobs.length = 0;
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  const p = farmPlot(g, home);
+  check('found a plot', !!p);
+  if (p) {
+    // force the tile's ORIGINAL fertility to nothing: there is no wound to
+    // heal, so the tile must stay out of `pillaged` or the live set and a
+    // reloaded one would disagree and the save would stop being stable
+    g.map.fert[p.i] = 0;
+    g.map.orig[p.i] = 0;
+    const w = S.spawnFinishedWall(g, 0, p.x, p.y, { deploy: 0, supply: 0, farm: 0 });
+    w.hp = 0.5;
+    spawnBlob(g, 1, p.x + 1.5, p.y + 0.5, 3, 0);
+    run(g, 30);
+    check('the wall was destroyed', !g.walls.some(x => x.id === w.id));
+    check('the tile is tilled again', g.tilledBy[p.i] === home.id);
+    check('nothing was scorched', !g.pillaged.has(p.i));
+    const d1 = S.serialize(g);
+    const g2 = S.deserialize(JSON.parse(JSON.stringify(d1)));
+    check('the save is byte-identical', JSON.stringify(d1) === JSON.stringify(S.serialize(g2)));
+    check('the reload agrees the tile is not scorched', !g2.pillaged.has(p.i));
+  }
+}
+
+{
+  console.log('save / load agrees about a plot a wall took:');
+  const g = freshFarm();
+  g.blobs.length = 0;
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  const p = farmPlot(g, home);
+  const stand = p && builderTile(g, p);
+  check('found a plot and a builder tile', !!p && !!stand);
+  if (p && stand) {
+    const b = spawnBlob(g, 0, stand.x, stand.y, 4, 0);
+    S.opBuildWalls(g, b, [{ x: p.x, y: p.y }]);
+    // the load-bearing case: a save taken MID-construction. deserialize
+    // loads walls before it re-tills, so the plot must already be gone.
+    run(g, 3);
+    check('mid-construction scaffold exists', g.walls.some(w => w.x === p.x && w.y === p.y && w.building));
+    function parity(tag, walled) {
+      const d1 = S.serialize(g);
+      const g2 = S.deserialize(JSON.parse(JSON.stringify(d1)));
+      const home2 = g2.settlements.find(s => s.id === home.id);
+      check(`${tag}: save is byte-identical`, JSON.stringify(d1) === JSON.stringify(S.serialize(g2)));
+      check(`${tag}: tilledBy agrees`, g2.tilledBy[p.i] === g.tilledBy[p.i],
+        `${g.tilledBy[p.i]} vs ${g2.tilledBy[p.i]}`);
+      check(`${tag}: the tile is ${walled ? 'untilled' : 'tilled'} on both sides`,
+        walled ? (g.tilledBy[p.i] === 0 && g2.tilledBy[p.i] === 0)
+          : (g.tilledBy[p.i] === home.id && g2.tilledBy[p.i] === home.id));
+      check(`${tag}: s.tilled agrees`,
+        JSON.stringify([...home.tilled].sort((a, x) => a - x)) === JSON.stringify([...home2.tilled].sort((a, x) => a - x)));
+      check(`${tag}: fertility at the tile agrees`, g2.map.fert[p.i] === g.map.fert[p.i],
+        `${g.map.fert[p.i]} vs ${g2.map.fert[p.i]}`);
+      check(`${tag}: scorched state agrees`, g2.pillaged.has(p.i) === g.pillaged.has(p.i),
+        `${g.pillaged.has(p.i)} vs ${g2.pillaged.has(p.i)}`);
+      check(`${tag}: incomeRate agrees`, Math.abs(S.incomeRate(g, home) - S.incomeRate(g2, home2)) < 1e-9,
+        `${S.incomeRate(g, home)} vs ${S.incomeRate(g2, home2)}`);
+    }
+    parity('mid-construction', true);
+    run(g, 600);
+    const built = g.walls.find(w => w.x === p.x && w.y === p.y);
+    check('the wall finished', !!built && !built.building);
+    parity('finished', true);
+    // and the moment that now writes fertility: the wall razed, the plot
+    // reclaimed scorched (#219)
+    g.blobs.length = 0;
+    built.hp = 0.5;
+    spawnBlob(g, 1, p.x + 1.5, p.y + 0.5, 3, 0);
+    run(g, 30);
+    check('the wall was razed and the plot reclaimed',
+      !g.walls.some(w => w.id === built.id) && g.tilledBy[p.i] === home.id && g.pillaged.has(p.i));
+    parity('destroyed', false);
+  }
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall checks passed');

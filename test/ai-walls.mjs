@@ -122,6 +122,18 @@ for (const diffKey of ['hard', 'veryhard']) {
   check('walls denied no farm plots', JSON.stringify(plots) === JSON.stringify(plots2),
     `${JSON.stringify(plots)} vs ${JSON.stringify(plots2)}`);
 
+  // #219 made own farmland legal for the PLAYER, and a staked site clears
+  // tilledBy — so the legal-ground check above can no longer see a plot
+  // the commander ate. Strip the walls and look at the rings that come
+  // back: no owner-1 wall may stand where its own farmland would be.
+  const ownPlots = new Set();
+  for (const s of gNoWalls.settlements) {
+    if (s.owner !== 1 || s.building) continue;
+    for (const i of s.tilled) ownPlots.add(i);
+  }
+  const onPlot = own.filter(w => ownPlots.has(w.y * mw + w.x)).map(w => [w.x, w.y]);
+  check('no owner-1 wall stands on its own farmland (#219)', onPlot.length === 0, JSON.stringify(onPlot));
+
   // both tiers garrison and arm what they raise, fed by the territory drip
   const manned = own.find(w => !w.building && S.wallGarrisonTotal(w) > 0);
   check('a finished wall ended the run garrisoned', !!manned,
