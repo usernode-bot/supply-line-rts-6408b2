@@ -13,6 +13,7 @@ import * as TUT from './tutorial.js';
 import * as CT from './controls-tour.js';
 import * as OFF from './offline.js';
 import { dist, fertTier, FERT_TIERS } from './mapgen.js';
+import { pickTol, blobOverlap, footprintDist, tileDist } from './pick.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -1714,6 +1715,65 @@ function wallAtPoint(world) {
   return id ? game.walls.find(w => w.id === id) || null : null;
 }
 
+// -- what-you-see-is-what-you-click picking (#224) ---------------------
+// The inspect/selection dispatch used to grab with `24 / view.scale`
+// world units of slack, which is ~1.7 tiles at the default zoom and 6–8
+// tiles zoomed right out. These three helpers anchor every pick on what
+// the RENDERER draws plus one fixed 8 px band (pick.js), so the tile
+// beside a keep selects the tile and a field-hand dot is the size of the
+// dot. The order/route flows deliberately keep their generous reach —
+// they ask before acting (see showOrderPopup).
+
+// The blob whose DRAWN circle (plus band) the point lands on. Candidates
+// are ranked by CENTRE distance, so a lone scout standing on top of a
+// 2.2-tile stack wins the tap aimed at it while the stack still wins
+// everywhere else inside its own circle.
+function pickBlobAt(world, filter) {
+  let best = null, bd = Infinity;
+  const tol = pickTol(view.scale);
+  for (const b of game.blobs) {
+    if (b.dead) continue;
+    if (filter && !filter(b)) continue;
+    const ov = blobOverlap(view.scale, {
+      x: b.x, y: b.y, radius: S.blobRadius(b), working: b.working != null,
+    }, world.x, world.y);
+    if (ov < -tol) continue;
+    const d = dist(b.x, b.y, world.x, world.y);
+    if (d < bd) { bd = d; best = b; }
+  }
+  return best;
+}
+
+// The settlement whose 2×2 footprint the point lands on, within the band.
+// Rectangle distance, not centre distance — 1.9 from the centre reached
+// ~0.9 tiles past the grounds onto the neighbouring land.
+function settlementNearFootprint(world, tol) {
+  const t = tol != null ? tol : pickTol(view.scale);
+  let best = null, bd = Infinity;
+  for (const s of game.settlements) {
+    const d = footprintDist(s.x, s.y, world.x, world.y);
+    if (d <= t && d < bd) { bd = d; best = s; }
+  }
+  return best;
+}
+
+// The wall whose tile the point lands on, within the band. An EXACT tile
+// hit always wins (so clicking an enemy wall's tile means that wall, even
+// with one of yours next door); only the band fallback takes `filter`, so
+// a neighbouring enemy wall can't shadow your own garrison target.
+function wallNearPoint(world, tol, filter) {
+  const t = tol != null ? tol : pickTol(view.scale);
+  const exact = wallAtPoint(world);
+  if (exact) return exact;
+  let best = null, bd = Infinity;
+  for (const w of game.walls) {
+    if (filter && !filter(w)) continue;
+    const d = tileDist(w.x, w.y, world.x, world.y);
+    if (d <= t && d < bd) { bd = d; best = w; }
+  }
+  return best;
+}
+
 // Whether the viewer may see/target this enemy wall: currently visible
 // or remembered in the viewer's wall memory.
 function wallKnown(w) {
@@ -1729,10 +1789,11 @@ function tutTapAllowed(world) {
   if (ui.pending) return TUT.allowsTarget(world); // resolving an armed order
   if (!orderPopup.classList.contains('hidden')) return true; // tap only dismisses it
   if (TUT.allowsTarget(world)) return true; // the step's world target (order/attack)
-  const hitR = 24 / view.scale;
-  const b = S.blobAt(game, world.x, world.y, hitR);
+  // the SAME picks onTap's dispatch uses (#224), so the gate and the
+  // dispatch can never disagree about what the tap would select
+  const b = pickBlobAt(world);
   if (b && TUT.allowsSelect({ kind: 'blob', id: b.id })) return true;
-  const st = settlementAtFootprint(world) || S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+  const st = settlementAtFootprint(world) || settlementNearFootprint(world);
   if (st && TUT.allowsSelect({ kind: 'settlement', id: st.id })) return true;
   return false;
 }
@@ -1740,7 +1801,6 @@ function tutTapAllowed(world) {
 function onTap(world, pointerType, screen) {
   if (!game || game.result) return;
   if (game.tutorial && !tutTapAllowed(world)) { TUT.nudge(); return; }
-  const hitR = 24 / view.scale;
   if (ui.pending) { resolvePending(world, pointerType, screen); return; }
   // a tap while the order popup is open only dismisses it
   if (!orderPopup.classList.contains('hidden')) { hideOrderPopup(); return; }
@@ -1754,7 +1814,7 @@ function onTap(world, pointerType, screen) {
   // the active selection to it.
   if (mobile && ui.touchMode === 'drag') {
     const dst = fp && fp.owner === me
-      ? fp : S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+      ? fp : settlementNearFootprint(world);
     if (dst && dst.owner === me) {
       ui.selected = { kind: 'settlement', id: dst.id };
       renderPanel(true);
@@ -1770,8 +1830,10 @@ function onTap(world, pointerType, screen) {
     renderPanel(true);
     return;
   }
-  // prefer own blob, then own settlement
-  let b = S.blobAt(game, world.x, world.y, hitR);
+  // prefer own blob, then own settlement — the drawn-circle pick (#224),
+  // so a unit standing NEXT to the wall/tile you aimed at no longer
+  // swallows the tap and a field-hand dot is only as big as it looks
+  let b = pickBlobAt(world);
   const eb = b && b.owner !== me ? b : null;
   if (b && b.owner !== me) b = null;
   if (b) {
@@ -1781,7 +1843,7 @@ function onTap(world, pointerType, screen) {
     // Select / Move / Deselect instead of silently swapping the selection,
     // so a stray tap near a group can't lose what's already picked. With
     // nothing selected there's nothing to lose — select it directly.
-    if (mobile && sel.length > 0) { showSelectPopup(b, screen); return; }
+    if (mobile && sel.length > 0) { showSelectPopup(b, screen, world); return; }
     ui.selected = { kind: 'blob', id: b.id };
     renderPanel(true);
     return;
@@ -1796,7 +1858,7 @@ function onTap(world, pointerType, screen) {
     renderPanel(true);
     return;
   }
-  const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+  const st = settlementNearFootprint(world);
   if (st && st.owner === me) {
     if (mobile && sel.length) {
       // with units in hand the tap is ambiguous — ask: switch to the
@@ -1933,13 +1995,30 @@ function findEnemyTargetAt(world) {
 // the move dispatch must NEVER let a nearby enemy steal it — an attacker
 // standing beside a wall used to outrank the wall itself. Mirrors the
 // own-entity-first precedence the route flows already use (#142, #187).
+//
+// Returns the SNAPPED destination too (#222). The sim's garrison rules
+// are tile-exact: `isOwnGarrisonSpot` decides whether a march may push
+// through contact, and the arrival fold reads the tile the group ends
+// up standing on. A wall is a single ~14 px tile at the default zoom, so
+// handing opMove the raw click point meant a near-miss silently became
+// "walk to the tile next door and stop" — the army halts a tile short
+// (or, once contact holds it, several tiles short) and never enters.
+// Both the tile hit and the settlement grounds now carry the same 8 px
+// forgiveness band every other pick uses, and callers order the group to
+// `x, y` instead of the cursor.
 function ownGarrisonTargetAt(world) {
-  const wl = wallAtPoint(world);
-  if (wl && wl.owner === me && !wl.building) return { kind: 'wall', id: wl.id };
+  const wl = wallNearPoint(world, null, w => w.owner === me && !w.building);
+  if (wl && wl.owner === me && !wl.building) {
+    return { kind: 'wall', id: wl.id, x: wl.x + 0.5, y: wl.y + 0.5 };
+  }
   const fp = settlementAtFootprint(world);
-  if (fp && fp.owner === me && !fp.building) return { kind: 'settlement', id: fp.id };
-  const st = S.settlementAt(game, world.x, world.y, 1.9);
-  if (st && st.owner === me && !st.building) return { kind: 'settlement', id: st.id };
+  if (fp && fp.owner === me && !fp.building) {
+    return { kind: 'settlement', id: fp.id, x: fp.x + 1, y: fp.y + 1 };
+  }
+  const st = settlementNearFootprint(world);
+  if (st && st.owner === me && !st.building) {
+    return { kind: 'settlement', id: st.id, x: st.x + 1, y: st.y + 1 };
+  }
   return null;
 }
 
@@ -1974,8 +2053,10 @@ function onRightClick(world) {
   const tot = blobs.reduce((s, b) => s + S.total(b), 0);
   const pureSupply = tot > 0 && blobs.reduce((s, b) => s + b.count.supply, 0) === tot;
   if (pureSupply && !ui.pending) {
-    const hitR = Math.max(1.5, 24 / view.scale);
-    const fp = settlementAtFootprint(world) || S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+    // footprint + band (#224): the old max(1.9, hitR) radius armed a
+    // route from a couple of tiles of open ground away, swallowing plain
+    // move orders for carriers walking past a town
+    const fp = settlementAtFootprint(world) || settlementNearFootprint(world);
     if (fp && fp.owner === me && !fp.building) {
       ui.pending = 'route';
       ui.routeSrc = fp.id;
@@ -1986,21 +2067,30 @@ function onRightClick(world) {
     }
   }
   // own wall / own settlement under the cursor is a garrison march, never
-  // an attack on whatever enemy happens to stand beside it (#201)
-  orderMove(blobs, world, ownGarrisonTargetAt(world) ? null : findEnemyTargetAt(world));
+  // an attack on whatever enemy happens to stand beside it (#201) — and
+  // it marches to the entity's own tile, not the raw cursor point (#222)
+  const garr = ownGarrisonTargetAt(world);
+  orderMove(blobs, world, garr ? null : findEnemyTargetAt(world), garr);
 }
 
 // Shared move dispatch: issue the order to every selected blob, ping the
 // destination, and confirm field assignments (#111) so a farmland click
 // visibly reads as "go work that plot", not a plain move.
-function orderMove(blobs, world, target) {
+//
+// `garr` is the own wall / settlement the click resolved to (#222). Its
+// snapped centre becomes the destination handed to the sim, so the order
+// lands ON the garrison tile — the only destination the sim treats as a
+// march into cover. It is applied BEFORE doMove, because doMove relays
+// the same coords over PvP and both sides must resolve them identically.
+function orderMove(blobs, world, target, garr) {
+  const dest = garr ? { x: garr.x, y: garr.y } : world;
   let err = null, ok = 0, fielded = 0;
   for (const b of blobs) {
-    const r = doMove(b, world.x, world.y, target);
+    const r = doMove(b, dest.x, dest.y, target);
     if (r.err) err = r.err;
     else { ok++; fielded += r.fielded || 0; }
   }
-  if (ok) pingOrder(world, target);
+  if (ok) pingOrder(dest, target);
   if (fielded) toast(`🌱 ${fielded} farmer${fielded === 1 ? '' : 's'} heading to the fields`);
   else if (err) toast(err);
 }
@@ -2273,14 +2363,21 @@ function showOrderPopup(world, screen, target) {
 // to the tapped blob's spot while keeping it selected, and Deselect
 // clears the current selection. With nothing selected the tap selects
 // the blob directly (see onTap) and this popup never shows.
+//
+// When the tapped point is one of the player's OWN garrison spots (#222)
+// the move button becomes an explicit Garrison aimed at that tile rather
+// than at the tapped unit's feet: a wall under attack is exactly where
+// friendly defenders cluster, so this used to be the only reachable
+// action next to it — and it marched the group alongside the wall.
 let tapBlobId = null;
-function showSelectPopup(b, screen) {
+function showSelectPopup(b, screen, world) {
   CT.signal('ask-popup');
-  ui.orderTarget = { x: b.x, y: b.y };
+  const garr = world ? ownGarrisonTargetAt(world) : null;
+  ui.orderTarget = garr ? { x: garr.x, y: garr.y } : { x: b.x, y: b.y };
   ui.orderTargetEnt = null;
   tapBlobId = b.id;
   orderPopup.innerHTML = `
-    <button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">📍 Move here</button>
+    <button data-act="pmove" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">${garr ? '🛡️ Garrison' : '📍 Move here'}</button>
     <button data-act="pselect" class="btn px-3 rounded-lg text-left bg-violet-700 hover:bg-violet-600 text-white">👆 Select</button>
     <button data-act="pclose" class="btn px-3 rounded-lg text-left bg-zinc-900 text-zinc-400 hover:bg-zinc-800">✕ Deselect</button>`;
   orderPopup.classList.remove('hidden');
@@ -2819,7 +2916,10 @@ orderPopup.addEventListener('click', (e) => {
   }
   if (!world) return;
   const target = act === 'pattack' ? targetEnt : null;
-  orderMove(selectedBlobs(), world, target);
+  // a Move/Garrison onto an own wall or settlement snaps to that tile
+  // (#222); an explicit Attack keeps the raw point and its target
+  const garr = target ? null : ownGarrisonTargetAt(world);
+  orderMove(selectedBlobs(), world, target, garr);
   renderPanel(true);
 });
 
@@ -2886,8 +2986,10 @@ function resolvePending(world, pointerType, screen) {
   if (pending === 'move') {
     if (!blobs.length) return;
     // tapping an enemy targets it; an own wall/settlement is a garrison
-    // march that a neighbouring enemy can never steal (#201)
-    orderMove(blobs, world, ownGarrisonTargetAt(world) ? null : findEnemyTargetAt(world));
+    // march that a neighbouring enemy can never steal (#201), aimed at
+    // that entity's own tile rather than the tap point (#222)
+    const garr = ownGarrisonTargetAt(world);
+    orderMove(blobs, world, garr ? null : findEnemyTargetAt(world), garr);
   } else if (pending === 'route') {
     // supply routes take two taps (#131): first the source settlement the
     // caravans load from, then the destination. All selected pure-supply
@@ -3479,6 +3581,15 @@ function renderPanelInner(force) {
       const tier = fertTier(f), otier = fertTier(o);
       const label = FERT_TIERS[tier];
       const tb = game.tilledBy[i] && tileSeen(game.tilledBy[i]) ? game.settlements.find(s => s.id === game.tilledBy[i]) : null;
+      // field hands standing here (#224): the tightened blob pick means a
+      // tap on a worked plot now reaches the tile instead of the dot, so
+      // say what's on it — otherwise reading fertility under a farmer
+      // looks like the tap simply missed the farmer
+      const tw = game.map.w;
+      const hands = game.blobs.filter(b => !b.dead && b.working != null
+        && Math.floor(b.y) * tw + Math.floor(b.x) === i
+        && (b.owner === me || S.isVisible(game, b.x, b.y)));
+      const mineHands = hands.filter(b => b.owner === me).length;
       setPanelHTML(`
         <div class="flex items-center justify-between mb-1">
           <span class="font-semibold">🟩 ${label} land</span>
@@ -3486,6 +3597,7 @@ function renderPanelInner(force) {
         </div>
         <div class="h-2 rounded bg-zinc-800 overflow-hidden mb-2"><div class="h-full bg-emerald-500" style="width:${tier * 25}%"></div></div>
         ${tb ? `<div class="text-xs ${tb.owner === me ? 'text-amber-300' : 'text-red-400'} mb-1">🌾 ${tb.owner === me ? 'Farmland of your settlement' : 'Enemy farmland'}</div>` : ''}
+        ${hands.length ? `<div class="text-xs ${mineHands === hands.length ? 'text-emerald-300' : 'text-red-400'} mb-1">🌱 ${hands.length} ${mineHands === hands.length ? '' : 'enemy '}field hand${hands.length === 1 ? '' : 's'} working here</div>` : ''}
         ${game.pillaged.has(i) ? `<div class="text-xs text-orange-400">🔥 Scorched — ${S.workedPlots(game).has(i) ? 'a farmer is restoring it fast' : 'recovers slowly; a farmer working it restores it much faster'}</div>` : ''}`);
     }
     return;
@@ -4039,6 +4151,110 @@ function shotWallRazed() {
   updateHUD();
 }
 
+// The tightened blob pick (#224) is only visible in a state no plain URL
+// reaches: a farmland tile with a field hand STANDING ON IT, selected as
+// a TILE. Before the fix the hand's ~2-tile invisible halo won that tap
+// and the fertility inspector was unreachable. `?shot=tile-under-farmer`
+// boots a solo match on a FIXED seed, fields the home garrison's farm
+// hands onto their plots, selects the tile the nearest hand is working,
+// and pauses — so the fertility readout and the new "field hands working
+// here" line render from a URL alone. Pure local UI state, no DB writes.
+function shotTileUnderFarmer() {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot224', 'small', 'normal');
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  if (!home) return;
+  // the opening garrison holds farm hands: field them so they disperse
+  // onto real plots the same way the Field button does
+  if (home.garrison.farm > 0) S.opFieldRole(g, home, 'farm', home.garrison.farm);
+  startMatch(g);
+  // let them walk out and settle on their plots, then freeze
+  for (let i = 0; i < 120; i++) S.step(g);
+  // the hand nearest the keep whose tile is plain farmland (not the 2×2
+  // grounds), scanned in a fixed order so the seed always picks the same
+  let pick = null, bd = Infinity;
+  for (const b of g.blobs) {
+    if (b.dead || b.owner !== 0 || b.working == null) continue;
+    const tx = Math.floor(b.x), ty = Math.floor(b.y);
+    const i = ty * g.map.w + tx;
+    if (g.map.mountain[i] || g.settAt[i] || !g.map.fert[i]) continue;
+    const d = Math.hypot(tx + 0.5 - (home.x + 1), ty + 0.5 - (home.y + 1));
+    if (d < bd || (d === bd && i < pick.i)) { bd = d; pick = { x: tx, y: ty, i }; }
+  }
+  if (!pick) return;
+  ui.selected = { kind: 'tile', i: pick.i };
+  view.cx = pick.x + 0.5;
+  view.cy = pick.y + 0.5;
+  view.scale = 40; // close enough that the dot and the tile read apart
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+}
+
+// The #222 case only exists mid-siege: an own finished wall being
+// battered, with reinforcements in hand. `?shot=wall-under-siege` boots a
+// solo match on a FIXED seed, drops a manned wall beside the player's
+// start, parks the enemy's opening war party adjacent and steps a few
+// ticks so `lastHitT` is live (the wall reads as under attack), then
+// selects the wall — so the panel's "reinforcements can march in even
+// while the wall is under attack" line renders against a wall that
+// actually is. A player war party waits a few tiles off, the group a
+// tester would order in. Pure local UI state, no DB writes.
+function shotWallUnderSiege() {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot222', 'small', 'normal');
+  const start = g.map.starts[0];
+  let spot = null;
+  for (let r = 3; r <= 7 && !spot; r++) {
+    for (let dy = -r; dy <= r && !spot; dy++) {
+      for (let dx = -r; dx <= r && !spot; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = start.x + 1 + dx, y = start.y + 1 + dy;
+        // off own farmland (#219): untilling the plot would shift pixels
+        const res = S.canPlaceWall(g, 0, x, y);
+        if (res.ok && !res.farm) spot = { x, y };
+      }
+    }
+  }
+  if (!spot) return;
+  const w = S.spawnFinishedWall(g, 0, spot.x, spot.y, { deploy: 2, supply: 0, farm: 0 });
+  if (!w) return;
+  startMatch(g);
+  const foe = g.blobs.find(b => b.owner === 1 && b.count.deploy > 0);
+  if (foe) {
+    foe.x = spot.x + 1.5; foe.y = spot.y + 0.5;
+    foe.prevX = foe.x; foe.prevY = foe.y;
+    foe.order = null; foe.path = null; foe.pathGoal = null;
+    foe.pillaging = false; // no scorch marks that aren't the siege's
+  }
+  // the player's own war party, parked where a tester would find it
+  const mine = g.blobs.find(b => b.owner === 0 && b.count.deploy > 0);
+  if (mine) {
+    mine.x = spot.x - 2.5; mine.y = spot.y + 0.5;
+    mine.prevX = mine.x; mine.prevY = mine.y;
+    mine.order = null; mine.path = null; mine.pathGoal = null;
+  }
+  // a few ticks of real contact: w.lastHitT goes live off honest sim
+  // output, so the panel's under-attack framing isn't staged
+  for (let i = 0; i < 6; i++) {
+    if (foe) { foe.order = null; foe.path = null; foe.x = spot.x + 1.5; foe.y = spot.y + 0.5; }
+    S.step(g);
+  }
+  ui.selected = { kind: 'wall', id: w.id };
+  view.cx = spot.x + 0.5;
+  view.cy = spot.y + 0.5;
+  view.scale = 34;
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+}
+
 // The in-combat / rear-attack panel lines (#201) exist only while a
 // selected group is actually under fire, which no plain URL can reach —
 // so `?shot=in-combat` boots a solo match on a FIXED seed and stages a
@@ -4239,6 +4455,12 @@ if (SHOT === 'wall-start') {
 }
 if (SHOT === 'wall-razed') {
   try { shotWallRazed(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'tile-under-farmer') {
+  try { shotTileUnderFarmer(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'wall-under-siege') {
+  try { shotWallUnderSiege(); } catch (e) { console.warn('shot link failed', e); }
 }
 if (BTN_SHOTS[SHOT]) {
   try { shotControlsButton(BTN_SHOTS[SHOT]); } catch (e) { console.warn('shot link failed', e); }

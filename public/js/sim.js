@@ -1477,6 +1477,18 @@ function carryGarrisonArmUp(game, holder, armUp, garrTotal) {
   return true;
 }
 
+// Whether (x, y) lands on one of `owner`'s own FINISHED wall tiles —
+// the tile-exact half of isOwnGarrisonSpot, without the settlement
+// radius (#222).
+function ownWallTileAt(game, owner, x, y) {
+  const tx = Math.floor(x), ty = Math.floor(y);
+  if (tx < 0 || ty < 0 || tx >= game.map.w || ty >= game.map.h) return false;
+  const wid = game.wallAt[ty * game.map.w + tx];
+  if (!wid) return false;
+  const w = game.walls.find(x2 => x2.id === wid);
+  return !!(w && w.owner === owner && !w.building);
+}
+
 // Whether (x, y) is a spot where `owner`'s arriving units fold into a
 // garrison (#201): one of its own finished wall tiles, or inside the
 // settlement-absorb radius of one of its own completed settlements —
@@ -1504,7 +1516,23 @@ export function opMove(game, b, x, y, target) {
   leaveRoute(game, b);
   b.working = null;
   const o = { type: 'move', x, y };
-  if (target && target.kind && target.id != null) { o.tkind = target.kind; o.tid = target.id; }
+  // an order onto one of the mover's OWN WALL TILES never carries an
+  // attack target (#222): o.tkind hands movement to tickTargetedMove,
+  // which stops at melee/siege range and never reaches the arrival fold,
+  // so `wall destination + tkind` was a silent dead end — the group
+  // standing beside its own wall forever. Enforced here so the player
+  // dispatch, the AI and the PvP relay all resolve it the same way.
+  //
+  // Deliberately TILE-EXACT and walls only, NOT the whole
+  // isOwnGarrisonSpot test: that one also covers a 1.9 radius around own
+  // settlements, and cancelling a target there would forbid attacking an
+  // enemy standing in your own town square (it broke the AI's caravan
+  // raids). No enemy can ever stand on your wall tile — blockedTiles
+  // keeps them off it — so nothing legitimate is lost here.
+  const garrisonSpot = isOwnGarrisonSpot(game, b.owner, x, y);
+  if (!ownWallTileAt(game, b.owner, x, y) && target && target.kind && target.id != null) {
+    o.tkind = target.kind; o.tid = target.id;
+  }
   // #201 — two escape hatches from the melee hold in tickOrder, both
   // DERIVED here from authoritative state (never trusted from a client),
   // so the AI and relayed PvP orders get them identically:
@@ -1514,7 +1542,7 @@ export function opMove(game, b, x, y, target) {
   //               or completed settlements, so the march must push through
   //               contact to actually ARRIVE (the absorb is arrival-gated)
   if (game.tick - b.meleeT < 5) o.disengage = true;
-  if (isOwnGarrisonSpot(game, b.owner, x, y)) o.garrison = true;
+  if (garrisonSpot) o.garrison = true;
   b.order = o;
   b.chaseId = null;
   // soft enemy avoidance (#169): plan around visible enemy war parties
@@ -2092,6 +2120,23 @@ function ensurePath(game, b, x, y, avoid) {
     const merged = new Set(blocked);
     for (const i of avoid) merged.add(i);
     merged.delete(tileIdx(game, b.x, b.y));
+    // ...and never let it move a GARRISON destination (#222). findPath
+    // silently RETARGETS a blocked goal to the nearest passable tile
+    // within 6 and reports success, so an avoided destination didn't fail
+    // here — it came back as a perfectly good path to somewhere ELSE.
+    // That is how an army ordered onto its own wall under attack ended up
+    // standing two tiles short with its order quietly completed: the
+    // attacker's avoidance ring (blobRadius + 1, ~2.4 tiles for a
+    // 10-stack) covers the wall tile itself, and the fold is tile-exact.
+    //
+    // Scoped to garrison destinations ON PURPOSE. Excluding EVERY
+    // destination is the more principled rule — avoidance should shape
+    // the route, not the goal — but it re-routes AI marches all over the
+    // map, and the committed commander ratings were measured against
+    // today's pathing (see CLAUDE.md). Garrison pushes are the only place
+    // the substitution silently voids the order, so that is all this
+    // touches; the wider rule belongs with a recalibration.
+    if (isOwnGarrisonSpot(game, b.owner, x, y)) merged.delete(tileIdx(game, x, y));
     const pa = findPath(game.map, b.x, b.y, x, y, pathFog(game, b.owner), merged);
     if (pa) { b.path = pa; b.pathGoal = { x, y }; if (b.order) delete b.order.breach; return true; }
   }
@@ -2233,6 +2278,12 @@ function tickOrder(game, b) {
   // The withdrawal exemption lapses once the group has been clear of
   // melee for ~2 s, so the rest of a long order can be halted again.
   if (o.disengage && game.tick - b.meleeT > 20) delete o.disengage;
+  // re-derive the garrison push each tick (#222): the flag used to be
+  // fixed at order time, so reinforcements sent to a wall that was still
+  // BUILDING (or one razed and rebuilt mid-march) kept marching as an
+  // ordinary move and halted at the first contact, short of the tile.
+  // Only ever turns the flag ON.
+  if (!o.garrison && isOwnGarrisonSpot(game, b.owner, o.x, o.y)) o.garrison = true;
   if (b.count.deploy > 0) {
     b.chaseId = null;
     if (game.tick - b.meleeT < 5 && !o.disengage && !o.garrison) return;
@@ -2293,6 +2344,27 @@ function tickOrder(game, b) {
         game.events.push({ owner: b.owner, msg: '🔨 Construction started', x: spot.x + 1, y: spot.y + 1 });
       }
       return;
+    }
+    // arrival on an own wall that is STILL GOING UP (#222): an unfinished
+    // wall holds no garrison, so the fold below skips it and the group
+    // used to stand on the rubble in silence forever. Hold the tile with
+    // the order still live — the next arrival tick folds them in the
+    // moment construction completes — and say so exactly once.
+    if (b.working == null) {
+      const bwId = game.wallAt[tileIdx(game, b.x, b.y)];
+      const bw = bwId ? game.walls.find(x => x.id === bwId) : null;
+      if (bw && bw.owner === b.owner && bw.building) {
+        b.path = null;
+        if (!o.buildWarned) {
+          o.buildWarned = true;
+          game.events.push({
+            owner: b.owner,
+            msg: '🧱 The wall isn\'t finished — nothing to garrison yet',
+            x: bw.x + 0.5, y: bw.y + 0.5,
+          });
+        }
+        return;
+      }
     }
     b.order = null;
     b.pathGoal = null;
@@ -2904,6 +2976,11 @@ function fleeFarmers(game, victim) {
     if (b.dead || b.owner !== victim.owner || !isFarmerGroup(b)) continue;
     if (b !== victim && dist(b.x, b.y, victim.x, victim.y) > C.FARM_FLEE_RADIUS) continue;
     if (b.order && b.order.flee) continue; // already running
+    // a deliberate march into cover already IS the flight (#222): don't
+    // redirect a group that was explicitly ordered onto an own wall or
+    // settlement — spare farm hands sent to man a wall under attack were
+    // being pulled home the instant the first one took a hit
+    if (b.order && b.order.type === 'move' && b.order.garrison) continue;
     let s = b.working != null ? game.settlements.find(x => x.id === b.working) : null;
     if (!s || s.building) {
       s = null;
