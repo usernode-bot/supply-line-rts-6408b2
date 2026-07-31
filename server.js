@@ -15,20 +15,15 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const IS_STAGING = process.env.USERNODE_ENV === 'staging';
 
 // Platform-issued user tokens are RS256, signed with a key whose PUBLIC half
-// is all we hold (USERNODE_JWT_PUBLIC_KEY; JWT_SECRET is its deprecated alias
-// carrying the same PEM). Pinning the algorithm is therefore mandatory, not
-// cosmetic: an unpinned verifier would also accept HS256 and treat that
-// public PEM as an HMAC secret, letting any caller forge any user.
+// is all we hold (USERNODE_JWT_PUBLIC_KEY). Pinning the algorithm is therefore
+// mandatory, not cosmetic: an unpinned verifier would also accept HS256 and
+// treat that public PEM as an HMAC secret, letting any caller forge any user.
 //
-// Issuer / audience / purpose are pinned too, but only when the environment
-// actually supplies them — this app predates that cutover, and refusing every
-// token because USERNODE_APP_ID is absent would lock out real users rather
-// than protect them.
-const JWT_PUBLIC_KEY = (process.env.USERNODE_JWT_PUBLIC_KEY || process.env.JWT_SECRET || '')
+// Issuer, audience and the `pur` purpose claim are pinned too, so another
+// app's token — or a token minted for a different purpose — can't be replayed
+// here.
+const USERNODE_JWT_PUBLIC_KEY = (process.env.USERNODE_JWT_PUBLIC_KEY || '')
   .replace(/\\n/g, '\n');
-const APP_AUDIENCE = process.env.USERNODE_APP_ID
-  ? 'usernode:app:' + process.env.USERNODE_APP_ID
-  : null;
 
 // Paths that stay open without authentication. Add a path here (and add it
 // with `app.get`/`app.post` below) if you deliberately want it public.
@@ -45,16 +40,14 @@ app.use(express.json({ limit: '2mb' }));
 // on subsequent fetches.
 app.use((req, res, next) => {
   const token = req.query.token || req.headers['x-usernode-token'];
-  if (token && JWT_PUBLIC_KEY) {
+  if (token && USERNODE_JWT_PUBLIC_KEY) {
     try {
-      // Algorithm: always. Audience (the defence against another app's token
-      // being replayed here) whenever USERNODE_APP_ID is set. Issuer is left
-      // unpinned deliberately — with RS256 enforced, a token has to carry a
-      // real platform signature, and audience already scopes it to this app.
-      const opts = { algorithms: ['RS256'] };
-      if (APP_AUDIENCE) opts.audience = APP_AUDIENCE;
-      const claims = jwt.verify(token, JWT_PUBLIC_KEY, opts);
-      if (claims && (claims.pur == null || claims.pur === 'iframe')) req.user = claims;
+      const claims = jwt.verify(token, USERNODE_JWT_PUBLIC_KEY, {
+        algorithms: ['RS256'],
+        issuer: 'usernode',
+        audience: 'usernode:app:' + process.env.USERNODE_APP_ID,
+      });
+      if (claims && claims.pur === 'iframe') req.user = claims;
     } catch {}
   }
 
