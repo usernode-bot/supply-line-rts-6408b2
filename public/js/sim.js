@@ -16,7 +16,8 @@ import * as SUP from './supply.js';
 // stale recordings keep looking playable and quietly replay wrong. The flip
 // side: bumping retires every existing replay, so it tracks real behaviour
 // changes, not cosmetic edits to sim files.
-export const SIM_VERSION = 2;
+// v3: supply carriers eat from their own cargo below half rations (#235).
+export const SIM_VERSION = 3;
 
 // The sim's own seeded PRNG (#223). Every draw the simulation makes runs
 // through here so a match is a pure function of (seed, sizeKey, difficulty,
@@ -2677,14 +2678,10 @@ function tickCarrier(game, b) {
     o.cargo -= taken;
     if (taken > 0) SUP.recordDelivery(game, route, taken);
     if (o.cargo <= 0.01) { o.phase = 'return'; o.running = false; b.path = null; }
-    else if (taken < 0.1 && b.food < 0.25 * foodCap(b)) {
-      // destination is topped off — or only sips a trickle, like a wall
-      // garrison's small rations meter (#187) — park at the dock and keep
-      // it fed as it eats instead of hauling the leftover cargo home. The
-      // parked carrier nibbles its own cargo so it never starves here (#143).
-      const bite = Math.min(o.cargo, foodCap(b) - b.food);
-      o.cargo -= bite; b.food += bite;
-    }
+    // A carrier parked at a topped-off dock used to nibble its cargo here
+    // (#143). That fixed one spot on one leg; tickFood now feeds ANY
+    // loaded carrier from its own load, on any leg (#235), so the narrow
+    // case is redundant.
   } else { // return
     if (dist(b.x, b.y, src.x + 1, src.y + 1) <= SUP.LOAD_RANGE) { o.phase = 'load'; o.wait = 0; b.path = null; return; }
     if (!b.path || !b.path.length) {
@@ -3365,6 +3362,26 @@ function tickFood(game, b) {
       game.events.push({ owner: b.owner, msg: '🍂 The land here is stripped bare!', x: b.x, y: b.y });
     }
   }
+  // #235: a supply carrier is standing on ten food per unit and will not
+  // starve next to it. Once its own bellies drop below half, it eats from
+  // the load it's carrying — the same "top up from the stash you're
+  // sitting on" rule wall garrisons already follow (see the garrFood
+  // refeed in tickWall). Bite is capped at 10% of head-count per tick so
+  // a caravan sips rather than swallowing its delivery in one go, and the
+  // rule applies on every leg (outbound, docked, returning), not just at
+  // a topped-off destination like the old #143 patch. Cargo lost this way
+  // is real: a long haul through hostile ground arrives lighter.
+  if (b.order && b.order.type === 'route' && (b.order.cargo || 0) > 0.0001) {
+    const cap = foodCap(b);
+    if (b.food < 0.5 * cap) {
+      const bite = Math.min(cap - b.food, b.order.cargo, n * 0.1);
+      if (bite > 0) {
+        b.order.cargo -= bite;
+        b.food += bite;
+        b.eatingCargo = game.tick;   // transient panel marker — never serialized
+      }
+    }
+  }
   // two-tier supply warnings (#105): a mild nudge when an army drops out
   // of its well-fed combat bonus (< 75%, the fedMult boundary), the skull
   // only once it's genuinely starving — stuck at zero food long enough to
@@ -3509,6 +3526,52 @@ export function farmYield(game, s) {
 export function incomeRate(game, s) {
   const y = farmYield(game, s);
   return y.base + y.farmers;
+}
+
+// #234: what a settlement founded at (ax, ay) would actually be worth,
+// scored from the SAME arithmetic the live settlement uses. Deliberately
+// runs previewFields → farmYield rather than reimplementing the rates, so
+// a placement readout can never promise a number the sim won't pay.
+//
+//   plots      claimed farm cells (previewFields — contested ground excluded)
+//   meanFert   average fertility across them
+//   nowPerMin  food/min the day it's founded (nobody farming yet)
+//   maxPerMin  food/min with every worthwhile plot manned
+//   maxFarmers farmers needed to reach maxPerMin
+//
+// Rates are per-tick internally; ×600 converts to per minute (10 ticks/s).
+const PER_MIN = 600;
+export function previewScore(game, ax, ay, owner) {
+  const cells = previewFields(game, ax, ay, owner);
+  // a throwaway stand-in with id -1: no blob can be `working` it, so
+  // farmYield's farmer term is 0 — exactly the day-one settlement
+  const y = farmYield(game, { id: -1, tilled: cells });
+  let fertSum = 0, worthwhileFert = 0;
+  for (const i of cells) {
+    const f = game.map.fert[i];
+    fertSum += f;
+    if (f > FERT_WORTHWHILE) worthwhileFert += f;
+  }
+  return {
+    plots: cells.length,
+    meanFert: cells.length ? fertSum / cells.length : 0,
+    nowPerMin: y.base * PER_MIN,
+    maxPerMin: (y.base + worthwhileFert * C.FARM_PER_CELL) * PER_MIN,
+    maxFarmers: y.worthwhileCells,
+  };
+}
+
+// The placement readout is recomputed every frame while the site moves,
+// so cache the last answer. Keyed on the site, the owner and terrVer
+// (territory decides which contested plots the site wins); the short
+// tick window catches fertility drifting under pillage/regen. Pure
+// cache over a pure function — never serialized, never read by the sim.
+let scoreCache = { key: '', tick: -1e9, val: null };
+export function previewScoreCached(game, ax, ay, owner) {
+  const key = `${ax},${ay},${owner},${game.terrVer || 0}`;
+  if (scoreCache.key === key && game.tick - scoreCache.tick < 10) return scoreCache.val;
+  scoreCache = { key, tick: game.tick, val: previewScore(game, ax, ay, owner) };
+  return scoreCache.val;
 }
 
 // Deterministic source spot for a wheat particle: rotate through the

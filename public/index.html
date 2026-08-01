@@ -199,8 +199,10 @@
     </div>
 
     <!-- targeting hint -->
-    <div id="hint" class="hidden absolute top-12 inset-x-0 mx-auto w-fit max-w-[90%] px-4 py-2 rounded-lg bg-violet-700/90 text-white text-sm shadow-lg z-20 flex items-center gap-3">
+    <div id="hint" class="hidden absolute top-12 inset-x-0 mx-auto w-fit max-w-[90%] px-4 py-2 rounded-lg bg-violet-700/90 text-white text-sm shadow-lg z-20 flex items-center gap-3 flex-wrap justify-center">
       <span id="hint-text"></span>
+      <!-- #234: placement score for touch, where there's no hover card -->
+      <span id="hint-score" class="hidden text-xs text-violet-100 bg-violet-900/70 rounded px-2 py-0.5 tabular-nums"></span>
       <button id="btn-cancel-order" class="px-2 py-0.5 rounded bg-violet-900 text-violet-100 text-xs">Cancel</button>
     </div>
 
@@ -504,7 +506,32 @@
       <!-- rewatch the match that just ended (#223): always on the current
            engine, so it never needs the version gate the history rows do -->
       <button id="btn-end-replay" class="hidden btn w-full py-3 mb-2 rounded-xl bg-sky-700 hover:bg-sky-600 font-semibold">▶ Watch replay</button>
+      <!-- #233: the match graph, from either the live end card or a replay's -->
+      <button id="btn-end-stats" class="hidden btn w-full py-3 mb-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 font-semibold">📈 Match stats</button>
+      <!-- #232: a replay's end card is a dead end without these — the seek
+           bar stays live behind the modal, so every one of them is just a
+           different way of putting the transport back in the viewer's hands -->
+      <div id="end-replay-controls" class="hidden grid grid-cols-3 gap-2 mb-2">
+        <button id="btn-end-keep" class="btn py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-sm">Keep watching</button>
+        <button id="btn-end-back30" class="btn py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-sm">⏪ 30s</button>
+        <button id="btn-end-restart" class="btn py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-sm">↺ Restart</button>
+      </div>
       <button id="btn-end-menu" class="btn w-full py-3 rounded-xl bg-violet-600 hover:bg-violet-500 font-semibold">Back to menu</button>
+    </div>
+  </div>
+
+  <!-- ============ Match statistics (#233) ============ -->
+  <div id="stats-modal" class="hidden fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+    <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-5 max-w-2xl w-full">
+      <div class="flex items-center justify-between mb-1">
+        <h2 class="text-xl font-bold">Match statistics</h2>
+        <button id="btn-stats-close" class="btn px-3 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-sm">Close</button>
+      </div>
+      <p id="stats-sub" class="text-zinc-400 text-sm mb-3"></p>
+      <div id="stats-toggles" class="flex flex-wrap gap-3 mb-3 text-sm"></div>
+      <canvas id="stats-chart" class="w-full rounded-lg bg-zinc-950 border border-zinc-800" height="300"></canvas>
+      <div id="stats-legend" class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-zinc-400"></div>
+      <p id="stats-empty" class="hidden text-zinc-500 text-sm mt-3">No samples recorded for this match.</p>
     </div>
   </div>
 

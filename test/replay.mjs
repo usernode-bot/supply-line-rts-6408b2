@@ -205,6 +205,65 @@ console.log('seeking — keyframes and re-simulation land on the same state');
   check('atEnd reports a finished replay', RP.atEnd(p));
 }
 {
+  // #232: snap() above is the SAVE format, and a save is deliberately lossy —
+  // it drops engagement timers, chase targets, cached paths, hunger latches,
+  // route delivery windows and the merge log. A rewind that restored one of
+  // those looked correct to snap() while quietly landing on a different world,
+  // and the difference compounded tick by tick until the playback showed a
+  // fight that never happened. This compares EVERYTHING, on a map big enough
+  // and a run long enough for combat, pillage and supply state to exist.
+  const deep = (g) => JSON.stringify(g, (k, v) => {
+    if (k === 'map') return { fert: Array.from(v.fert) };
+    if (v instanceof Set) return ['#set', [...v].sort()];
+    if (ArrayBuffer.isView(v)) return Array.from(v);
+    return v;
+  });
+  const { payload } = play('seek-deep', 'small', 'normal', 4000, script('small'));
+
+  const straight = RP.createPlayer(payload);
+  await RP.seek(straight, 2400);
+  const want = deep(straight.game);
+
+  const p = RP.createPlayer(payload);
+  await RP.seek(p, 2400);
+  check('a straight run to the target matches itself', deep(p.game) === want);
+  // a shallow rewind (lands on a keyframe) …
+  await RP.seek(p, 1800);
+  await RP.seek(p, 2400);
+  check('rewind to a keyframe leaves the world bit-identical', deep(p.game) === want,
+    'transient state diverged across the rewind');
+  // … a rewind that lands BETWEEN keyframes and re-simulates forward …
+  await RP.seek(p, 1450);
+  await RP.seek(p, 2400);
+  check('rewind between keyframes leaves the world bit-identical', deep(p.game) === want);
+  // … and the deepest one there is, through reset()
+  await RP.seek(p, 0);
+  await RP.seek(p, 2400);
+  check('a full rebuild leaves the world bit-identical', deep(p.game) === want);
+
+  // the same map object survives every rewind — the renderer's terrain layer
+  // is cached against its identity
+  const m = p.game.map;
+  await RP.seek(p, 600);
+  check('a rewind keeps the same map object', p.game.map === m);
+  check('and rolls its fertility back with it',
+    deep(p.game).length > 0 && p.game.map.fert.length === m.fert.length);
+}
+{
+  // #232: the drift banner describes the ticks on screen, so rewinding has to
+  // clear it — a single mismatched checkpoint used to latch it on for the rest
+  // of the session, making every later scrub look untrustworthy.
+  const { payload } = play('drift-1', 'xsmall', 'normal', 1500, script('xsmall'));
+  const p = RP.createPlayer(payload);
+  await RP.seek(p, 1200);
+  p.drift = true;                       // as a failed checkpoint would set it
+  await RP.seek(p, 600);
+  check('a rewind clears the drift flag', p.drift === false);
+  p.drift = true;
+  RP.reset(p);
+  check('a rebuild clears the drift flag', p.drift === false);
+}
+{
   // The invariant main.js relies on (#228): a seek hands back the player's
   // CURRENT game, which a rewind has replaced. Holding the pre-seek object is
   // what made the viewer draw a frozen world while the player stepped a live
@@ -400,6 +459,66 @@ console.log('pvp — both sides\' orders replay from one log');
   check('owner 0\'s order was applied to owner 0', foe.mode === 'supply', foe.mode);
   check('owner 1\'s order was applied to owner 1', mine.mode === 'deploy', mine.mode);
   check('an order aimed at the other side\'s settlement is refused', foe.mode !== 'off');
+}
+
+// ---------------------------------------------------------------- resume journal
+
+// #232 cause A: a match quit and resumed used to open a SECOND recorder at
+// whatever tick the save was taken, stamp its orders there, and publish that
+// as a replay — while playback always starts from tick 0. Every order landed
+// thousands of ticks early. The order log is journaled with the save instead,
+// and anything that can't be proved to belong to this match records nothing.
+console.log('resume journal — a recording covers the match or it does not exist');
+{
+  const g = S.newGame('journal-1', 'xsmall', 'normal');
+  const rec = RP.createRecorder(g);
+  check('a fresh recorder starts at tick 0', rec.start_tick === 0);
+  RP.advance(g);
+  applyCommand(g, 0, { op: 'setMode', settlementId: 1, mode: 'farm' });
+  RP.recordCommand(rec, g.tick, { op: 'setMode', settlementId: 1, mode: 'farm' });
+  for (let k = 0; k < 300; k++) { RP.advance(g); RP.recordTick(rec, g); }
+
+  const j = RP.journalOf(rec, g, { rows: [{ t: 0, units: [12, 12], land: [0, 0], food: [0, 0] }] });
+  check('the journal stamps the tick it was written at', j.tick === g.tick);
+  check('the journal carries the orders so far', j.entries.length === rec.entries.length);
+  check('the journal carries the stats series', j.stats.rows.length === 1);
+
+  // resume: the save deserializes to exactly this tick, so the journal fits
+  const resumed = S.deserialize(S.serialize(g));
+  const back = RP.recorderFromJournal(j, resumed);
+  check('a matching journal restores the recorder', !!back);
+  check('the restored recorder still starts at 0', back && back.start_tick === 0);
+  check('the restored recorder keeps every entry', back && back.entries.length === rec.entries.length);
+
+  // …and every way it can fail to fit
+  check('a journal from another seed is refused',
+    RP.recorderFromJournal({ ...j, seed: 'other' }, resumed) === null);
+  check('a journal from another map size is refused',
+    RP.recorderFromJournal({ ...j, size_key: 'large' }, resumed) === null);
+  check('a journal from another difficulty is refused',
+    RP.recorderFromJournal({ ...j, difficulty: 'hard' }, resumed) === null);
+  check('a journal stamped at a different tick is refused',
+    RP.recorderFromJournal({ ...j, tick: j.tick - 1 }, resumed) === null);
+  check('a journal from another engine version is refused',
+    RP.recorderFromJournal({ ...j, sim_version: S.SIM_VERSION + 1 }, resumed) === null);
+  check('a missing journal is refused', RP.recorderFromJournal(null, resumed) === null);
+
+  // continuing the restored recorder produces one continuous log
+  RP.recordEnd(back, resumed, 'win');
+  const payload = RP.finishRecording(back);
+  check('the continued recording publishes', !!payload);
+  check('and its end tick is the resumed one', payload && payload.end_tick === resumed.tick);
+}
+{
+  // fail closed: a recorder that really did open partway through never
+  // publishes, however complete it otherwise looks
+  const g = S.newGame('journal-2', 'xsmall', 'normal');
+  for (let k = 0; k < 400; k++) RP.advance(g);
+  const late = RP.createRecorder(g);
+  check('a recorder opened mid-match knows it', late.start_tick === g.tick);
+  RP.recordCommand(late, g.tick, { op: 'setMode', settlementId: 1, mode: 'farm' });
+  RP.recordEnd(late, g, 'win');
+  check('an offset recording is never published', RP.finishRecording(late) === null);
 }
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nall replay checks passed');
