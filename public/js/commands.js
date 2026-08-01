@@ -67,12 +67,8 @@ export function applyCommand(g, owner, c) {
           if (s) srcId = s.id;
         }
         if (c.target.kind === 'blob') {
-          // self-target is legal for a MIXED blob (#239): the supply units
-          // peel off and feed the army they were merged with. opRoute owns
-          // the "route must lead away from its source" rule, so it stays in
-          // exactly one place instead of being duplicated here.
           const t = resolveBlobIn(g, owner, c.target.id);
-          if (t) S.opRoute(g, b, { kind: 'blob', id: t.id }, srcId);
+          if (t && t.id !== b.id) S.opRoute(g, b, { kind: 'blob', id: t.id }, srcId);
         } else if (c.target.kind === 'settlement') {
           const t = g.settlements.find(s => s.id === c.target.id && s.owner === owner);
           if (t) S.opRoute(g, b, { kind: 'settlement', id: t.id }, srcId);

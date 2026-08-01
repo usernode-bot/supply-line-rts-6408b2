@@ -17,8 +17,9 @@ import * as SUP from './supply.js';
 // side: bumping retires every existing replay, so it tracks real behaviour
 // changes, not cosmetic edits to sim files.
 // v3: supply carriers eat from their own cargo below half rations (#235).
-// v4: a mixed supply/army blob ordered onto a route peels its supply units
-//     off into a caravan instead of refusing the order (#239).
+// v4: a mixed supply/army blob runs a route AS ONE GROUP — its supply units
+//     haul, its fighters escort and eat off the load, and cargo capacity
+//     comes from the supply units alone (#239).
 export const SIM_VERSION = 4;
 
 // The sim's own seeded PRNG (#223). Every draw the simulation makes runs
@@ -1670,7 +1671,8 @@ export function opSetRole(game, b, role) {
 
 // Complete a pending arm-up (#108): every unit becomes a fighter. A
 // route carrier releases its route (cargo folds into its food meter —
-// mixed/deploy blobs can't run routes) and field hands stop working.
+// arming leaves zero supply units, so there is nothing left to haul with,
+// escort or not) and field hands stop working.
 function finishConvert(game, b) {
   const role = b.convert.role;
   b.convert = null;
@@ -1814,68 +1816,21 @@ export function opPillage(game, b, on) {
   return { ok: true };
 }
 
-// Peel the supply units out of a MIXED blob into their own caravan (#239).
-// Merging is automatic — an idle supply group standing beside an idle army
-// folds into it — and opSplit divides proportionally across roles, so before
-// this there was no way to get a clean carrier back out in the field. The
-// parent keeps its id (control groups, inbound routes and enemy chase
-// targets all point at it) and, unlike opSplit, keeps its ORDER too: peeling
-// carriers off must not abort an army's march or assault.
-function peelCarriers(game, b) {
-  const n = total(b);
-  const peeled = b.count.supply;
-  const foodShare = b.food * (peeled / n);
-  const wasNoMerge = b.noMerge;
-  const taken = [];
-  for (let i = b.units.length - 1; i >= 0; i--) {
-    if (b.units[i].role === 'supply') taken.push(b.units.splice(i, 1)[0]);
-  }
-  recount(b);
-  b.food -= foodShare;
-  const spot = nearestPassable(game.map, Math.floor(b.x + 1), Math.floor(b.y), 3, null,
-    new Set([tileIdx(game, b.x, b.y)])) || { x: b.x, y: b.y };
-  const nb = makeBlob(game, b.owner, spot.x + 0.5, spot.y + 0.5, null, taken);
-  nb.food = foodShare;
-  nb.pillaging = b.pillaging;
-  // deliberately NOT the arm-up (#215 copies it on a split): a pending
-  // convert to deploy would finishConvert → leaveRoute and silently kill
-  // the line the player just drew. The parent keeps arming.
-  b.noMerge = true;
-  nb.noMerge = true;
-  return { carrier: nb, peeled, foodShare, wasNoMerge };
-}
-
-// Undo a peel whose route never took: fold the units and their food back
-// into the parent so the order leaves nothing stranded beside the army.
-function unpeelCarriers(game, b, peel) {
-  b.units = b.units.concat(peel.carrier.units).sort((u, v) => u.seed - v.seed);
-  recount(b);
-  b.food = Math.min(foodCap(b), b.food + peel.foodShare);
-  peel.carrier.units = [];
-  recount(peel.carrier);
-  peel.carrier.dead = true;
-  b.noMerge = peel.wasNoMerge;
-  game.blobs = game.blobs.filter(x => x !== peel.carrier);
-}
-
+// Any group holding at least one supply unit can run a line (#239). A MIXED
+// group goes as ONE blob: its supply units haul (SUP.holdCap sizes the hold
+// off them alone), its fighters escort — they defend the caravan on contact
+// like any army, and eat off the load through the #235 self-feed. Merging is
+// automatic, so a caravan that folded into an army used to be stuck: opSplit
+// divides proportionally across roles and could never hand a clean carrier
+// back. Escorting keeps the group whole instead of restructuring it behind
+// the player's back, so the blob keeps its id, its control-group slot and
+// every route/chase reference pointing at it.
 export function opRoute(game, b, target, sourceId) {
   if (total(b) === 0 || b.count.supply === 0) {
     return { err: 'No supply units in this group' };
   }
   if (b.working != null) return { err: 'Already working the fields' };
-  // A MIXED blob peels its supply units off and puts THEM on the line
-  // (#239). Routes stay a pure-supply concept in the sim: fighters never
-  // haul cargo, they just stop trapping the carriers they merged with.
-  if (b.count.supply !== total(b)) {
-    const peel = peelCarriers(game, b);
-    if (target && target.kind === 'blob' && target.id === peel.carrier.id) {
-      unpeelCarriers(game, b, peel);
-      return { err: 'Route must lead away from its source' };
-    }
-    const res = SUP.createRoute(game, peel.carrier, target, 0, sourceId);
-    if (res.err) { unpeelCarriers(game, b, peel); return res; }
-    return { route: res.route, carrier: peel.carrier, peeled: peel.peeled };
-  }
+  // a group can't supply itself — it already eats out of its own hold
   if (target && target.kind === 'blob' && target.id === b.id) {
     return { err: 'Route must lead away from its source' };
   }
@@ -1890,8 +1845,8 @@ export function opRoute(game, b, target, sourceId) {
   leaveRoute(game, b);
   b.order = null; b.path = null;
   const res = SUP.createRoute(game, b, target, prevCargo, sourceId);
-  if (res.err) { b.food = Math.min(foodCap(b), b.food + prevCargo); return res; }
-  return { route: res.route, carrier: b, peeled: 0 };
+  if (res.err) b.food = Math.min(foodCap(b), b.food + prevCargo);
+  return res;
 }
 
 // Settlement-to-settlement supply line (#108): field this settlement's
@@ -2663,7 +2618,18 @@ function tickCarrier(game, b) {
   const src = SUP.routeSource(game, route);
   const tgt = SUP.routeTarget(game, route);
   if (!src || !tgt) { SUP.dissolveRoute(game, route); return; }
-  const cap = total(b) * SUP.CARRY_PER_UNIT;
+  // lost every carrier and kept its fighters (#239): combat and starvation
+  // take units in seed order regardless of role, so an escort really can end
+  // up with nothing to haul with. Release it rather than let it shuttle an
+  // empty hold forever — the cargo it still holds becomes its own rations.
+  if (b.count.supply === 0) {
+    b.food = Math.min(foodCap(b), b.food + (b.order.cargo || 0));
+    SUP.removeCarrier(game, route, b.id);
+    b.order = null; b.path = null;
+    game.events.push({ owner: b.owner, msg: '🚚 Caravan lost its carriers', x: b.x, y: b.y });
+    return;
+  }
+  const cap = SUP.holdCap(b);
 
   if (o.phase === 'load') {
     if (dist(b.x, b.y, src.x + 1, src.y + 1) > SUP.LOAD_RANGE) {
@@ -3452,7 +3418,9 @@ function tickFood(game, b) {
   // between caravan deliveries stay quiet.
   const meter = fedMeter(b);
   if (b.count.deploy > 0 && b.working == null) {
-    // armies only — route carriers and farmers have their own indicators
+    // anything with fighters in it — including a mixed group escorting a
+    // supply line (#239), whose escort goes hungry like any other army.
+    // Lean caravans and farmers have their own indicators.
     if (!b.lowFood && meter < 0.75) {
       b.lowFood = true;
       if (game.tick - game.supplyAlarmT[b.owner] > 150) {
@@ -3813,7 +3781,9 @@ function tickSettlement(game, s) {
         const b = game.blobs.find(x => x.id === id && !x.dead);
         if (!b || !b.order || b.order.type !== 'route' || b.order.routeId !== r.id || b.order.phase !== 'load') continue;
         if (dist(b.x, b.y, s.x + 1, s.y + 1) > SUP.LOAD_RANGE) continue;
-        const cap = total(b) * SUP.CARRY_PER_UNIT;
+        // hold is supply-only (#239); the belly top-up below stays on total,
+        // because the source feeds everyone in the group, escort included
+        const cap = SUP.holdCap(b);
         demand += Math.min(cap - (b.order.cargo || 0), cap / 20);
         demand += Math.min(foodCap(b) - b.food, total(b) * 0.1);
       }
@@ -4078,7 +4048,7 @@ function tickMerge(game) {
       if (goneCargo > 0) {
         // cap combined cargo at the survivor's new capacity; overflow
         // becomes the caravan's own food (nothing silently vanishes)
-        const hold = total(keep) * SUP.CARRY_PER_UNIT;
+        const hold = SUP.holdCap(keep);
         const add = Math.min(goneCargo, Math.max(0, hold - (keep.order.cargo || 0)));
         keep.order.cargo = (keep.order.cargo || 0) + add;
         keep.food = Math.min(foodCap(keep), keep.food + (goneCargo - add));

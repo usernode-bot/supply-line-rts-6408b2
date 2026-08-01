@@ -5,8 +5,8 @@
 //         bellies drop below half, on any leg of the run.
 //  #234 — S.previewScore describes the settlement the sim actually
 //         builds: same plot count, same opening income.
-//  #239 — a MIXED supply/army blob ordered onto a route peels its supply
-//         units off into a caravan instead of refusing the order.
+//  #239 — a MIXED supply/army blob runs a route as ONE escorted group:
+//         supply units haul, fighters guard and eat off the load.
 
 import * as S from '../public/js/sim.js';
 import * as SUP from '../public/js/supply.js';
@@ -140,12 +140,13 @@ function check(name, cond, detail) {
   }
 }
 
-// ------------------------------------------- #239 mixed blob peels carriers
+// ------------------------------------------ #239 escorted supply routes
 {
-  console.log('\nmixed supply/army blob peels its carriers onto a route (#239)');
+  console.log('\na mixed supply/army group escorts its own caravan (#239)');
 
   // A merged group: fighters + supply units in one blob, exactly what
-  // tickMerge produces when an idle caravan folds into an idle army.
+  // tickMerge produces when an idle caravan folds into an idle army. The
+  // tutorial game's biggest party is 10 units, so keep deploy+supply <= 10.
   function mixedGame(deployN, supplyN) {
     const game = S.newTutorialGame();
     const home = game.settlements.find(s => s.owner === 0 && !s.building);
@@ -159,105 +160,180 @@ function check(name, cond, detail) {
     return { game, home, outpost, b };
   }
 
+  const live = g => g.blobs.filter(x => !x.dead).length;
+
+  // -- the whole group goes, as one blob
   {
     const { game, home, outpost, b } = mixedGame(7, 3);
-    const order = { type: 'move', x: b.x, y: b.y }; // the army's own plan
-    b.order = order;
-    const before = game.blobs.filter(x => !x.dead).length;
+    const before = live(game);
     const res = S.opRoute(game, b, { kind: 'settlement', id: outpost.id }, home.id);
-    check('mixed blob accepted onto a route', !res.err, res.err);
-    check('peeled count is the supply half', res.peeled === 3, `peeled ${res.peeled}`);
-    check('parent keeps only its fighters',
-      b.count.supply === 0 && b.count.deploy === 7 && S.total(b) === 7,
+    check('mixed group accepted onto a route', !res.err, res.err);
+    check('nothing was split off', live(game) === before, `${live(game)} vs ${before}`);
+    check('the group itself is the carrier',
+      !!b.order && b.order.type === 'route' && b.order.routeId === res.route.id,
+      JSON.stringify(b.order));
+    check('it kept both roles',
+      S.total(b) === 10 && b.count.deploy === 7 && b.count.supply === 3,
       JSON.stringify(b.count));
-    const c = res.carrier;
-    check('carrier is a NEW blob', !!c && c.id !== b.id);
-    check('carrier is pure supply',
-      c.count.supply === S.total(c) && S.total(c) === 3, JSON.stringify(c.count));
-    check('carrier units are all supply records',
-      c.units.every(u => u.role === 'supply'));
-    check('carrier is on the route',
-      !!c.order && c.order.type === 'route' && c.order.routeId === res.route.id,
-      JSON.stringify(c.order));
-    check('carrier carries no arm-up', c.convert == null);
-    check('both halves are held apart from re-merging', b.noMerge && c.noMerge);
-    check('army keeps its own order', b.order === order, JSON.stringify(b.order));
-    check('one new blob exists', game.blobs.filter(x => !x.dead).length === before + 1);
-    check('food split proportionally',
-      Math.abs(b.food - 20 * 7 / 10) < 1e-9 && Math.abs(c.food - 20 * 3 / 10) < 1e-9,
-      `parent ${b.food}, carrier ${c.food}`);
+    check('the line lists exactly this carrier',
+      res.route.carrierIds.length === 1 && res.route.carrierIds[0] === b.id,
+      JSON.stringify(res.route.carrierIds));
   }
 
-  // Self-target: the peeled caravan feeds the army it just left.
+  // -- the hold is sized by the supply units alone
+  {
+    const { game, home, outpost, b } = mixedGame(7, 3);
+    check('hold counts carriers, not fighters',
+      SUP.holdCap(b) === 3 * SUP.CARRY_PER_UNIT, `holdCap ${SUP.holdCap(b)}`);
+    check('a total-based hold would have been far bigger',
+      S.total(b) * SUP.CARRY_PER_UNIT === 100);
+    S.opRoute(game, b, { kind: 'settlement', id: outpost.id }, home.id);
+    home.stockpile = S.C.STOCK_CAP;
+    for (let i = 0; i < 600 && b.order && b.order.phase === 'load'; i++) S.step(game);
+    check('loading never exceeds the supply-only hold',
+      !!b.order && (b.order.cargo || 0) <= SUP.holdCap(b) + 1e-9,
+      `cargo ${b.order && b.order.cargo}`);
+    check('it did actually load something', !!b.order && (b.order.cargo || 0) > 1,
+      `cargo ${b.order && b.order.cargo}`);
+  }
+
+  // -- the loop runs indefinitely: deliver, walk home, load, deliver again
+  {
+    const { game, home, outpost, b } = mixedGame(5, 5);
+    const res = S.opRoute(game, b, { kind: 'settlement', id: outpost.id }, home.id);
+    check('route created for the long run', !res.err, res.err);
+    home.stockpile = S.C.STOCK_CAP;
+    outpost.stockpile = 0;
+    let loads = 0, prevPhase = b.order.phase;
+    for (let i = 0; i < 12000 && !b.dead && b.order; i++) {
+      S.step(game);
+      home.stockpile = S.C.STOCK_CAP;   // keep the source supplied
+      outpost.stockpile = 0;            // and the destination hungry
+      if (b.order && b.order.phase !== prevPhase) {
+        if (b.order.phase === 'load') loads++;
+        prevPhase = b.order.phase;
+      }
+    }
+    check('the escort is still on its line after a long run',
+      !b.dead && !!b.order && b.order.type === 'route', JSON.stringify(b.order));
+    check('it came back to load at least twice', loads >= 2, `returned to load ${loads}x`);
+    const r = SUP.findRoute(game, res.route.id);
+    check('the line recorded repeated deliveries', !!r && r.window.length > 1,
+      r ? `${r.window.length} deliveries in the window` : 'route gone');
+  }
+
+  // -- the escort eats off the load it hauls
+  {
+    const { game, home, outpost, b } = mixedGame(7, 3);
+    S.opRoute(game, b, { kind: 'settlement', id: outpost.id }, home.id);
+    b.pillaging = false;
+    b.order.phase = 'go';
+    b.order.cargo = SUP.holdCap(b);
+    b.food = 0.2 * S.foodCap(b);   // below the half-rations trigger
+    const cargo0 = b.order.cargo, food0 = b.food;
+    for (let i = 0; i < 20; i++) S.step(game);
+    check('the escort ate into the cargo', b.order && b.order.cargo < cargo0 - 0.5,
+      `${cargo0} -> ${b.order && b.order.cargo}`);
+    check('and its own rations rose', b.food > food0, `${food0} -> ${b.food}`);
+  }
+
+  // -- fighters defend the caravan; a lean one cannot. Staged out in the
+  // open, well clear of every other unit and settlement, so the only thing
+  // that can damage the raider is the caravan it is attacking.
+  function raid(deployN, supplyN) {
+    const { game, home, outpost, b } = mixedGame(deployN, supplyN);
+    S.opRoute(game, b, { kind: 'settlement', id: outpost.id }, home.id);
+    // the tile furthest from anything of the player's — same trick #235 uses
+    let spot = null, bestD = -1;
+    for (let ty = 0; ty < game.map.h; ty++) {
+      for (let tx = 0; tx < game.map.w; tx++) {
+        if (!passable(game.map, tx, ty)) continue;
+        let d = Infinity;
+        for (const o of game.blobs) {
+          if (o.dead || o === b) continue;
+          d = Math.min(d, Math.hypot(tx + 0.5 - o.x, ty + 0.5 - o.y));
+        }
+        for (const s of game.settlements) {
+          d = Math.min(d, Math.hypot(tx + 0.5 - (s.x + 1), ty + 0.5 - (s.y + 1)));
+        }
+        if (d > bestD) { bestD = d; spot = { x: tx + 0.5, y: ty + 0.5 }; }
+      }
+    }
+    b.x = spot.x; b.y = spot.y;
+    b.prevX = b.x; b.prevY = b.y;
+    b.path = null; b.pathGoal = null;
+    const foe = game.blobs.find(x => !x.dead && x.owner === 1 && x.count.deploy > 0);
+    foe.order = null; foe.path = null; foe.pathGoal = null;
+    foe.x = b.x + 0.5; foe.y = b.y;
+    foe.prevX = foe.x; foe.prevY = foe.y;
+    const hpOf = z => z.units.reduce((a, u) => a + u.hp, 0);
+    const hp0 = hpOf(foe);
+    for (let i = 0; i < 15; i++) {
+      S.step(game);
+      if (b.dead || foe.dead) break;
+      foe.x = b.x + 0.5; foe.y = b.y;   // pin the raider in contact
+      foe.order = null; foe.path = null;
+    }
+    return { hurt: hp0 - (foe.dead ? 0 : hpOf(foe)), isolated: bestD };
+  }
+  const guarded = raid(7, 3), lean = raid(0, 10);
+  check('the raid was staged in isolation', guarded.isolated > 6 && lean.isolated > 6,
+    `${guarded.isolated.toFixed(1)} / ${lean.isolated.toFixed(1)}`);
+  check('an escorted caravan hurts its attacker', guarded.hurt > 0, `${guarded.hurt}`);
+  check('a lean caravan cannot fight back', lean.hurt === 0, `${lean.hurt}`);
+
+  // -- lose every carrier and the group drops off the line
+  {
+    const { game, home, outpost, b } = mixedGame(7, 3);
+    const res = S.opRoute(game, b, { kind: 'settlement', id: outpost.id }, home.id);
+    b.order.cargo = 12;
+    b.food = 0;
+    const food0 = b.food;
+    b.units = b.units.filter(u => u.role !== 'supply');   // raiders killed the carriers
+    b.count = { deploy: 7, supply: 0, farm: 0 };
+    S.step(game);
+    check('the group left the route', !b.order, JSON.stringify(b.order));
+    check('it kept the cargo as rations', b.food > food0, `${food0} -> ${b.food}`);
+    check('it survives as an ordinary army', !b.dead && S.total(b) === 7);
+    const r = SUP.findRoute(game, res.route.id);
+    check('the line dropped it as a carrier',
+      !r || !r.carrierIds.includes(b.id), r ? JSON.stringify(r.carrierIds) : 'route dissolved');
+  }
+
+  // -- a group still cannot supply itself
   {
     const { game, home, b } = mixedGame(7, 3);
     const res = S.opRoute(game, b, { kind: 'blob', id: b.id }, home.id);
-    check('mixed blob may supply itself', !res.err, res.err);
-    check('the line points at the army remainder',
-      res.route.targetKind === 'blob' && res.route.targetId === b.id,
-      `${res.route.targetKind} ${res.route.targetId}`);
-    check('the carrier is not its own destination', res.carrier.id !== res.route.targetId);
+    check('mixed self-route refused',
+      res.err === 'Route must lead away from its source', JSON.stringify(res));
+    check('refused self-route left the group alone',
+      !b.order && S.total(b) === 10, JSON.stringify(b.count));
   }
-
-  // ...but a pure-supply blob still cannot route to itself.
   {
     const { game, home, b } = mixedGame(0, 5);
     const res = S.opRoute(game, b, { kind: 'blob', id: b.id }, home.id);
-    check('pure-supply self-route still refused',
+    check('lean self-route still refused',
       res.err === 'Route must lead away from its source', JSON.stringify(res));
-    check('refused self-route left the blob alone',
-      S.total(b) === 5 && !b.order, JSON.stringify(b.count));
   }
 
-  // Rollback: a route that createRoute rejects must leave nothing stranded.
-  {
-    const { game, home, b } = mixedGame(7, 3);
-    const before = game.blobs.filter(x => !x.dead).length;
-    // a line from home to home is refused by createRoute itself
-    const res = S.opRoute(game, b, { kind: 'settlement', id: home.id }, home.id);
-    check('failed route reports the error',
-      res.err === 'Route must lead away from its source', JSON.stringify(res));
-    check('units folded back into the parent',
-      S.total(b) === 10 && b.count.supply === 3 && b.count.deploy === 7,
-      JSON.stringify(b.count));
-    check('food folded back', Math.abs(b.food - 20) < 1e-9, `${b.food}`);
-    check('no stranded caravan left behind',
-      game.blobs.filter(x => !x.dead).length === before,
-      `${game.blobs.filter(x => !x.dead).length} vs ${before}`);
-    check('no orderless supply blob beside the army',
-      !game.blobs.some(x => !x.dead && x !== b && x.owner === 0
-        && x.count.supply === S.total(x) && S.total(x) === 3 && !x.order));
-    check('no route was created', !game.routes.some(r => r.owner === 0
-      && r.settlementId === home.id && r.targetId === home.id));
-  }
-
-  // A group with no supply units at all is still refused.
+  // -- no carriers at all is still a refusal
   {
     const { game, home, outpost, b } = mixedGame(7, 0);
-    const before = game.blobs.filter(x => !x.dead).length;
+    const before = live(game);
     const res = S.opRoute(game, b, { kind: 'settlement', id: outpost.id }, home.id);
-    check('all-fighter blob refused',
+    check('all-fighter group refused',
       res.err === 'No supply units in this group', JSON.stringify(res));
-    check('refused blob is untouched',
-      S.total(b) === 7 && game.blobs.filter(x => !x.dead).length === before);
+    check('refused group is untouched',
+      !b.order && S.total(b) === 7 && live(game) === before);
   }
 
-  // The peeled caravan actually runs: it loads at the source and delivers.
+  // -- an all-supply caravan is completely unaffected by the escort rules
   {
-    const { game, home, outpost, b } = mixedGame(7, 3);
+    const { game, home, outpost, b } = mixedGame(0, 8);
     const res = S.opRoute(game, b, { kind: 'settlement', id: outpost.id }, home.id);
-    check('route created for the run', !res.err, res.err);
-    const c = res.carrier;
-    home.stockpile = S.C.STOCK_CAP;
-    outpost.stockpile = 0;
-    let delivered = false;
-    for (let i = 0; i < 6000 && !delivered; i++) {
-      S.step(game);
-      if (c.dead) break;
-      delivered = SUP.findRoute(game, res.route.id)
-        && game.routes.some(r => r.id === res.route.id && r.window.length > 0);
-    }
-    check('the peeled caravan delivers on its line', delivered);
+    check('a lean caravan still routes', !res.err, res.err);
+    check('its hold is unchanged by the supply-only rule',
+      SUP.holdCap(b) === S.total(b) * SUP.CARRY_PER_UNIT, `${SUP.holdCap(b)}`);
   }
 }
 

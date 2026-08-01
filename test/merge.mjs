@@ -302,7 +302,7 @@ function run(g, ticks, onTick) {
   const caravan = g.blobs.find(b => !b.dead && b.order && b.order.type === 'route');
   check('the survivor carries both crews and a hold that fits them',
     !!caravan && S.total(caravan) === 8
-      && (caravan.order.cargo || 0) <= S.total(caravan) * SUP.CARRY_PER_UNIT + 1e-9,
+      && (caravan.order.cargo || 0) <= SUP.holdCap(caravan) + 1e-9,
     caravan ? `${S.total(caravan)} units, cargo ${caravan.order.cargo}` : 'no caravan');
   check('the line still has a live carrier',
     g.routes.length === 1 && g.routes[0].carrierIds.length >= 1,
