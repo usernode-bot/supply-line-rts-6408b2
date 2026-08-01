@@ -17,7 +17,9 @@ import * as SUP from './supply.js';
 // side: bumping retires every existing replay, so it tracks real behaviour
 // changes, not cosmetic edits to sim files.
 // v3: supply carriers eat from their own cargo below half rations (#235).
-export const SIM_VERSION = 3;
+// v4: a mixed supply/army blob ordered onto a route peels its supply units
+//     off into a caravan instead of refusing the order (#239).
+export const SIM_VERSION = 4;
 
 // The sim's own seeded PRNG (#223). Every draw the simulation makes runs
 // through here so a match is a pure function of (seed, sizeKey, difficulty,
@@ -1812,9 +1814,70 @@ export function opPillage(game, b, on) {
   return { ok: true };
 }
 
+// Peel the supply units out of a MIXED blob into their own caravan (#239).
+// Merging is automatic — an idle supply group standing beside an idle army
+// folds into it — and opSplit divides proportionally across roles, so before
+// this there was no way to get a clean carrier back out in the field. The
+// parent keeps its id (control groups, inbound routes and enemy chase
+// targets all point at it) and, unlike opSplit, keeps its ORDER too: peeling
+// carriers off must not abort an army's march or assault.
+function peelCarriers(game, b) {
+  const n = total(b);
+  const peeled = b.count.supply;
+  const foodShare = b.food * (peeled / n);
+  const wasNoMerge = b.noMerge;
+  const taken = [];
+  for (let i = b.units.length - 1; i >= 0; i--) {
+    if (b.units[i].role === 'supply') taken.push(b.units.splice(i, 1)[0]);
+  }
+  recount(b);
+  b.food -= foodShare;
+  const spot = nearestPassable(game.map, Math.floor(b.x + 1), Math.floor(b.y), 3, null,
+    new Set([tileIdx(game, b.x, b.y)])) || { x: b.x, y: b.y };
+  const nb = makeBlob(game, b.owner, spot.x + 0.5, spot.y + 0.5, null, taken);
+  nb.food = foodShare;
+  nb.pillaging = b.pillaging;
+  // deliberately NOT the arm-up (#215 copies it on a split): a pending
+  // convert to deploy would finishConvert → leaveRoute and silently kill
+  // the line the player just drew. The parent keeps arming.
+  b.noMerge = true;
+  nb.noMerge = true;
+  return { carrier: nb, peeled, foodShare, wasNoMerge };
+}
+
+// Undo a peel whose route never took: fold the units and their food back
+// into the parent so the order leaves nothing stranded beside the army.
+function unpeelCarriers(game, b, peel) {
+  b.units = b.units.concat(peel.carrier.units).sort((u, v) => u.seed - v.seed);
+  recount(b);
+  b.food = Math.min(foodCap(b), b.food + peel.foodShare);
+  peel.carrier.units = [];
+  recount(peel.carrier);
+  peel.carrier.dead = true;
+  b.noMerge = peel.wasNoMerge;
+  game.blobs = game.blobs.filter(x => x !== peel.carrier);
+}
+
 export function opRoute(game, b, target, sourceId) {
-  if (b.count.supply !== total(b) || total(b) === 0) {
-    return { err: 'Only pure supply blobs can run routes' };
+  if (total(b) === 0 || b.count.supply === 0) {
+    return { err: 'No supply units in this group' };
+  }
+  if (b.working != null) return { err: 'Already working the fields' };
+  // A MIXED blob peels its supply units off and puts THEM on the line
+  // (#239). Routes stay a pure-supply concept in the sim: fighters never
+  // haul cargo, they just stop trapping the carriers they merged with.
+  if (b.count.supply !== total(b)) {
+    const peel = peelCarriers(game, b);
+    if (target && target.kind === 'blob' && target.id === peel.carrier.id) {
+      unpeelCarriers(game, b, peel);
+      return { err: 'Route must lead away from its source' };
+    }
+    const res = SUP.createRoute(game, peel.carrier, target, 0, sourceId);
+    if (res.err) { unpeelCarriers(game, b, peel); return res; }
+    return { route: res.route, carrier: peel.carrier, peeled: peel.peeled };
+  }
+  if (target && target.kind === 'blob' && target.id === b.id) {
+    return { err: 'Route must lead away from its source' };
   }
   // reassignment keeps the carried cargo (#103): stash it so leaveRoute
   // doesn't fold it into the (usually full) food meter, then seed the
@@ -1827,8 +1890,8 @@ export function opRoute(game, b, target, sourceId) {
   leaveRoute(game, b);
   b.order = null; b.path = null;
   const res = SUP.createRoute(game, b, target, prevCargo, sourceId);
-  if (res.err) b.food = Math.min(foodCap(b), b.food + prevCargo);
-  return res;
+  if (res.err) { b.food = Math.min(foodCap(b), b.food + prevCargo); return res; }
+  return { route: res.route, carrier: b, peeled: 0 };
 }
 
 // Settlement-to-settlement supply line (#108): field this settlement's

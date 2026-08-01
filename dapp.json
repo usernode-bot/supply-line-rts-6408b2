@@ -151,6 +151,12 @@
     { "name": "Replay end card can jump back 30 seconds (#232)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#btn-end-back30" },
     { "name": "Replay end card can restart the playback (#232)", "path": "/?shot=replay-end&demo=1", "expectText": "↺ Restart" },
     { "name": "Replay end card links to the match stats (#233)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#btn-end-stats:not(.hidden)" },
-    { "name": "Replay end card leaves the transport live behind it (#232)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#replay-bar:not(.hidden)" }
+    { "name": "Replay end card leaves the transport live behind it (#232)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#replay-bar:not(.hidden)" },
+    { "name": "Merged supply/army group deep link renders its panel (#239)", "path": "/?shot=merged-supply&demo=1", "expectSelector": "#panel button[data-act=route]" },
+    { "name": "A merged group really is mixed supply + fighters (#239)", "path": "/?shot=merged-supply&demo=1", "expectText": "7 deploy · 🚚 3 supply" },
+    { "name": "Merged group keeps the supply-route button ENABLED (#239)", "path": "/?shot=merged-supply&demo=1", "expectSelector": "#panel button[data-act=route]:not([disabled])" },
+    { "name": "Supply-route button counts the carriers that would peel off (#239)", "path": "/?shot=merged-supply&demo=1", "expectText": "Supply route (3)" },
+    { "name": "Armed route flow from a merged group stays in a live match (#239)", "path": "/?shot=merged-supply-armed&demo=1", "expectSelector": "#hint:not(.hidden)" },
+    { "name": "Armed hint warns the supply units will split off (#239)", "path": "/?shot=merged-supply-armed&demo=1", "expectText": "the supply units will split off" }
   ]
 }
