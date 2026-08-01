@@ -151,6 +151,18 @@
     { "name": "Replay end card can jump back 30 seconds (#232)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#btn-end-back30" },
     { "name": "Replay end card can restart the playback (#232)", "path": "/?shot=replay-end&demo=1", "expectText": "↺ Restart" },
     { "name": "Replay end card links to the match stats (#233)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#btn-end-stats:not(.hidden)" },
-    { "name": "Replay end card leaves the transport live behind it (#232)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#replay-bar:not(.hidden)" }
+    { "name": "Replay end card leaves the transport live behind it (#232)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#replay-bar:not(.hidden)" },
+    { "name": "Resume card offers the in-progress match (#240)", "path": "/?shot=resume-card&demo=1", "expectSelector": "#resume-card:not(.hidden) #btn-resume" },
+    { "name": "Resume card names the match in progress (#240)", "path": "/?shot=resume-card&demo=1", "expectText": "Match in progress" },
+    { "name": "Resume card describes the saved match (#240)", "path": "/?shot=resume-card&demo=1", "expectText": "Small map" },
+    { "name": "Resume card says how long ago it saved (#240)", "path": "/?shot=resume-card&demo=1", "expectText": "40 seconds ago" },
+    { "name": "An unreadable save explains itself instead of vanishing (#240)", "path": "/?shot=resume-unreadable&demo=1", "expectSelector": "#resume-broken:not(.hidden) #btn-resume-discard" },
+    { "name": "An unreadable save names the problem (#240)", "path": "/?shot=resume-unreadable&demo=1", "expectText": "We couldn't restore your last match" },
+    { "name": "An unreadable save reassures about ratings (#240)", "path": "/?shot=resume-unreadable&demo=1", "expectText": "Your recorded matches and your rating are unaffected." },
+    { "name": "An expired session gets its own banner (#240)", "path": "/?shot=session-expired&demo=1", "expectSelector": "#expired-badge:not(.hidden)" },
+    { "name": "An expired session says what to do about it (#240)", "path": "/?shot=session-expired&demo=1", "expectText": "Your Usernode session has expired" },
+    { "name": "An expired session collapses multiplayer with a reason (#240)", "path": "/?shot=session-expired&demo=1", "expectSelector": "#mp-expired:not(.hidden)" },
+    { "name": "An expired session is not shown as offline (#240)", "path": "/?shot=session-expired&demo=1", "expectSelector": "#offline-badge.hidden" },
+    { "name": "Autosave warning chip present in the top bar (#240)", "path": "/?demo=1", "expectSelector": "#save-warning" }
   ]
 }
