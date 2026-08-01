@@ -107,6 +107,12 @@ const isDemoReq = (req) => IS_STAGING && req.query.demo === '1';
 // stamped with the version the previewing client will actually accept.
 let SIM_VERSION = 1;
 
+// The save-payload version range, likewise read from sim.js at boot (#240).
+// The conservative pre-boot defaults accept nothing, so a failed import can
+// only ever reject saves — never store one the client would refuse to load.
+let SAVE_VERSION = 0;
+let MIN_SAVE_VERSION = 1;
+
 const REPLAY_KEEP = 20;              // newest replays retained per user
 const REPLAY_MAX_ENTRIES = 4000;     // mirrors LOG_MAX_ENTRIES in replay.js
 const REPLAY_MAX_BYTES = 256 * 1024; // mirrors LOG_MAX_BYTES
@@ -390,8 +396,12 @@ app.get('/api/replays/:id', async (req, res) => {
 // client's serialized sim state, validated only for shape/version — the
 // sim itself re-validates everything at deserialize time.
 
+// The accepted version range is READ FROM sim.js at boot (see start()), never
+// written down twice. Hard-coding it here is what broke resume in #240: the
+// serializer moved to v5, this file was updated to match, and the client's own
+// gate was not — so the server stored saves the menu then refused to load.
 const validSaveData = (d) => d && typeof d === 'object' && !Array.isArray(d)
-  && d.v >= 2 && d.v <= 5 && !d.pvp && !d.result;
+  && d.v >= MIN_SAVE_VERSION && d.v <= SAVE_VERSION && !d.pvp && !d.result;
 
 app.get('/api/save', async (req, res) => {
   try {
@@ -739,11 +749,22 @@ async function start() {
   // The replay engine version the browser will enforce (#223). Read once from
   // the same module the client runs, so a seed can never claim a version the
   // client would reject by accident.
+  // The save-payload range (#240) comes from the same import, so /api/save can
+  // never accept a version the client's own gate rejects — or reject one it
+  // writes, which is the failure that lost players their in-progress matches.
   try {
     const S = await import('./public/js/sim.js');
     if (Number.isInteger(S.SIM_VERSION)) SIM_VERSION = S.SIM_VERSION;
+    if (Number.isInteger(S.SAVE_VERSION) && Number.isInteger(S.MIN_SAVE_VERSION)
+      && S.MIN_SAVE_VERSION <= S.SAVE_VERSION) {
+      SAVE_VERSION = S.SAVE_VERSION;
+      MIN_SAVE_VERSION = S.MIN_SAVE_VERSION;
+      console.log(`[saves] accepting payload versions ${MIN_SAVE_VERSION}–${SAVE_VERSION}`);
+    } else {
+      console.error('sim.js exports no usable SAVE_VERSION range — /api/save will reject every save');
+    }
   } catch (err) {
-    console.error('could not read SIM_VERSION from sim.js:', err.message);
+    console.error('could not read versions from sim.js:', err.message);
   }
 
   await pool.query(`

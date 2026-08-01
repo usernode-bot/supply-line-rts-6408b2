@@ -160,6 +160,18 @@
     { "name": "Armed hint says the whole group escorts the caravan (#239)", "path": "/?shot=merged-supply-armed&demo=1", "expectText": "the whole group will escort the caravan" },
     { "name": "A running escorted line renders its panel (#239)", "path": "/?shot=merged-supply-running&demo=1", "expectSelector": "#panel" },
     { "name": "The panel names the escort riding along (#239)", "path": "/?shot=merged-supply-running&demo=1", "expectText": "escorting" },
-    { "name": "An escorted group is on a supply route as one blob (#239)", "path": "/?shot=merged-supply-running&demo=1", "expectText": "on supply route" }
+    { "name": "An escorted group is on a supply route as one blob (#239)", "path": "/?shot=merged-supply-running&demo=1", "expectText": "on supply route" },
+    { "name": "Resume card offers the in-progress match (#240)", "path": "/?shot=resume-card&demo=1", "expectSelector": "#resume-card:not(.hidden) #btn-resume" },
+    { "name": "Resume card names the match in progress (#240)", "path": "/?shot=resume-card&demo=1", "expectText": "Match in progress" },
+    { "name": "Resume card describes the saved match (#240)", "path": "/?shot=resume-card&demo=1", "expectText": "Small map" },
+    { "name": "Resume card says how long ago it saved (#240)", "path": "/?shot=resume-card&demo=1", "expectText": "40 seconds ago" },
+    { "name": "An unreadable save explains itself instead of vanishing (#240)", "path": "/?shot=resume-unreadable&demo=1", "expectSelector": "#resume-broken:not(.hidden) #btn-resume-discard" },
+    { "name": "An unreadable save names the problem (#240)", "path": "/?shot=resume-unreadable&demo=1", "expectText": "We couldn't restore your last match" },
+    { "name": "An unreadable save reassures about ratings (#240)", "path": "/?shot=resume-unreadable&demo=1", "expectText": "Your recorded matches and your rating are unaffected." },
+    { "name": "An expired session gets its own banner (#240)", "path": "/?shot=session-expired&demo=1", "expectSelector": "#expired-badge:not(.hidden)" },
+    { "name": "An expired session says what to do about it (#240)", "path": "/?shot=session-expired&demo=1", "expectText": "Your Usernode session has expired" },
+    { "name": "An expired session collapses multiplayer with a reason (#240)", "path": "/?shot=session-expired&demo=1", "expectSelector": "#mp-expired:not(.hidden)" },
+    { "name": "An expired session is not shown as offline (#240)", "path": "/?shot=session-expired&demo=1", "expectSelector": "#offline-badge.hidden" },
+    { "name": "Autosave warning chip present in the top bar (#240)", "path": "/?demo=1", "expectSelector": "#save-warning" }
   ]
 }

@@ -35,6 +35,11 @@ export function createStore(storage) {
     removeItem: (k) => { mem.delete(k); },
   };
   return {
+    // The undecoded string. resume.js needs it: a save that fails to parse
+    // has to reach the menu as "damaged" rather than as "nothing saved" (#240).
+    raw(key) {
+      try { return backing.getItem(key); } catch { return null; }
+    },
     read(key, fallback) {
       try {
         const raw = backing.getItem(key);

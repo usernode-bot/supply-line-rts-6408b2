@@ -14,6 +14,7 @@ import * as CT from './controls-tour.js';
 import * as OFF from './offline.js';
 import * as RP from './replay.js';
 import * as ST from './stats.js';
+import * as RES from './resume.js';
 import { dist, fertTier, FERT_TIERS } from './mapgen.js';
 import { pickTol, blobOverlap, footprintDist, tileDist } from './pick.js';
 
@@ -21,9 +22,18 @@ const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 const token = params.get('token') || '';
 const apiHeaders = token ? { 'x-usernode-token': token } : {};
-const SAVE_KEY = 'supply-line-save-v1';
+const SAVE_KEY = RES.SAVE_KEY;
 const IS_DEMO = params.get('demo') === '1';
 const SHOT = params.get('shot') || ''; // screenshot-state deep link (#199)
+
+// A preview boot must not be able to touch a real player's match (#240).
+// `?shot=` links are opened with a live token by the platform's "Test this
+// change" button, and several of them clear the save and start a game of
+// their own — which used to delete the player's match locally AND on the
+// server, then autosave the screenshot over it. Everything that persists a
+// match goes through this flag now, so there is one switch instead of ten
+// call sites that each have to remember.
+const persistenceEnabled = !SHOT && !IS_DEMO;
 
 // ---------------------------------------------------------------- offline (#221)
 // The sim, the map generator and all four AI commanders are client-side, so a
@@ -34,11 +44,19 @@ const SHOT = params.get('shot') || ''; // screenshot-state deep link (#199)
 //
 // A ?shot= boot must never write to storage, so those get a memory-only store
 // (createStore(null)), mirroring how visOverride pins the onboarding flags.
-const offStore = OFF.createStore(SHOT ? null : (() => {
+function browserStorage() {
   try { return window.localStorage; } catch { return null; }
-})());
+}
+const offStore = OFF.createStore(SHOT ? null : browserStorage());
+
+// The solo save, its order journal and the session breadcrumb (#240). Split
+// from offStore only so `persistenceEnabled` can make a preview boot
+// memory-only without also blinding the offline history panel.
+const saveStore = OFF.createStore(persistenceEnabled ? browserStorage() : null);
 
 let netDown = false;           // is the server currently unreachable?
+let sessionExpired = false;    // token present but rejected — see noteAuthFailure (#240)
+let expiredShot = false;       // ?shot=session-expired override
 let offlineShot = null;        // ?shot=offline-menu override; see bootOfflineMenu
 let replayListShot = null;     // ?shot=replay-list / replay-stale override (#223)
 let installPrompt = null;      // captured beforeinstallprompt event
@@ -61,6 +79,25 @@ function noteApiSuccess() {
 function noteApiFailure() {
   if (netDown) return;
   netDown = true;
+  refreshOfflineUi();
+}
+
+// A 401 is NOT the same as being offline (#240): the server is right there,
+// it just won't accept this token any more — the iframe's JWT expired under a
+// long match. Before this, `noteApiSuccess` counted the 401 as proof we were
+// online, so the menu kept claiming everything worked while every button
+// failed. Solo play, saving and resuming are entirely client-side and carry
+// on regardless; only the account-backed panels go quiet, and they say why.
+function isSessionExpired() { return expiredShot || sessionExpired; }
+function noteAuthFailure() {
+  if (!token || sessionExpired) return;
+  sessionExpired = true;
+  stopMenuPolling();
+  refreshOfflineUi();
+}
+function noteAuthSuccess() {
+  if (!sessionExpired) return;
+  sessionExpired = false;
   refreshOfflineUi();
 }
 
@@ -229,23 +266,25 @@ let statsSeries = null;
 let statsMetric = { units: true, land: true, food: true };
 const JOURNAL_KEY = 'supply-line-replay-journal-v1';
 
+// True once a write to storage has failed and pruning didn't rescue it (#240).
+// Autosave silently giving up is the difference between "you lost ten seconds"
+// and "your match is gone", so it gets said out loud — in the match and on the
+// menu card.
+let saveDegraded = false;
+
 function readJournal() {
-  if (SHOT) return null;
-  try { return JSON.parse(localStorage.getItem(JOURNAL_KEY) || 'null'); } catch { return null; }
+  if (!persistenceEnabled) return null;
+  return saveStore.read(JOURNAL_KEY, null);
 }
 function writeJournal() {
-  if (SHOT || !recorder || !game) return;
-  try {
-    localStorage.setItem(JOURNAL_KEY,
-      JSON.stringify(RP.journalOf(recorder, game, statsSeries)));
-  } catch {
-    // a full quota is not worth losing the match over — the resume will
-    // just find no journal and decline to record
-  }
+  if (!persistenceEnabled || !recorder || !game) return;
+  // a full quota is not worth losing the match over — the resume will
+  // just find no journal and decline to record
+  saveStore.write(JOURNAL_KEY, RP.journalOf(recorder, game, statsSeries));
 }
 function clearJournal() {
-  if (SHOT) return;
-  try { localStorage.removeItem(JOURNAL_KEY); } catch { }
+  if (!persistenceEnabled) return;
+  saveStore.remove(JOURNAL_KEY);
 }
 
 let panelHeld = false;
@@ -280,6 +319,8 @@ async function api(path, body) {
     throw e;
   }
   noteApiSuccess();     // the server answered — even a 401 proves reachability
+  if (res.status === 401) noteAuthFailure();   // ...but not that it knows us (#240)
+  else noteAuthSuccess();
   let data = {};
   try { data = await res.json(); } catch { }
   if (!res.ok) {
@@ -340,6 +381,7 @@ async function loadHistory() {
   try {
     const res = await fetch('/api/matches', { headers: apiHeaders });
     noteApiSuccess();
+    if (res.status === 401) noteAuthFailure(); else if (res.ok) noteAuthSuccess();
     if (!res.ok) {
       // Reachable but not authorised: local rows still stand on their own, and
       // so do a ?shot= boot's pinned rows (#223) — neither needs an account.
@@ -417,6 +459,8 @@ async function loadRatings() {
     } catch { /* offline / 503 — the cache stands in */ }
     try {
       const res = await fetch('/api/ratings', { headers: apiHeaders });
+      // The boot request that learns fastest whether our token still works (#240).
+      if (res.status === 401) noteAuthFailure(); else if (res.ok) noteAuthSuccess();
       if (res.ok) {
         const data = await res.json();
         me = data.me; top = data.top || []; signedIn = true;
@@ -471,32 +515,38 @@ function sizeLabel(key) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-// v1 saves predate per-unit health and are not migratable — discard.
-// v2–v4 saves load fine (new fields default; farmer HP is clamped;
-// old attack-move orders are migrated by deserialize).
-function validSave(data) {
-  return !!(data && data.v >= 2 && data.v <= 4 && !data.result && !data.pvp);
-}
-
-function loadSaveData() {
-  try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    return validSave(data) ? data : null;
-  } catch { return null; }
-}
+// The save gate lives in resume.js now (#240) and reads its version range
+// straight off sim.js, so the serializer, the menu and the server can never
+// disagree about what a valid save is again. v1 saves predate per-unit health
+// and are not migratable; v2–v4 load fine (new fields default; farmer HP is
+// clamped; old attack-move orders are migrated by deserialize).
+function loadSaveData() { return RES.readSave(saveStore); }
 
 // Cross-device resume (#176): solo saves also live server-side under the
 // player's account. The freshest of the local and server copies (by the
 // savedAt stamp; older saves without one count as 0) drives Resume.
 let serverSaveData = null;
+let saveShot = null;    // ?shot=resume-card / resume-unreadable pin (#240)
+
+// The menu's whole view of "is there a match to come back to":
+//   { code, data, source } where code is 'none' | 'ok' | 'too-new' | 'unreadable'.
+// A damaged save has to reach the menu as a REASON, not as a missing button —
+// silently hiding Resume is what made #240 read as "my game is just gone".
+function saveState() {
+  if (saveShot) return saveShot;
+  const local = loadSaveData();
+  const picked = RES.pickSave(local.data, serverSaveData);
+  if (picked.data) return { code: 'ok', data: picked.data, source: picked.source };
+  // Nothing loadable. Prefer whichever side has an actual complaint to make.
+  if (local.code !== 'none') return { code: local.code, data: null, source: 'local' };
+  const remoteCode = RES.classifySave(serverSaveData);
+  if (remoteCode !== 'none') return { code: remoteCode, data: null, source: 'remote' };
+  return { code: 'none', data: null, source: null };
+}
 
 function bestSave() {
-  const local = loadSaveData();
-  const remote = validSave(serverSaveData) ? serverSaveData : null;
-  if (local && remote) return (remote.savedAt || 0) > (local.savedAt || 0) ? remote : local;
-  return local || remote;
+  const st = saveState();
+  return st.code === 'ok' ? st.data : null;
 }
 
 async function refreshServerSave() {
@@ -504,6 +554,7 @@ async function refreshServerSave() {
   try {
     const r = await fetch('/api/save', { headers: apiHeaders });
     noteApiSuccess();
+    if (r.status === 401) noteAuthFailure(); else noteAuthSuccess();
     const j = r.ok ? await r.json() : null;
     serverSaveData = j && j.save ? j.save.data : null;
   } catch { serverSaveData = null; noteApiFailure(); }
@@ -513,14 +564,55 @@ async function refreshServerSave() {
 // Finished/discarded matches clear the save everywhere (fire-and-forget
 // on the server side, like the match-result post).
 function clearSaves() {
-  localStorage.removeItem(SAVE_KEY);
-  try { localStorage.removeItem(JOURNAL_KEY); } catch { } // #232: the log dies with its save
+  if (!persistenceEnabled) return;   // a preview boot owns no save (#240)
+  RES.clearSave(saveStore);
+  clearJournal();                    // #232: the log dies with its save
+  RES.clearSession(saveStore);
+  saveDegraded = false;
   serverSaveData = null;
   if (token) fetch('/api/save', { method: 'DELETE', headers: apiHeaders }).catch(() => { });
 }
 
+// How long ago, in words. Short and absolute — "saved 20 seconds ago" is the
+// one fact that tells a returning player whether this is the match they were
+// just playing.
+function fmtAgo(ms) {
+  if (ms == null) return 'just now';
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 45) return `${s} second${s === 1 ? '' : 's'} ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} minute${m === 1 ? '' : 's'} ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h} hour${h === 1 ? '' : 's'} ago`;
+  return `${Math.round(h / 24)} days ago`;
+}
+
+// The menu's in-progress-match card. Three states, and every one of them says
+// something: a resumable match describes itself, a broken one explains itself
+// and offers the only clean way out, and no save at all shows nothing.
 function refreshMenu() {
-  $('btn-resume').classList.toggle('hidden', !bestSave());
+  const st = saveState();
+  const card = $('resume-card');
+  const broken = $('resume-broken');
+  const ok = st.code === 'ok';
+  card.classList.toggle('hidden', !ok);
+  broken.classList.toggle('hidden', !(st.code === 'too-new' || st.code === 'unreadable'));
+  if (ok) {
+    const sum = RES.saveSummary(st.data, Date.now());
+    const bits = [
+      diffLabel(sum.difficulty),
+      `${sizeLabel(sum.sizeKey)} map`,
+      `${fmtDur(S.gameSeconds(sum.tick))} played`,
+    ];
+    const where = st.source === 'remote' ? ' on another device' : '';
+    $('resume-detail').textContent =
+      `${bits.join(' · ')} — saved${where} ${fmtAgo(sum.ageMs)}.`;
+    $('resume-degraded').classList.toggle('hidden', !saveDegraded);
+  } else if (!broken.classList.contains('hidden')) {
+    $('resume-broken-detail').textContent = st.code === 'too-new'
+      ? 'It was saved by a newer version of the game, so this one can\'t read it. Your recorded matches and your rating are unaffected.'
+      : 'The saved data was damaged or incomplete, so it can\'t be loaded. Your recorded matches and your rating are unaffected.';
+  }
 }
 
 // ---------------------------------------------------------------- offline UI (#221)
@@ -530,11 +622,17 @@ function refreshMenu() {
 // not to show three failed fetches.
 function refreshOfflineUi() {
   const off = isOffline();
+  const expired = isSessionExpired();
+  // Two different sentences, never both: "no connection" and "the server
+  // doesn't know you any more" need different things from the player (#240).
   $('offline-badge').classList.toggle('hidden', !off);
+  $('expired-badge').classList.toggle('hidden', off || !expired);
+  const asleep = off || expired;
   $('mp-offline').classList.toggle('hidden', !off);
-  $('mp-forms').classList.toggle('hidden', off);
-  $('challenge-inbox').classList.toggle('hidden', off);
-  if (off) {
+  $('mp-expired').classList.toggle('hidden', off || !expired);
+  $('mp-forms').classList.toggle('hidden', asleep);
+  $('challenge-inbox').classList.toggle('hidden', asleep);
+  if (asleep) {
     $('btn-mp-rejoin').classList.add('hidden');
     $('mp-waiting').classList.add('hidden');
     stopMenuPolling();
@@ -689,20 +787,49 @@ $('btn-new').addEventListener('click', () => {
   startNewMatch();
 });
 
-$('btn-resume').addEventListener('click', () => {
+// The one resume path, shared by the button and by the automatic recovery a
+// reload triggers (#240). Returns true if a match is now on screen.
+function resumeSaved(opts) {
   const data = bestSave();
-  if (!data) { refreshMenu(); return; }
+  if (!data) { refreshMenu(); return false; }
+  let g;
   try {
-    me = 0;
-    startMatch(S.deserialize(data));
-    // the chosen save becomes the local copy — it may have arrived from
-    // another device (#176)
-    try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch { }
+    g = S.deserialize(data);
   } catch (e) {
+    // Classified 'ok' but it still won't load — the only honest outcome is to
+    // say so and clear it, rather than leave a button that always fails.
     clearSaves();
     refreshMenu();
     showMenuError('Saved match could not be loaded — it was discarded.');
+    return false;
   }
+  me = 0;
+  startMatch(g, { view: data.view });
+  // the chosen save becomes the local copy — it may have arrived from
+  // another device (#176)
+  saveStore.write(SAVE_KEY, data);
+  if (opts && opts.paused) {
+    paused = true;
+    $('btn-pause').textContent = '▶';
+  }
+  return true;
+}
+
+$('btn-resume').addEventListener('click', () => { resumeSaved(); });
+
+// The dead end out of a save this build can't read. Discarding is the only
+// clean action, so it's the only button — but it asks first, because a save
+// that is merely from a newer build may still load in the tab next door.
+$('btn-resume-discard').addEventListener('click', () => {
+  showConfirm('Discard the saved match?',
+    'It can\'t be loaded by this version of the game. Discarding clears it so the menu stops offering it.', [
+    { label: '🗑️ Discard it', cls: 'bg-red-700 hover:bg-red-600 text-white', fn: () => {
+      saveShot = null;
+      clearSaves();
+      refreshMenu();
+      toast('Saved match discarded');
+    } },
+  ]);
 });
 
 // ---------------------------------------------------------------- tutorial (#185)
@@ -966,8 +1093,9 @@ function showMenuError(msg) {
 function startMenuPolling() {
   stopMenuPolling();
   // No point polling a server we can't reach — the `online` handler restarts
-  // this the moment we're back (#221).
-  if (isOffline()) { refreshOfflineUi(); return; }
+  // this the moment we're back (#221) — nor one that has stopped accepting
+  // our token, which would just be a 401 every three seconds (#240).
+  if (isOffline() || isSessionExpired()) { refreshOfflineUi(); return; }
   refreshLobbies();
   menuTimer = setInterval(refreshLobbies, 3000);
 }
@@ -1175,15 +1303,25 @@ document.addEventListener('click', (e) => {
 });
 function hideSuggest() { $('challenge-suggest').classList.add('hidden'); }
 
+// One rejoin path (#240), shared by the menu button and by the automatic
+// recovery a reload triggers. The server owns the sim: rejoiners (either role)
+// resume from its latest snapshot and keep syncing like any other client.
+async function rejoinLobby(id) {
+  const st = await api(`/api/lobbies/${id}/state`);
+  if (st.status !== 'active') {
+    if (persistenceEnabled) RES.clearSession(saveStore);
+    toast('That match is already over.');
+    refreshLobbies();
+    loadHistory();
+    return false;
+  }
+  beginPvp(st.role, st.id, st.opponent, st.snapshot || null);
+  return true;
+}
+
 $('btn-mp-rejoin').addEventListener('click', async () => {
   if (!mineLobby) return;
-  try {
-    const st = await api(`/api/lobbies/${mineLobby.id}/state`);
-    if (st.status !== 'active') { toast('That match is already over.'); refreshLobbies(); loadHistory(); return; }
-    // the server owns the sim: rejoiners (either role) resume from its
-    // latest snapshot and keep syncing like any other client
-    beginPvp(st.role, st.id, st.opponent, st.snapshot || null);
-  } catch (err) { toast(err.message); }
+  try { await rejoinLobby(mineLobby.id); } catch (err) { toast(err.message); }
 });
 
 // ---------------------------------------------------------------- pvp session
@@ -1205,6 +1343,10 @@ function beginPvp(role, lobbyId, opponent, snap) {
     kick: null,
   };
   me = role === 'host' ? 0 : 1;
+  // #240: the server forfeits an absent player after 60 s, so a reload has to
+  // rejoin fast — faster than the 3 s menu poll noticing the lobby. The
+  // breadcrumb carries the lobby id straight to the next boot.
+  if (persistenceEnabled) RES.markSession(saveStore, 'pvp', { lobbyId, savedAt: Date.now() });
   if (snap) applySnapshot(snap);
   mpSync();
   mp.timer = setInterval(mpSync, 1000);
@@ -1399,6 +1541,7 @@ function replayBlocked() {
 function relay(c) {
   RP.recordCommand(recorder, game ? game.tick : 0, c);
   if (inPvp()) sendCmd(c);
+  saveSoon();   // #240: every order is worth a save; the debounce coalesces bursts
 }
 
 function doMove(b, x, y, target) {
@@ -1506,10 +1649,12 @@ function doWallRole(w, role) {
 
 // ---------------------------------------------------------------- match lifecycle
 
-function startMatch(g) {
+function startMatch(g, opts) {
   stopAttract(); // the menu backdrop must cost nothing while playing
   game = g;
   resultPosted = false;
+  saveDirty = false;
+  frameCrashed = false;   // a fresh match gets a fresh loop
   // Record every ordinary solo match (#223). Skipped for PvP (the server
   // records it), for a replay itself, and for the tutorial / practice /
   // sandbox games — none of which are recorded as matches either.
@@ -1577,6 +1722,14 @@ function startMatch(g) {
   view.cx = start.x + 2; view.cy = start.y;
   const cssW = window.innerWidth;
   view.scale = Math.max(10, Math.min(20, cssW / (cssW < 640 ? 22 : 30)));
+  // A resume that dumps you back at your home settlement isn't a resume (#240):
+  // the saved camera comes back with the match. Non-sim data, so it rides in
+  // the payload beside savedAt and needs no version bump.
+  const savedView = opts && opts.view;
+  if (savedView && Number.isFinite(savedView.cx) && Number.isFinite(savedView.cy)
+    && Number.isFinite(savedView.scale) && savedView.scale > 0) {
+    view.cx = savedView.cx; view.cy = savedView.cy; view.scale = savedView.scale;
+  }
   if (g.tutorial) {
     // open on a close-up of the first steps' subjects — the home
     // settlement and the army camped beside it (the settlement center is
@@ -1604,9 +1757,22 @@ function startMatch(g) {
     && !flag('controls_touch_seen')) {
     openControlsTour({ mode: 'tour', set: 'touch', gated: true });
   }
+  // Save NOW, not in a minute (#240). The periodic autosave used to be the
+  // first write of a match, so anything that took the page away inside the
+  // opening minute lost the whole thing — the exact window a platform iframe
+  // remount or a phone dropping the tab lands in.
+  saveGame(true);
+  refreshSaveWarning();
 }
 
 function backToMenu() {
+  // A deliberate exit (#240). Save first — leaving the menu is not leaving the
+  // match — then drop the breadcrumb, so the next boot lands on the menu
+  // instead of shoving the player back into a game they chose to step out of.
+  flushSaveSoon();
+  saveGame(true);
+  if (persistenceEnabled) RES.clearSession(saveStore);
+  frameCrashed = false;
   TUT.end(); // no-op unless a tutorial session is live
   closeControlsTour();
   player = null;                                  // replay teardown (#223)
@@ -1634,31 +1800,110 @@ function backToMenu() {
   startAttract();
 }
 
-function saveGame(push) {
-  // `game.replay` matters here (#223): a replay IS a fresh solo game at tick 0
-  // as far as every other clause is concerned, so without it watching a replay
-  // would overwrite the player's real autosave and their server save slot.
-  if (!game || game.replay || game.result || game.pvp || game.tutorial || game.sandbox) return;
+// Is this game one the player expects to come back to? A replay matters here
+// (#223): it IS a fresh solo game at tick 0 as far as every other clause is
+// concerned, so without it watching a replay would overwrite the player's real
+// autosave and their server save slot.
+function savableGame(g) {
+  return !!(g && !g.replay && !g.result && !g.pvp && !g.tutorial && !g.sandbox);
+}
+
+// keepalive fetches are capped at ~64 KB by the browser, and a large-map save
+// can exceed that — so an unload-time push is attempted only when it fits.
+// The local write has already happened either way, and the freshest savedAt
+// wins at resume time.
+const KEEPALIVE_MAX = 60 * 1024;
+
+// One write of the in-progress match: this device first (that copy is what a
+// reload reads), then the account (that copy is what another device reads).
+function saveGame(push, opts) {
+  if (!persistenceEnabled) return;   // a ?shot= / ?demo= boot owns no save (#240)
+  if (!savableGame(game)) return;
+  saveDirty = false;
+  let data;
   try {
-    const data = S.serialize(game);
-    data.savedAt = Date.now();
-    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    data = S.serialize(game);
+  } catch { return; }
+  data.savedAt = Date.now();
+  data.view = { cx: view.cx, cy: view.cy, scale: view.scale };
+
+  // #240: a quota-full localStorage used to make this a silent no-op forever —
+  // the match kept playing and then vanished on the next reload. Free the
+  // biggest expendable things first (finished matches' replay logs, then this
+  // match's own order journal) and retry after each; only give up out loud.
+  const res = RES.persistSave(saveStore, data, [
+    { name: 'replays', run: () => dropOldestLocalReplay() },
+    { name: 'journal', run: () => { clearJournal(); recordingLost = true; recorder = null; return true; } },
+  ]);
+  const wasDegraded = saveDegraded;
+  saveDegraded = !res.ok;
+  if (res.pruned.includes('journal')) {
+    // #232 already has the vocabulary for this: no journal, no replay.
+    $('btn-end-replay').classList.add('hidden');
+  }
+  if (res.ok) {
     // #232: the order log lives or dies with the save it belongs to. Written
     // in the same breath so the journal's stamped tick always matches the
     // save's — that equality is what proves the two describe one match.
     writeJournal();
-    // cross-device resume (#176): mirror the save to the server. Skipped
-    // on beforeunload (keepalive fetches cap at ~64 KB and saves can
-    // exceed that) — the ≤60 s-stale periodic copy is accepted, and the
-    // freshest savedAt wins at resume time.
-    if (push && token) {
-      fetch('/api/save', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...apiHeaders },
-        body: JSON.stringify(data),
-      }).catch(() => { });
-    }
-  } catch { }
+    // The breadcrumb that turns a reload into a resume (#240): its presence on
+    // the next boot means the page went away MID-MATCH. Every deliberate exit
+    // clears it, so it can never auto-resume someone who quit to the menu.
+    RES.markSession(saveStore, 'solo', { savedAt: data.savedAt });
+  }
+  if (saveDegraded !== wasDegraded) refreshSaveWarning();
+
+  // cross-device resume (#176): mirror the save to the server.
+  if (push && token && !isSessionExpired()) {
+    const body = JSON.stringify(data);
+    const unload = !!(opts && opts.unload);
+    if (unload && body.length > KEEPALIVE_MAX) return;
+    fetch('/api/save', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...apiHeaders },
+      body,
+      keepalive: unload,
+    }).catch(() => { });
+  }
+}
+
+// One expendable thing to free when the quota bites: the oldest finished
+// match's replay log. Returns false when there is nothing left to drop, so
+// persistSave moves on to the next step instead of looping.
+function dropOldestLocalReplay() {
+  const rows = RP.readLocal(offStore);
+  if (!rows.length) return false;
+  RP.dropLocal(offStore, rows[rows.length - 1].client_id);
+  refreshLocalReplayIndex();
+  return true;
+}
+
+// Orders are the moments a player would most hate to lose (#240), so every one
+// of them arms a save — trailing-debounced, so a burst of clicks is one write
+// and the sim never stutters mid-drag.
+let saveDirty = false;
+let saveSoonTimer = null;
+const SAVE_DEBOUNCE_MS = 2000;
+function saveSoon() {
+  if (!persistenceEnabled || !savableGame(game)) return;
+  saveDirty = true;
+  if (saveSoonTimer) return;
+  saveSoonTimer = setTimeout(() => {
+    saveSoonTimer = null;
+    if (saveDirty) saveGame(true);
+  }, SAVE_DEBOUNCE_MS);
+}
+function flushSaveSoon() {
+  if (saveSoonTimer) { clearTimeout(saveSoonTimer); saveSoonTimer = null; }
+}
+
+// The "⚠️ autosave isn't working" chip. Shown in the match, because that is
+// where the player can still do something about it (finish up, free space) —
+// finding out on the menu afterwards is finding out too late.
+function refreshSaveWarning() {
+  const el = $('save-warning');
+  if (!el) return;
+  el.classList.toggle('hidden', !(saveDegraded && game && savableGame(game)));
 }
 
 function showEndModal(win, reason) {
@@ -1690,9 +1935,11 @@ function showEndModal(win, reason) {
 // local sim until the server confirms or corrects it within a second.
 function endMatch(result) {
   resultPosted = true;
+  flushSaveSoon();
   // sandbox (tutorial "keep playing"): show the end modal, but the match
   // is a throwaway — never recorded, and the player's real save survives
-  if (!game.sandbox) clearSaves();
+  if (!game.sandbox) clearSaves();   // clearSaves drops the breadcrumb too (#240)
+  else if (persistenceEnabled) RES.clearSession(saveStore);
   const win = result === 'win';
   $('end-emoji').textContent = win ? '🏆' : '🏳️';
   $('end-title').textContent = win ? 'Victory!' : result === 'surrender' ? 'Surrendered' : 'Defeat';
@@ -1851,8 +2098,20 @@ $('btn-backtowork').addEventListener('click', () => {
 });
 $('btn-cancel-order').addEventListener('click', onCancel);
 
-document.addEventListener('visibilitychange', () => { if (document.hidden) saveGame(true); });
-window.addEventListener('beforeunload', () => saveGame(false));
+// Every way a page can go away (#240). `beforeunload` alone is not enough:
+// iOS Safari fires it unreliably and never fires it at all for a backgrounded
+// tab the OS discards — which is precisely the reload this issue is about.
+// `pagehide` and `freeze` cover those, `visibilitychange` covers app-switching.
+// All four take the same path; the local write is synchronous, so whichever
+// fires first has already done the important half.
+function saveOnExit() {
+  flushSaveSoon();
+  saveGame(true, { unload: true });
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveOnExit(); });
+window.addEventListener('pagehide', saveOnExit);
+window.addEventListener('freeze', saveOnExit);
+window.addEventListener('beforeunload', saveOnExit);
 
 // ---------------------------------------------------------------- selection & orders
 
@@ -4239,8 +4498,27 @@ function updateHUD() {
   game.events.length = 0;
 }
 
+// The loop re-schedules before it runs, so a thrown exception would otherwise
+// repeat sixty times a second — and the dev-console bridge posts every one of
+// them to the parent window. Catch it once, pause, and save what we have:
+// a frozen-but-saved match is recoverable, a crash loop is not (#240).
+let frameCrashed = false;
 function frame(ts) {
   requestAnimationFrame(frame);
+  if (frameCrashed) return;   // hold the last frame; the DOM controls still work
+  try {
+    frameBody(ts);
+  } catch (e) {
+    frameCrashed = true;
+    console.error('frame failed', e);
+    paused = true;
+    $('btn-pause').textContent = '▶';
+    saveGame(true);
+    toast('⚠️ Something went wrong — the match is paused and saved');
+  }
+}
+
+function frameBody(ts) {
   const dt = Math.min(100, ts - lastFrame || 16);
   lastFrame = ts;
   if (!game) return;
@@ -4308,7 +4586,9 @@ function frame(ts) {
     renderPanel(false);
   }
   if (game.replay) refreshReplayUi();   // clock + scrub position (#223)
-  if (!game.pvp && !game.replay && game.tick - lastSaveTick >= 300) {
+  // #240: every 10 s of sim time, down from 30. At the 1× default that is a
+  // write a minute more often, and it bounds what an unannounced reload costs.
+  if (!game.pvp && !game.replay && game.tick - lastSaveTick >= 100) {
     lastSaveTick = game.tick;
     saveGame(true);
   }
@@ -5452,6 +5732,28 @@ function registerServiceWorker() {
   });
 }
 
+// ---------------------------------------------------------------- resume shots (#240)
+
+// The menu's in-progress-match card renders from the signed-in player's OWN
+// save row, so no seeded database state can reach it and no plain URL can
+// reach it either — a reviewer with no match in progress sees nothing. These
+// links pin the classifier's answer in memory instead: no fetch, no write, no
+// localStorage, identical in staging and production, and immune to whose
+// account is looking. Same discipline as the offline-menu and controls shots.
+function initResumeShot(kind) {
+  if (kind === 'resume-unreadable') {
+    // one version past what this build can read — the "we couldn't restore it"
+    // card, reachable without having to forge a save by hand
+    saveShot = { code: 'too-new', data: null, source: 'local' };
+    return;
+  }
+  const g = S.newGame('staging-demo-resume', 'small', 'normal');
+  g.tick = 9000;
+  const data = S.serialize(g);
+  data.savedAt = Date.now() - 40_000;
+  saveShot = { code: 'ok', data, source: 'local' };
+}
+
 if (typeof navigator !== 'undefined' && navigator.onLine === false) netDown = true;
 if (SHOT === 'offline-menu') initOfflineShot();
 // the two list shots seed their stand-in rows BEFORE the boot block below, so
@@ -5459,9 +5761,61 @@ if (SHOT === 'offline-menu') initOfflineShot();
 if (SHOT === 'replay-list' || SHOT === 'replay-stale') {
   try { initReplayListShot(); } catch (e) { console.warn('shot link failed', e); }
 }
+if (SHOT === 'resume-card' || SHOT === 'resume-unreadable') {
+  try { initResumeShot(SHOT); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'session-expired') expiredShot = true;
 refreshOfflineUi();
 refreshOfflineCard();
 registerServiceWorker();
+
+// ---------------------------------------------------------------- auto-resume (#240)
+
+// The page reloading is not something this app can prevent — the platform
+// remounts its iframe, a phone drops a backgrounded tab, someone pulls to
+// refresh. What it CAN do is make a reload cost nothing: if the breadcrumb
+// says the last page went away mid-match, put the player straight back in.
+//
+// Deliberately local-only for solo: it must not wait on /api/save, because the
+// whole point is to be back on screen before the player wonders where their
+// match went. If the account's copy turns out to be fresher it is still one
+// tap away on the menu after they exit.
+//
+// PvP goes first and goes fast — the server forfeits an absent player after
+// 60 s, so this is the difference between a reload and a loss.
+function autoResume() {
+  if (!persistenceEnabled) return;   // preview boots never touch a real match
+  if (game) return;                  // a deep link already opened something
+  const session = RES.readSession(saveStore);
+  const local = loadSaveData();
+  if (!RES.shouldAutoResume(session, local.code, false)) return;
+
+  if (session.mode === 'pvp') {
+    // PvP is server-authoritative, so with no reachable account there is
+    // nothing to rejoin — say that rather than firing a request that can only
+    // fail. The breadcrumb stays, so the next boot tries again.
+    if (!token || isOffline()) {
+      showMenuError('You were in a multiplayer match — reconnect and use ⚔️ Rejoin match to get back in.');
+      return;
+    }
+    rejoinLobby(session.lobbyId).then((ok) => {
+      if (ok) toast('⚔️ Reconnected — you were away for a moment');
+    }).catch(() => {
+      // Couldn't reach it: leave the breadcrumb alone (the next boot, or the
+      // menu's own Rejoin button, can still get them back in) and say so.
+      showMenuError('Could not rejoin your multiplayer match automatically — try ⚔️ Rejoin match below.');
+    });
+    return;
+  }
+
+  // Resume PAUSED. The player has just been dropped back into a match they
+  // didn't choose to leave; ambushing them with a running sim is worse than
+  // making them press play.
+  const at = fmtDur(S.gameSeconds(local.data.tick | 0));
+  if (resumeSaved({ paused: true })) {
+    toast(`↩️ Welcome back — resumed at ${at}. Press ▶ to continue.`);
+  }
+}
 
 // ---------------------------------------------------------------- boot
 
@@ -5474,6 +5828,7 @@ loadHistory();
 loadRatings();
 startMenuPolling();
 flushOutbox();        // anything played offline since the last visit
+autoResume();         // #240: the page went away mid-match — put it back
 if (SHOT === 'offline-menu') {
   try { bootOfflineMenu(); } catch (e) { console.warn('shot link failed', e); }
 }

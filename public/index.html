@@ -186,6 +186,11 @@
       <span id="stat-time" class="text-zinc-400 font-mono"></span>
       <button id="btn-backtowork" class="btn-sm px-3 rounded bg-emerald-800 hover:bg-emerald-700 hidden whitespace-nowrap"></button>
       <span id="stat-opp" class="hidden text-red-300 truncate max-w-[30vw]"></span>
+      <!-- #240: autosave has stopped working (a full storage quota). Said here,
+           mid-match, because that's while the player can still act on it —
+           discovering it on the menu afterwards is discovering it too late. -->
+      <span id="save-warning" class="hidden text-amber-300 text-xs whitespace-nowrap"
+            title="This device's storage is full, so the match can't be saved. Free some space, or finish this match before reloading.">⚠️ Autosave off</span>
       <span class="flex-1"></span>
       <button id="btn-help" aria-label="Controls help" title="Controls help" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">🕹️</button>
       <button id="btn-pause" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">⏸</button>
@@ -311,9 +316,34 @@
         📴 Offline — solo matches vs the AI still work. Results sync when you're back.
       </div>
 
-      <button id="btn-resume" class="hidden btn w-full py-3 rounded-xl bg-emerald-700 hover:bg-emerald-600 font-semibold text-lg">
-        ▶ Resume Match
-      </button>
+      <!-- expired session (#240): the server is reachable but no longer
+           accepts this iframe's token. Distinct from offline, because the
+           answer is different — reopen the app, don't wait for a signal. -->
+      <div id="expired-badge" class="hidden bg-amber-950/60 border border-amber-800 rounded-xl px-3 py-2 text-sm text-amber-200 text-center">
+        🔑 Your Usernode session has expired — you're playing offline. Sign in again to record this match and update your rating.
+      </div>
+
+      <!-- in-progress match (#240): a card, not a bare button. It names the
+           match so a returning player can tell it IS theirs, and the save's
+           age is the fact that answers "is this the one I was just playing?" -->
+      <div id="resume-card" class="hidden bg-emerald-950/40 border border-emerald-800 rounded-xl p-4 flex flex-col gap-2">
+        <h2 class="font-semibold text-emerald-200">Match in progress</h2>
+        <p id="resume-detail" class="text-sm text-emerald-100/80"></p>
+        <p id="resume-degraded" class="hidden text-xs text-amber-300">⚠️ Autosave isn't working on this device — this match may not survive a reload.</p>
+        <button id="btn-resume" class="btn w-full py-3 rounded-xl bg-emerald-700 hover:bg-emerald-600 font-semibold text-lg">
+          ▶ Resume Match
+        </button>
+      </div>
+
+      <!-- ...and the honest version of the same card when the save can't be
+           read. A missing button reads as "my game is gone"; this says why. -->
+      <div id="resume-broken" class="hidden bg-zinc-900 border border-amber-800/60 rounded-xl p-4 flex flex-col gap-2">
+        <h2 class="font-semibold text-amber-200">We couldn't restore your last match</h2>
+        <p id="resume-broken-detail" class="text-sm text-zinc-400"></p>
+        <button id="btn-resume-discard" class="btn w-full py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 font-semibold">
+          🗑️ Discard and start fresh
+        </button>
+      </div>
 
       <div class="bg-zinc-900 rounded-xl p-4 flex flex-col gap-3 border border-zinc-800">
         <h2 class="font-semibold text-zinc-200">New Match</h2>
@@ -355,6 +385,11 @@
              3 s lobby poll stops. -->
         <p id="mp-offline" class="hidden text-sm text-zinc-400">
           Multiplayer needs a connection — you'll see lobbies and challenges again once you're back online.
+        </p>
+
+        <!-- same collapse, different reason (#240) -->
+        <p id="mp-expired" class="hidden text-sm text-zinc-400">
+          Multiplayer needs a signed-in session — reopen the app from Usernode to see lobbies and challenges again.
         </p>
 
         <!-- incoming challenges (hidden container is always present) -->

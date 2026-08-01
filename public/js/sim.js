@@ -22,6 +22,22 @@ import * as SUP from './supply.js';
 //     comes from the supply units alone (#239).
 export const SIM_VERSION = 4;
 
+// Save-payload version (#240). SEPARATE from SIM_VERSION: this one describes
+// the SHAPE of what serialize() writes, not how the sim behaves, so a save
+// survives an engine change that retires every replay.
+//
+// !! NOTHING MAY HARD-CODE THESE NUMBERS !! serialize() stamps SAVE_VERSION,
+// the menu's classifier accepts [MIN_SAVE_VERSION, SAVE_VERSION], and the
+// server's /api/save validator imports both from this file. That drift — the
+// serializer bumped to 5 while the menu still accepted 2–4 — is what made
+// every autosave unresumable and cost players their matches on reload.
+// Bump SAVE_VERSION only when a payload change is NOT backward-compatible,
+// and raise MIN_SAVE_VERSION only when an old payload can no longer be
+// migrated by deserialize().
+// v5: carries the PRNG cursor (#223). v2–v4 load fine (fields default).
+export const SAVE_VERSION = 5;
+export const MIN_SAVE_VERSION = 2;
+
 // The sim's own seeded PRNG (#223). Every draw the simulation makes runs
 // through here so a match is a pure function of (seed, sizeKey, difficulty,
 // order log) — mulberry32's exact step, but with the state living on the game
@@ -4219,7 +4235,7 @@ export function serialize(game) {
   const fertDelta = {};
   for (const i of game.pillaged) fertDelta[i] = game.map.fert[i];
   const data = {
-    v: 5,
+    v: SAVE_VERSION,
     seed: game.seed, sizeKey: game.sizeKey, difficulty: game.difficulty,
     tick: game.tick, nextId: game.nextId, result: game.result,
     // the sim's PRNG cursor (#223): a resumed save / revived PvP runner has to
