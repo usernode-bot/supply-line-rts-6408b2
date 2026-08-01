@@ -11,6 +11,14 @@ export const UNLOAD_RANGE = 2.5;  // carrier-to-settlement distance that starts 
 export const UNLOAD_SLACK = 0.6;  // hysteresis past the dock range before re-approaching
 export const TOUCH_SLACK = 0.15;  // tolerance past touching radii for blob deliveries (#147)
 
+// The hold: only SUPPLY units carry (#239). A mixed group escorting a line
+// hauls what its carriers can hold, never what its fighters could — the
+// escort is muscle, not mules. For an all-supply caravan this is exactly
+// total × CARRY_PER_UNIT, so nothing about an ordinary line changes.
+export function holdCap(b) {
+  return b.count.supply * CARRY_PER_UNIT;
+}
+
 export function createRoute(game, blob, target, initialCargo, sourceId) {
   // target: { kind: 'blob'|'settlement'|'wall', id }
   // initialCargo: food carried over from a previous route (#103).
@@ -68,7 +76,7 @@ export function createRoute(game, blob, target, initialCargo, sourceId) {
   }
   // carried-over cargo stays aboard (#103): a full carrier heads straight
   // out; a partial one loads first (the load phase tops up, never resets)
-  const cap = (blob.count.deploy + blob.count.supply + blob.count.farm) * CARRY_PER_UNIT;
+  const cap = holdCap(blob);
   const cargo = Math.min(initialCargo || 0, cap);
   const phase = cargo >= cap - 0.01 ? 'go' : 'load';
   blob.order = { type: 'route', routeId: route.id, phase, cargo, wait: 0 };

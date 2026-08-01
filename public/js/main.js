@@ -2902,6 +2902,10 @@ function showUnitOptions(screen) {
   const cnt = { deploy: 0, supply: 0, farm: 0 };
   for (const b of blobs) { cnt.deploy += b.count.deploy; cnt.supply += b.count.supply; cnt.farm += b.count.farm; }
   const pureSupply = cnt.supply === tot && tot > 0;
+  // a MIXED group can run a line too (#239) — it goes as one blob, its
+  // supply units hauling and its fighters escorting
+  const hasSupply = cnt.supply > 0;
+  const routeLabel = cnt.supply < tot ? '🚚 Escort a supply route…' : '🚚 Supply route…';
   const atHome = blobs.some(b => S.isAtHome(game, b));
   const pillaging = blobs.some(b => b.pillaging);
   const canSplit = blobs.length === 1 && tot >= 2;
@@ -2912,7 +2916,7 @@ function showUnitOptions(screen) {
     ${canSplit ? `<button data-act="psplit" style="touch-action:none" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">✂️ Split ${Math.floor(tot / 2)} / ${tot} <span class="text-xs text-zinc-500">(hold to adjust)</span></button>` : ''}
     <button data-act="pbuildarm" ${canBuild ? '' : 'disabled'} class="btn px-3 rounded-lg text-left ${canBuild ? 'bg-zinc-800 hover:bg-zinc-700' : 'bg-zinc-800 text-zinc-500 opacity-40'}">🏠 Build (${S.C.SETT_COST})</button>
     <button data-act="pwallarm" class="btn px-3 rounded-lg text-left bg-zinc-800 hover:bg-zinc-700">🧱 Wall…</button>
-    ${pureSupply ? '<button data-act="proutearm" class="btn px-3 rounded-lg text-left bg-sky-800 hover:bg-sky-700">🚚 Supply route…</button>' : ''}
+    ${hasSupply ? `<button data-act="proutearm" class="btn px-3 rounded-lg text-left bg-sky-800 hover:bg-sky-700">${routeLabel}</button>` : ''}
     <div class="flex gap-1">
       ${roleBtn('deploy', '⚔️', cnt.deploy === tot, false)}${roleBtn('supply', '🚚', pureSupply, false)}${roleBtn('farm', '🌱', cnt.farm === tot, !atHome)}
     </div>
@@ -3281,10 +3285,15 @@ function dispatchBuild(blobs, x, y) {
 
 // Put every selected carrier on the same source→destination line (#133).
 function dispatchRoutes(carriers, target, sourceId) {
-  let ok = 0, err = null;
+  let ok = 0, err = null, escorting = 0;
   for (const c of carriers) {
+    // count the escort BEFORE dispatch — a mixed group runs the line whole
+    // (#239), so its non-hauling units are riding along as guards
+    const guards = c.count.deploy + c.count.farm;
     const r = doRoute(c, target, sourceId);
-    if (r.err) err = r.err; else ok++;
+    if (r.err) { err = r.err; continue; }
+    ok++;
+    escorting += guards;
   }
   if (ok) {
     // name the destination (#142) so a mis-tap is visible, not a mystery
@@ -3301,7 +3310,9 @@ function dispatchRoutes(carriers, target, sourceId) {
       const tb = findBlob(target.id);
       if (tb) pingRoute(tb.x, tb.y);
     }
-    toast(ok > 1 ? `🚚 ${ok} caravans on the supply line → ${dest}` : `🚚 Supply route established → ${dest}`);
+    // #239: name the escort so it's clear the fighters went along
+    const escortNote = escorting > 0 ? ` — ${escorting} escorting` : '';
+    toast((ok > 1 ? `🚚 ${ok} caravans on the supply line → ${dest}` : `🚚 Supply route established → ${dest}`) + escortNote);
   } else if (err) toast(err);
 }
 
@@ -3472,10 +3483,15 @@ function resolvePending(world, pointerType, screen) {
     orderMove(blobs, world, garr ? null : findEnemyTargetAt(world), garr);
   } else if (pending === 'route') {
     // supply routes take two taps (#131): first the source settlement the
-    // caravans load from, then the destination. All selected pure-supply
-    // blobs join the same line (#133).
-    const carriers = blobs.filter(b => S.total(b) > 0 && b.count.supply === S.total(b));
-    if (!carriers.length) { ui.routeSrc = null; return; }
+    // caravans load from, then the destination. Every selected blob holding
+    // supply units joins the same line (#133) — a mixed one goes whole, its
+    // fighters escorting the caravan (#239).
+    const carriers = blobs.filter(b => S.total(b) > 0 && b.count.supply > 0);
+    if (!carriers.length) {
+      ui.routeSrc = null;
+      toast('No supply units in this group');
+      return;
+    }
     const hitR = Math.max(1.5, 24 / view.scale);
     if (ui.routeSrc == null) {
       const src = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
@@ -3557,6 +3573,16 @@ function resolvePending(world, pointerType, screen) {
   renderPanel(true);
 }
 
+// Is the armed route selection a MIXED group (#239)? Drives the extra hint
+// line telling the player the whole group is about to march out as an escort.
+function routeArmedMixed() {
+  const blobs = selectedBlobs();
+  if (!blobs.length) return false;
+  const tot = blobs.reduce((s, b) => s + S.total(b), 0);
+  const sup = blobs.reduce((s, b) => s + b.count.supply, 0);
+  return tot > 0 && sup > 0 && sup < tot;
+}
+
 function updateHint() {
   const el = $('hint');
   // the tutorial card owns the instruction slot for its whole session
@@ -3571,7 +3597,9 @@ function updateHint() {
       : ui.pending === 'route-sett'
         ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination settlement, wall or army to supply…`
         : ui.routeSrc != null
-          ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination — a friendly settlement, wall or army…`
+          // #239: say it out loud when the selection is mixed, so it's clear
+          // the fighters are marching out with the caravan
+          ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination — a friendly settlement, wall or army…${routeArmedMixed() ? ' the whole group will escort the caravan' : ''}`
           : `${isMobile() ? 'Tap' : 'Tap or right-click'} the source settlement to load from…`;
   $('hint-text').textContent = text;
   // #234: touch has no hover, so the placement score rides the hint bar —
@@ -4354,6 +4382,10 @@ function renderPanelInner(force) {
     ? blobs.reduce((s, b) => s + S.fedMeter(b) * S.total(b), 0) / Math.max(1, tot)
     : S.fedMeter(b0);
   const pureSupply = cnt.supply === tot && tot > 0;
+  // #239: a merged supply/army group keeps the route action — the whole
+  // group runs the line, supply units hauling and fighters escorting
+  const hasSupply = cnt.supply > 0;
+  const routeLabel = cnt.supply < tot ? '🚚 Escort a supply route…' : '🚚 Supply route…';
   const atHome = blobs.some(b => S.isAtHome(game, b));
   const fedColor = meter >= 0.75 ? 'text-emerald-400' : meter >= 0.5 ? 'text-lime-400' : meter >= 0.25 ? 'text-amber-400' : 'text-red-400';
   const onRoute = !multi && b0.order && b0.order.type === 'route';
@@ -4372,6 +4404,10 @@ function renderPanelInner(force) {
     const rt = SUP.routeTarget(game, carrierRoute);
     if (rs && rt) routeLegend = ` · ${rs.name} → ${carrierRoute.targetKind === 'blob' ? 'army' : rt.name}`;
   }
+  // escorted line (#239): name the guards riding along, so the cargo figure
+  // reading against a supply-only hold makes sense at a glance
+  const escortLegend = onRoute && b0.count.supply < S.total(b0)
+    ? ` · ⚔️ ${b0.count.deploy + b0.count.farm} escorting` : '';
   // group build (#130): an under-strength founding party holding its site
   const waitingBuild = blobs.some(b => b.order && b.order.type === 'move' && b.order.build && b.order.waiting);
   // combat state (#201): "is my army actually in a fight?" and "why is
@@ -4402,7 +4438,7 @@ function renderPanelInner(force) {
       <span class="font-semibold">${multi ? `${blobs.length} blobs` : 'Blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
-    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${!multi && b0.eatingCargo != null && game.tick - b0.eatingCargo <= 5 ? ' · <span class="text-amber-300">🍽️ eating into its cargo</span>' : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
+    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend}${escortLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${SUP.holdCap(b0)}</span>` : ''}${!multi && b0.eatingCargo != null && game.tick - b0.eatingCargo <= 5 ? ' · <span class="text-amber-300">🍽️ eating into its cargo</span>' : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
     ${fighting ? `<div class="text-xs text-red-400 ${rearHit ? 'mb-1' : 'mb-2'}">⚔️ In combat</div>` : ''}
     ${rearHit ? '<div class="text-xs text-orange-400 mb-2">⚠️ Rear attack — taking extra damage from behind</div>' : ''}
     `;
@@ -4426,7 +4462,7 @@ function renderPanelInner(force) {
       <button data-act="pillage" class="btn rounded ${blobs.some(b => b.pillaging) ? 'bg-orange-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700'}">🔥 Pillage</button>
       <button data-act="build" class="btn rounded bg-zinc-800 hover:bg-zinc-700 ${tot < S.C.SETT_COST ? 'opacity-40' : ''}" ${tot < S.C.SETT_COST ? 'disabled' : ''}>🏠 Build (${S.C.SETT_COST})</button>
       <button data-act="wall" class="btn rounded bg-zinc-800 hover:bg-zinc-700">🧱 Wall…</button>
-      <button data-act="route" class="btn rounded ${pureSupply ? 'bg-sky-800 hover:bg-sky-700' : 'bg-zinc-800 opacity-40'}" ${pureSupply ? '' : 'disabled'}>🚚 Supply route…</button>
+      <button data-act="route" class="btn rounded ${hasSupply ? 'bg-sky-800 hover:bg-sky-700' : 'bg-zinc-800 opacity-40'}" ${hasSupply ? '' : 'disabled'}>${routeLabel}</button>
     </div>
     ${carrierSiege ? `<button data-act="siegerun" class="btn w-full rounded mb-2 ${carrierRoute.runSiege ? 'bg-amber-600 text-white hover:bg-amber-500' : 'bg-zinc-800 hover:bg-zinc-700'}">🚚 Run the siege: ${carrierRoute.runSiege ? 'ON' : 'OFF'}</button>` : ''}
     ${!multi && tot >= 2 ? `
@@ -5504,6 +5540,83 @@ function shotStats(only) {
   openStats();
 }
 
+// `?shot=merged-supply` (#239) — a MERGED supply/army group selected, which is
+// the state the bug lives in: idle carriers fold into an idle army and the
+// group's "🚚 Supply route…" button used to go dead, with no way to un-mix it
+// in the field. No URL reached it (it needs a mid-match merge), so the panel
+// was invisible to screenshots and tests. Fixed seed, real merge through the
+// sim's own tickMerge, sim paused. Pure local UI state — no DB writes — so it
+// works in every environment.
+//   `merged-supply-armed`   — the route flow armed with its source picked,
+//                             where the hint bar names the escort.
+//   `merged-supply-running` — the same group already ON a line, which is the
+//                             only way to reach the panel's escort readout.
+function shotMergedSupply(mode) {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot239', 'xsmall', 'normal');
+  const army = g.blobs.find(b => b.owner === 0 && b.count.deploy > 0 && b.working == null);
+  const home = g.settlements.find(s => s.owner === 0 && !s.building);
+  if (!army || !home) return;
+  // field a caravan out of the army itself: split a few units off, turn them
+  // into supply units, and stand them on the army's own tile. Both halves are
+  // idle, so tickMerge's deep-overlap rule folds them into ONE mixed group —
+  // the merge the player hits by accident, reproduced honestly.
+  const sp = S.opSplit(g, army, 3);
+  if (sp.err) return;
+  const carriers = sp.blob;
+  S.opSetRole(g, carriers, 'supply');
+  // stand the pair out on open ground, clear of the home footprint: the bug
+  // bites an army in the field, and a group parked ON its town would hand
+  // every route tap to the settlement instead (settlement-first, #142)
+  // canPlaceWall is the handy "open, buildable, not settlement ground" test
+  // the other shots scan with; take the nearest such tile 4+ tiles out so the
+  // camp is clear of the footprint band but still inside opening vision
+  let camp = null;
+  for (let rad = 4; rad <= 8 && !camp; rad++) {
+    for (let dy = -rad; dy <= rad && !camp; dy++) {
+      for (let dx = -rad; dx <= rad && !camp; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== rad) continue;
+        const tx = home.x + 1 + dx, ty = home.y + 1 + dy;
+        const res = S.canPlaceWall(g, 0, tx, ty);
+        if (res.ok && !res.farm) camp = { x: tx + 0.5, y: ty + 0.5 };
+      }
+    }
+  }
+  if (!camp) camp = { x: army.x, y: army.y };
+  army.x = camp.x; army.y = camp.y;
+  army.prevX = army.x; army.prevY = army.y;
+  carriers.x = army.x; carriers.y = army.y;
+  carriers.prevX = carriers.x; carriers.prevY = carriers.y;
+  // opSplit suppresses auto-merge on both halves until one completes a move;
+  // clear it so the deliberate re-stack folds, which is what a real idle
+  // caravan walking into an idle army does
+  army.noMerge = false; carriers.noMerge = false;
+  startMatch(g);
+  for (let i = 0; i < 20 && !carriers.dead; i++) S.step(g);
+  const merged = g.blobs.find(b => !b.dead && b.owner === 0
+    && b.count.supply > 0 && b.count.deploy > 0);
+  if (!merged) return;
+  ui.selected = { kind: 'blob', id: merged.id };
+  if (mode === 'armed') { ui.pending = 'route'; ui.routeSrc = home.id; }
+  if (mode === 'running') {
+    // put the whole group on a line to the outpost — or, on a map with only
+    // one town, back to a friendly army — so the panel shows the escort row
+    const dest = g.settlements.find(s => s.owner === 0 && !s.building && s.id !== home.id);
+    S.opRoute(g, merged, dest
+      ? { kind: 'settlement', id: dest.id }
+      : { kind: 'blob', id: army.id === merged.id ? carriers.id : army.id }, home.id);
+    for (let i = 0; i < 30 && !merged.dead; i++) S.step(g); // let it load some cargo
+  }
+  view.cx = merged.x; view.cy = merged.y; view.scale = 26;
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  input.clampView();
+  updateHint();
+  renderPanel(true);
+  updateHUD();
+}
+
 // `?shot=replay-end` (#232) — the outcome card at the end of a playback, with
 // the transport controls that used to be missing: the only way out of this card
 // was Back to menu, even though the scrub bar was still live behind it.
@@ -5762,6 +5875,10 @@ if (SHOT === 'place-preview' || SHOT === 'place-preview-touch') {
 }
 if (SHOT === 'stats' || SHOT === 'stats-one') {
   try { shotStats(SHOT === 'stats-one' ? 'units' : null); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'merged-supply' || SHOT === 'merged-supply-armed' || SHOT === 'merged-supply-running') {
+  try { shotMergedSupply(SHOT.slice('merged-supply-'.length) || null); }
+  catch (e) { console.warn('shot link failed', e); }
 }
 if (SHOT === 'replay-end') {
   try { shotReplayEnd().catch((e) => console.warn('shot link failed', e)); }
