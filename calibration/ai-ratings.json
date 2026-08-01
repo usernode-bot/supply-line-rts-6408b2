@@ -1,6 +1,6 @@
 {
-  "version": 5,
-  "generated_at": "2026-07-25T20:41:59.143Z",
+  "version": 6,
+  "generated_at": "2026-08-01T01:17:24.415Z",
   "harness": "test/calibrate-ai.mjs",
   "tick_cap": 36000,
   "rounds": 20,
@@ -22,39 +22,39 @@
       "participant": "ai:easy",
       "opponent": "ai:normal",
       "opponent_rating": 1000,
-      "rating": 792,
+      "rating": 857,
       "matches": 40,
-      "wins": 9,
+      "wins": 12,
       "draws": 0,
-      "losses": 31,
-      "score_rate": 0.2317,
-      "raw_fit": 792,
+      "losses": 28,
+      "score_rate": 0.3049,
+      "raw_fit": 857,
       "clamped": false
     },
     {
       "participant": "ai:hard",
       "opponent": "ai:normal",
       "opponent_rating": 1000,
-      "rating": 1124,
+      "rating": 1105,
       "matches": 40,
-      "wins": 27,
+      "wins": 26,
       "draws": 0,
-      "losses": 13,
-      "score_rate": 0.6707,
-      "raw_fit": 1124,
+      "losses": 14,
+      "score_rate": 0.6463,
+      "raw_fit": 1105,
       "clamped": false
     },
     {
       "participant": "ai:veryhard",
       "opponent": "ai:hard",
-      "opponent_rating": 1124,
-      "rating": 1257,
+      "opponent_rating": 1105,
+      "rating": 1210,
       "matches": 40,
-      "wins": 27,
-      "draws": 1,
-      "losses": 12,
-      "score_rate": 0.6829,
-      "raw_fit": 1257,
+      "wins": 25,
+      "draws": 2,
+      "losses": 13,
+      "score_rate": 0.6463,
+      "raw_fit": 1210,
       "clamped": false
     }
   ],
@@ -66,7 +66,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 4350,
+      "ticks": 5300,
       "decided_by": "elimination"
     },
     {
@@ -76,8 +76,8 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 24100,
-      "decided_by": "elimination"
+      "ticks": 36000,
+      "decided_by": "adjudicated"
     },
     {
       "challenger": "ai:easy",
@@ -95,7 +95,7 @@
       "seed": "calib-1",
       "size": "small",
       "challenger_owner": 1,
-      "score": 1,
+      "score": 0,
       "ticks": 36000,
       "decided_by": "adjudicated"
     },
@@ -106,7 +106,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 10220,
+      "ticks": 6070,
       "decided_by": "elimination"
     },
     {
@@ -116,7 +116,7 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 0,
-      "ticks": 7660,
+      "ticks": 12770,
       "decided_by": "elimination"
     },
     {
@@ -135,8 +135,8 @@
       "seed": "calib-3",
       "size": "small",
       "challenger_owner": 1,
-      "score": 0,
-      "ticks": 12480,
+      "score": 1,
+      "ticks": 18650,
       "decided_by": "elimination"
     },
     {
@@ -146,7 +146,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 10380,
+      "ticks": 12620,
       "decided_by": "elimination"
     },
     {
@@ -155,7 +155,7 @@
       "seed": "calib-4",
       "size": "xsmall",
       "challenger_owner": 1,
-      "score": 1,
+      "score": 0,
       "ticks": 36000,
       "decided_by": "adjudicated"
     },
@@ -166,8 +166,8 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 25320,
-      "decided_by": "elimination"
+      "ticks": 36000,
+      "decided_by": "adjudicated"
     },
     {
       "challenger": "ai:easy",
@@ -175,7 +175,7 @@
       "seed": "calib-5",
       "size": "small",
       "challenger_owner": 1,
-      "score": 0,
+      "score": 1,
       "ticks": 36000,
       "decided_by": "adjudicated"
     },
@@ -186,7 +186,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 9010,
+      "ticks": 10860,
       "decided_by": "elimination"
     },
     {
@@ -195,9 +195,9 @@
       "seed": "calib-6",
       "size": "xsmall",
       "challenger_owner": 1,
-      "score": 0,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
+      "score": 1,
+      "ticks": 11550,
+      "decided_by": "elimination"
     },
     {
       "challenger": "ai:easy",
@@ -206,7 +206,7 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 8250,
+      "ticks": 8900,
       "decided_by": "elimination"
     },
     {
@@ -216,7 +216,7 @@
       "size": "small",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 21670,
+      "ticks": 35330,
       "decided_by": "elimination"
     },
     {
@@ -226,7 +226,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 7400,
+      "ticks": 6620,
       "decided_by": "elimination"
     },
     {
@@ -236,8 +236,8 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 0,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
+      "ticks": 12940,
+      "decided_by": "elimination"
     },
     {
       "challenger": "ai:easy",
@@ -246,8 +246,8 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
+      "ticks": 13050,
+      "decided_by": "elimination"
     },
     {
       "challenger": "ai:easy",
@@ -255,7 +255,7 @@
       "seed": "calib-9",
       "size": "small",
       "challenger_owner": 1,
-      "score": 0,
+      "score": 1,
       "ticks": 36000,
       "decided_by": "adjudicated"
     },
@@ -266,8 +266,8 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 9190,
-      "decided_by": "elimination"
+      "ticks": 36000,
+      "decided_by": "adjudicated"
     },
     {
       "challenger": "ai:easy",
@@ -286,7 +286,7 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 12630,
+      "ticks": 26340,
       "decided_by": "elimination"
     },
     {
@@ -306,7 +306,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 7970,
+      "ticks": 12950,
       "decided_by": "elimination"
     },
     {
@@ -316,7 +316,7 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 15520,
+      "ticks": 12250,
       "decided_by": "elimination"
     },
     {
@@ -326,7 +326,7 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 14590,
+      "ticks": 9250,
       "decided_by": "elimination"
     },
     {
@@ -336,8 +336,8 @@
       "size": "small",
       "challenger_owner": 1,
       "score": 0,
-      "ticks": 14780,
-      "decided_by": "elimination"
+      "ticks": 36000,
+      "decided_by": "adjudicated"
     },
     {
       "challenger": "ai:easy",
@@ -346,8 +346,8 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 8280,
-      "decided_by": "elimination"
+      "ticks": 36000,
+      "decided_by": "adjudicated"
     },
     {
       "challenger": "ai:easy",
@@ -366,7 +366,7 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 19030,
+      "ticks": 16730,
       "decided_by": "elimination"
     },
     {
@@ -376,7 +376,7 @@
       "size": "small",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 24700,
+      "ticks": 7920,
       "decided_by": "elimination"
     },
     {
@@ -386,7 +386,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 7420,
+      "ticks": 20280,
       "decided_by": "elimination"
     },
     {
@@ -395,8 +395,8 @@
       "seed": "calib-16",
       "size": "xsmall",
       "challenger_owner": 1,
-      "score": 0,
-      "ticks": 18260,
+      "score": 1,
+      "ticks": 9490,
       "decided_by": "elimination"
     },
     {
@@ -406,8 +406,8 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 10810,
-      "decided_by": "elimination"
+      "ticks": 36000,
+      "decided_by": "adjudicated"
     },
     {
       "challenger": "ai:easy",
@@ -426,7 +426,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 5220,
+      "ticks": 5850,
       "decided_by": "elimination"
     },
     {
@@ -436,8 +436,8 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
+      "ticks": 21190,
+      "decided_by": "elimination"
     },
     {
       "challenger": "ai:easy",
@@ -446,7 +446,7 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 16470,
+      "ticks": 18720,
       "decided_by": "elimination"
     },
     {
@@ -466,7 +466,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 23050,
+      "ticks": 32540,
       "decided_by": "elimination"
     },
     {
@@ -476,7 +476,7 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 9070,
+      "ticks": 9570,
       "decided_by": "elimination"
     },
     {
@@ -506,107 +506,107 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
+      "ticks": 18330,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "opponent": "ai:normal",
+      "seed": "calib-2",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 6810,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "opponent": "ai:normal",
+      "seed": "calib-3",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "opponent": "ai:normal",
+      "seed": "calib-3",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 12120,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "opponent": "ai:normal",
+      "seed": "calib-4",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 9590,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "opponent": "ai:normal",
+      "seed": "calib-4",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 34930,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "opponent": "ai:normal",
+      "seed": "calib-5",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 17500,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "opponent": "ai:normal",
+      "seed": "calib-5",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:hard",
+      "opponent": "ai:normal",
+      "seed": "calib-6",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 17930,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:hard",
+      "opponent": "ai:normal",
+      "seed": "calib-6",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
       "ticks": 13120,
       "decided_by": "elimination"
     },
     {
       "challenger": "ai:hard",
       "opponent": "ai:normal",
-      "seed": "calib-2",
-      "size": "xsmall",
-      "challenger_owner": 1,
-      "score": 0,
-      "ticks": 7520,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:hard",
-      "opponent": "ai:normal",
-      "seed": "calib-3",
-      "size": "small",
-      "challenger_owner": 0,
-      "score": 0,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
-    },
-    {
-      "challenger": "ai:hard",
-      "opponent": "ai:normal",
-      "seed": "calib-3",
-      "size": "small",
-      "challenger_owner": 1,
-      "score": 1,
-      "ticks": 28780,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:hard",
-      "opponent": "ai:normal",
-      "seed": "calib-4",
-      "size": "xsmall",
-      "challenger_owner": 0,
-      "score": 1,
-      "ticks": 10050,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:hard",
-      "opponent": "ai:normal",
-      "seed": "calib-4",
-      "size": "xsmall",
-      "challenger_owner": 1,
-      "score": 1,
-      "ticks": 9050,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:hard",
-      "opponent": "ai:normal",
-      "seed": "calib-5",
-      "size": "small",
-      "challenger_owner": 0,
-      "score": 1,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
-    },
-    {
-      "challenger": "ai:hard",
-      "opponent": "ai:normal",
-      "seed": "calib-5",
-      "size": "small",
-      "challenger_owner": 1,
-      "score": 1,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
-    },
-    {
-      "challenger": "ai:hard",
-      "opponent": "ai:normal",
-      "seed": "calib-6",
-      "size": "xsmall",
-      "challenger_owner": 0,
-      "score": 1,
-      "ticks": 15020,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:hard",
-      "opponent": "ai:normal",
-      "seed": "calib-6",
-      "size": "xsmall",
-      "challenger_owner": 1,
-      "score": 1,
-      "ticks": 14360,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:hard",
-      "opponent": "ai:normal",
       "seed": "calib-7",
       "size": "small",
       "challenger_owner": 0,
       "score": 1,
-      "ticks": 31340,
+      "ticks": 22830,
       "decided_by": "elimination"
     },
     {
@@ -615,9 +615,9 @@
       "seed": "calib-7",
       "size": "small",
       "challenger_owner": 1,
-      "score": 1,
-      "ticks": 7900,
-      "decided_by": "elimination"
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
     },
     {
       "challenger": "ai:hard",
@@ -626,7 +626,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 18500,
+      "ticks": 15940,
       "decided_by": "elimination"
     },
     {
@@ -636,7 +636,7 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 15730,
+      "ticks": 12810,
       "decided_by": "elimination"
     },
     {
@@ -656,7 +656,7 @@
       "size": "small",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 22320,
+      "ticks": 32080,
       "decided_by": "elimination"
     },
     {
@@ -666,7 +666,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 31200,
+      "ticks": 12510,
       "decided_by": "elimination"
     },
     {
@@ -675,8 +675,8 @@
       "seed": "calib-10",
       "size": "xsmall",
       "challenger_owner": 1,
-      "score": 0,
-      "ticks": 15740,
+      "score": 1,
+      "ticks": 10440,
       "decided_by": "elimination"
     },
     {
@@ -686,8 +686,8 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 1,
-      "ticks": 27090,
-      "decided_by": "elimination"
+      "ticks": 36000,
+      "decided_by": "adjudicated"
     },
     {
       "challenger": "ai:hard",
@@ -696,7 +696,7 @@
       "size": "small",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 21730,
+      "ticks": 29350,
       "decided_by": "elimination"
     },
     {
@@ -706,7 +706,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 14960,
+      "ticks": 8070,
       "decided_by": "elimination"
     },
     {
@@ -715,8 +715,8 @@
       "seed": "calib-12",
       "size": "xsmall",
       "challenger_owner": 1,
-      "score": 1,
-      "ticks": 10870,
+      "score": 0,
+      "ticks": 10180,
       "decided_by": "elimination"
     },
     {
@@ -725,7 +725,7 @@
       "seed": "calib-13",
       "size": "small",
       "challenger_owner": 0,
-      "score": 0,
+      "score": 1,
       "ticks": 36000,
       "decided_by": "adjudicated"
     },
@@ -736,7 +736,7 @@
       "size": "small",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 18550,
+      "ticks": 30120,
       "decided_by": "elimination"
     },
     {
@@ -745,8 +745,8 @@
       "seed": "calib-14",
       "size": "xsmall",
       "challenger_owner": 0,
-      "score": 1,
-      "ticks": 16670,
+      "score": 0,
+      "ticks": 16050,
       "decided_by": "elimination"
     },
     {
@@ -756,7 +756,7 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 8750,
+      "ticks": 14220,
       "decided_by": "elimination"
     },
     {
@@ -765,8 +765,8 @@
       "seed": "calib-15",
       "size": "small",
       "challenger_owner": 0,
-      "score": 1,
-      "ticks": 25450,
+      "score": 0,
+      "ticks": 11440,
       "decided_by": "elimination"
     },
     {
@@ -776,7 +776,7 @@
       "size": "small",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 8880,
+      "ticks": 8600,
       "decided_by": "elimination"
     },
     {
@@ -785,8 +785,8 @@
       "seed": "calib-16",
       "size": "xsmall",
       "challenger_owner": 0,
-      "score": 0,
-      "ticks": 13430,
+      "score": 1,
+      "ticks": 16660,
       "decided_by": "elimination"
     },
     {
@@ -795,8 +795,8 @@
       "seed": "calib-16",
       "size": "xsmall",
       "challenger_owner": 1,
-      "score": 0,
-      "ticks": 19620,
+      "score": 1,
+      "ticks": 8530,
       "decided_by": "elimination"
     },
     {
@@ -815,7 +815,7 @@
       "seed": "calib-17",
       "size": "small",
       "challenger_owner": 1,
-      "score": 0,
+      "score": 1,
       "ticks": 36000,
       "decided_by": "adjudicated"
     },
@@ -826,7 +826,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 8320,
+      "ticks": 8190,
       "decided_by": "elimination"
     },
     {
@@ -836,7 +836,7 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 13370,
+      "ticks": 18960,
       "decided_by": "elimination"
     },
     {
@@ -846,7 +846,7 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 1,
-      "ticks": 20270,
+      "ticks": 31500,
       "decided_by": "elimination"
     },
     {
@@ -855,17 +855,7 @@
       "seed": "calib-19",
       "size": "small",
       "challenger_owner": 1,
-      "score": 1,
-      "ticks": 26510,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-0",
-      "size": "xsmall",
-      "challenger_owner": 0,
-      "score": 1,
+      "score": 0,
       "ticks": 36000,
       "decided_by": "adjudicated"
     },
@@ -874,9 +864,19 @@
       "opponent": "ai:hard",
       "seed": "calib-0",
       "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 16290,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-0",
+      "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 32870,
+      "ticks": 17160,
       "decided_by": "elimination"
     },
     {
@@ -906,7 +906,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 11920,
+      "ticks": 7260,
       "decided_by": "elimination"
     },
     {
@@ -915,38 +915,38 @@
       "seed": "calib-2",
       "size": "xsmall",
       "challenger_owner": 1,
-      "score": 1,
-      "ticks": 15070,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-3",
-      "size": "small",
-      "challenger_owner": 0,
-      "score": 1,
-      "ticks": 14210,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-3",
-      "size": "small",
-      "challenger_owner": 1,
-      "score": 1,
-      "ticks": 22050,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-4",
-      "size": "xsmall",
-      "challenger_owner": 0,
       "score": 0,
-      "ticks": 18700,
+      "ticks": 4590,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-3",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0.5,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-3",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 11210,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-4",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 14970,
       "decided_by": "elimination"
     },
     {
@@ -956,7 +956,7 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 9360,
+      "ticks": 18190,
       "decided_by": "elimination"
     },
     {
@@ -973,6 +973,166 @@
       "challenger": "ai:veryhard",
       "opponent": "ai:hard",
       "seed": "calib-5",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-6",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 17560,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-6",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 14430,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-7",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 22980,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-7",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 29750,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-8",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 9680,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-8",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 12650,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-9",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 24140,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-9",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 1,
+      "ticks": 18780,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-10",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 15950,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-10",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 31470,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-11",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-11",
+      "size": "small",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-12",
+      "size": "xsmall",
+      "challenger_owner": 0,
+      "score": 1,
+      "ticks": 12580,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-12",
+      "size": "xsmall",
+      "challenger_owner": 1,
+      "score": 0,
+      "ticks": 13350,
+      "decided_by": "elimination"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-13",
+      "size": "small",
+      "challenger_owner": 0,
+      "score": 0,
+      "ticks": 36000,
+      "decided_by": "adjudicated"
+    },
+    {
+      "challenger": "ai:veryhard",
+      "opponent": "ai:hard",
+      "seed": "calib-13",
       "size": "small",
       "challenger_owner": 1,
       "score": 0.5,
@@ -982,171 +1142,11 @@
     {
       "challenger": "ai:veryhard",
       "opponent": "ai:hard",
-      "seed": "calib-6",
-      "size": "xsmall",
-      "challenger_owner": 0,
-      "score": 0,
-      "ticks": 13480,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-6",
-      "size": "xsmall",
-      "challenger_owner": 1,
-      "score": 0,
-      "ticks": 27340,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-7",
-      "size": "small",
-      "challenger_owner": 0,
-      "score": 1,
-      "ticks": 34360,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-7",
-      "size": "small",
-      "challenger_owner": 1,
-      "score": 1,
-      "ticks": 14210,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-8",
-      "size": "xsmall",
-      "challenger_owner": 0,
-      "score": 1,
-      "ticks": 19510,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-8",
-      "size": "xsmall",
-      "challenger_owner": 1,
-      "score": 1,
-      "ticks": 8740,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-9",
-      "size": "small",
-      "challenger_owner": 0,
-      "score": 1,
-      "ticks": 33510,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-9",
-      "size": "small",
-      "challenger_owner": 1,
-      "score": 0,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-10",
-      "size": "xsmall",
-      "challenger_owner": 0,
-      "score": 1,
-      "ticks": 12950,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-10",
-      "size": "xsmall",
-      "challenger_owner": 1,
-      "score": 0,
-      "ticks": 18370,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-11",
-      "size": "small",
-      "challenger_owner": 0,
-      "score": 1,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-11",
-      "size": "small",
-      "challenger_owner": 1,
-      "score": 1,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-12",
-      "size": "xsmall",
-      "challenger_owner": 0,
-      "score": 1,
-      "ticks": 17830,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-12",
-      "size": "xsmall",
-      "challenger_owner": 1,
-      "score": 1,
-      "ticks": 14880,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-13",
-      "size": "small",
-      "challenger_owner": 0,
-      "score": 0,
-      "ticks": 27290,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
-      "seed": "calib-13",
-      "size": "small",
-      "challenger_owner": 1,
-      "score": 1,
-      "ticks": 26940,
-      "decided_by": "elimination"
-    },
-    {
-      "challenger": "ai:veryhard",
-      "opponent": "ai:hard",
       "seed": "calib-14",
       "size": "xsmall",
       "challenger_owner": 0,
-      "score": 0,
-      "ticks": 13260,
+      "score": 1,
+      "ticks": 20110,
       "decided_by": "elimination"
     },
     {
@@ -1156,7 +1156,7 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 19440,
+      "ticks": 6800,
       "decided_by": "elimination"
     },
     {
@@ -1166,7 +1166,7 @@
       "size": "small",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 8370,
+      "ticks": 9310,
       "decided_by": "elimination"
     },
     {
@@ -1176,8 +1176,8 @@
       "size": "small",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 36000,
-      "decided_by": "adjudicated"
+      "ticks": 15230,
+      "decided_by": "elimination"
     },
     {
       "challenger": "ai:veryhard",
@@ -1186,7 +1186,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 1,
-      "ticks": 13440,
+      "ticks": 20490,
       "decided_by": "elimination"
     },
     {
@@ -1196,7 +1196,7 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 8340,
+      "ticks": 11310,
       "decided_by": "elimination"
     },
     {
@@ -1205,7 +1205,7 @@
       "seed": "calib-17",
       "size": "small",
       "challenger_owner": 0,
-      "score": 1,
+      "score": 0,
       "ticks": 36000,
       "decided_by": "adjudicated"
     },
@@ -1226,7 +1226,7 @@
       "size": "xsmall",
       "challenger_owner": 0,
       "score": 0,
-      "ticks": 9700,
+      "ticks": 21650,
       "decided_by": "elimination"
     },
     {
@@ -1236,7 +1236,7 @@
       "size": "xsmall",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 4750,
+      "ticks": 6910,
       "decided_by": "elimination"
     },
     {
@@ -1245,7 +1245,7 @@
       "seed": "calib-19",
       "size": "small",
       "challenger_owner": 0,
-      "score": 1,
+      "score": 0,
       "ticks": 36000,
       "decided_by": "adjudicated"
     },
@@ -1256,7 +1256,7 @@
       "size": "small",
       "challenger_owner": 1,
       "score": 1,
-      "ticks": 12700,
+      "ticks": 15990,
       "decided_by": "elimination"
     }
   ]

@@ -13,6 +13,7 @@ import * as TUT from './tutorial.js';
 import * as CT from './controls-tour.js';
 import * as OFF from './offline.js';
 import * as RP from './replay.js';
+import * as ST from './stats.js';
 import { dist, fertTier, FERT_TIERS } from './mapgen.js';
 import { pickTol, blobOverlap, footprintDist, tileDist } from './pick.js';
 
@@ -219,6 +220,34 @@ let player = null;      // the playback cursor while a replay is open
 let replaySpeed = 2;    // 2× is the sim's native rate — see the replay bar
 let lastReplayUi = -1;  // tick the transport readouts were last drawn for
 let endReplay = null;   // payload behind the end modal's ▶ Watch replay
+let shotHover = null;      // ?shot= pins the desktop hover the mouse can't (#234)
+let recordingLost = false; // resumed a save with no matching journal (#232)
+// -- match statistics (#233) ------------------------------------------
+// Sampled every ST.SAMPLE_TICKS by the live loop and by replay playback.
+// Never part of S.serialize — journaled beside the order log instead.
+let statsSeries = null;
+let statsMetric = { units: true, land: true, food: true };
+const JOURNAL_KEY = 'supply-line-replay-journal-v1';
+
+function readJournal() {
+  if (SHOT) return null;
+  try { return JSON.parse(localStorage.getItem(JOURNAL_KEY) || 'null'); } catch { return null; }
+}
+function writeJournal() {
+  if (SHOT || !recorder || !game) return;
+  try {
+    localStorage.setItem(JOURNAL_KEY,
+      JSON.stringify(RP.journalOf(recorder, game, statsSeries)));
+  } catch {
+    // a full quota is not worth losing the match over — the resume will
+    // just find no journal and decline to record
+  }
+}
+function clearJournal() {
+  if (SHOT) return;
+  try { localStorage.removeItem(JOURNAL_KEY); } catch { }
+}
+
 let panelHeld = false;
 let toastTimer = null;
 let lastPanelHTML = '';
@@ -485,6 +514,7 @@ async function refreshServerSave() {
 // on the server side, like the match-result post).
 function clearSaves() {
   localStorage.removeItem(SAVE_KEY);
+  try { localStorage.removeItem(JOURNAL_KEY); } catch { } // #232: the log dies with its save
   serverSaveData = null;
   if (token) fetch('/api/save', { method: 'DELETE', headers: apiHeaders }).catch(() => { });
 }
@@ -1483,10 +1513,31 @@ function startMatch(g) {
   // Record every ordinary solo match (#223). Skipped for PvP (the server
   // records it), for a replay itself, and for the tutorial / practice /
   // sandbox games — none of which are recorded as matches either.
-  recorder = (!g.replay && !g.pvp && !g.tutorial && !g.practice && !g.sandbox)
-    ? RP.createRecorder(g) : null;
+  const recordable = !g.replay && !g.pvp && !g.tutorial && !g.practice && !g.sandbox;
+  recordingLost = false;
+  statsSeries = ST.createSeries();   // #233: every match keeps its own graph
+  if (!recordable) {
+    recorder = null;
+  } else if (g.tick > 0) {
+    // Resumed match (#232). A recorder opened here would stamp its orders
+    // at tick 4000-something while playback starts from zero — the exact
+    // offset that made rewound replays show a match that never happened.
+    // Pick the journaled log back up instead, and if there isn't one that
+    // provably belongs to this save, record nothing and say so.
+    const j = readJournal();
+    recorder = RP.recorderFromJournal(j, g);
+    if (recorder && j.stats && Array.isArray(j.stats.rows)) statsSeries = { rows: j.stats.rows };
+    recordingLost = !recorder;
+    if (!recorder) clearJournal();
+  } else {
+    recorder = RP.createRecorder(g);
+    clearJournal();
+  }
+  ST.sample(statsSeries, g);   // an opening data point, before any ticks run
   endReplay = null;
   $('btn-end-replay').classList.add('hidden');
+  $('btn-end-stats').classList.add('hidden');
+  $('end-replay-controls').classList.add('hidden');
   ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, wallStart: null, wallEnd: null, hover: null, touchMode: 'select' };
   groups = {};
   hideOrderPopup();
@@ -1560,6 +1611,7 @@ function backToMenu() {
   closeControlsTour();
   player = null;                                  // replay teardown (#223)
   $('replay-bar').classList.add('hidden');
+  layoutBottomStack();
   stopMpTimers();
   mp = null;
   me = 0;
@@ -1591,6 +1643,10 @@ function saveGame(push) {
     const data = S.serialize(game);
     data.savedAt = Date.now();
     localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    // #232: the order log lives or dies with the save it belongs to. Written
+    // in the same breath so the journal's stamped tick always matches the
+    // save's — that equality is what proves the two describe one match.
+    writeJournal();
     // cross-device resume (#176): mirror the save to the server. Skipped
     // on beforeunload (keepalive fetches cap at ~64 KB and saves can
     // exceed that) — the ≤60 s-stale periodic copy is accepted, and the
@@ -1644,6 +1700,15 @@ function endMatch(result) {
     ? `Enemy settlements razed and their last forces scattered in ${fmtDur(S.gameSeconds(game.tick))}.`
     : `Your war effort collapsed after ${fmtDur(S.gameSeconds(game.tick))}.`;
   $('end-rating').classList.add('hidden');   // filled in once the post answers
+  $('end-replay-controls').classList.add('hidden');   // live card, no transport
+  // #233: the graph of how the match actually went, whatever the outcome
+  $('btn-end-stats').classList.toggle('hidden', !statsSeries || !statsSeries.rows.length);
+  if (recordingLost) {
+    // #232: say it plainly rather than silently producing no replay row.
+    // A log that doesn't start at tick 0 can only replay wrong, so the
+    // honest outcome is no replay at all.
+    $('end-detail').textContent += ' This match resumed from a save without its order log, so no replay was recorded.';
+  }
   $('end-modal').classList.remove('hidden');
   if (game.sandbox) return;
   // The result is written to this device FIRST (#221), so a match finished
@@ -2418,13 +2483,48 @@ function updateModeToggle() {
   const off = 'btn px-3 rounded-lg border flex items-center justify-center bg-zinc-900/85 border-zinc-700 text-zinc-300';
   $('btn-mode-select').className = ui.touchMode === 'drag' ? off : on;
   $('btn-mode-drag').className = ui.touchMode === 'drag' ? on : off;
-  // float above the bottom-sheet panel + unit strip
-  let bottom = 8;
-  if (!panel.classList.contains('hidden')) bottom += panel.offsetHeight;
-  const strip = $('unit-strip');
-  if (!strip.classList.contains('hidden')) bottom += strip.offsetHeight;
-  el.style.bottom = bottom + 'px';
+  // positioning is layoutBottomStack's job (below)
 }
+
+// ------------------------------------------------- bottom-edge stacking
+//
+// #237: the replay bar (z-30, ~100 px tall) is anchored to the bottom of
+// the viewport and paints straight over the minimap, the selection panel,
+// the unit strip and the phone mode toggle — all of which live in the same
+// corner. One function owns every bottom offset so the stack stays honest
+// no matter which combination is on screen; each element falls back to its
+// Tailwind default (style.bottom = '') when nothing is beneath it.
+function replayBarHeight() {
+  const bar = $('replay-bar');
+  return !bar || bar.classList.contains('hidden') ? 0 : bar.offsetHeight;
+}
+
+function layoutBottomStack() {
+  const wide = window.matchMedia('(min-width: 640px)').matches;
+  const rb = replayBarHeight();
+  const strip = $('unit-strip');
+  const toggle = $('mode-toggle');
+  const mm = $('minimap');
+
+  // desktop minimap sits bottom-left (sm:bottom-2 → 8 px); on phones it is
+  // parked top-right, where the bar never reaches
+  if (mm) mm.style.bottom = wide && rb ? `${8 + rb}px` : '';
+  // panel: desktop floats (bottom-3 → 12 px), phones are a flush sheet
+  panel.style.bottom = rb ? `${(wide ? 12 : 0) + rb}px` : '';
+
+  const panelH = panel.classList.contains('hidden') ? 0 : panel.offsetHeight;
+  if (!strip.classList.contains('hidden')) {
+    // desktop: strip clears the bar only; phones: it rides the sheet's top edge
+    strip.style.bottom = wide
+      ? (rb ? `${8 + rb}px` : '')
+      : `${panelH + rb}px`;
+  }
+  if (toggle && !toggle.classList.contains('hidden')) {
+    const stripH = strip.classList.contains('hidden') ? 0 : strip.offsetHeight;
+    toggle.style.bottom = `${8 + rb + panelH + stripH}px`;
+  }
+}
+window.addEventListener('resize', layoutBottomStack);
 
 $('mode-toggle').addEventListener('click', (e) => {
   const btn = e.target.closest('button');
@@ -3215,7 +3315,30 @@ function updateHint() {
           ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination — a friendly settlement, wall or army…`
           : `${isMobile() ? 'Tap' : 'Tap or right-click'} the source settlement to load from…`;
   $('hint-text').textContent = text;
+  // #234: touch has no hover, so the placement score rides the hint bar —
+  // same S.previewScore numbers the desktop card shows, appended once a
+  // site is actually pinned (before that there's nothing to score).
+  const extra = $('hint-score');
+  if (extra) {
+    const sc = buildSiteScore();
+    if (sc) {
+      extra.textContent = `${sc.plots} plots · ${FERT_TIERS[fertTier(sc.meanFert)]}`
+        + ` · 🌾 ${sc.nowPerMin.toFixed(1)}→${sc.maxPerMin.toFixed(1)}/min`;
+      extra.classList.remove('hidden');
+    } else {
+      extra.classList.add('hidden');
+    }
+  }
   el.classList.remove('hidden');
+}
+
+// The score for the currently pinned build site, or null when there's no
+// legal site to score (nothing pending, no site yet, or it doesn't fit).
+function buildSiteScore() {
+  if (!game || ui.pending !== 'build' || !ui.buildSite) return null;
+  const a = S.buildAnchorAt(game, ui.buildSite.x, ui.buildSite.y);
+  if (a.err) return null;
+  return S.previewScoreCached(game, a.x, a.y, game.me || 0);
 }
 
 function toast(msg) {
@@ -3462,9 +3585,7 @@ function updateUnitStrip() {
     return;
   }
   strip.classList.remove('hidden');
-  // phones: the panel is a bottom sheet, so the strip sits directly above it
-  strip.style.bottom = window.matchMedia('(min-width: 640px)').matches
-    ? '' : (panel.classList.contains('hidden') ? 0 : panel.offsetHeight) + 'px';
+  // vertical placement (above the panel sheet / replay bar) → layoutBottomStack
   const chips = [];
   if (blobs.length === 1) {
     const b = blobs[0];
@@ -3517,6 +3638,7 @@ function renderPanel(force) {
   renderPanelInner(force);
   updateUnitStrip(); // after the panel, so the strip can sit on its top edge
   updateModeToggle(); // after the strip, so the toggle can sit above both
+  layoutBottomStack(); // last: every bottom offset in one place (#237)
 }
 
 function renderPanelInner(force) {
@@ -4021,7 +4143,7 @@ function renderPanelInner(force) {
       <span class="font-semibold">${multi ? `${blobs.length} blobs` : 'Blob'} — ${tot} unit${tot === 1 ? '' : 's'}</span>
       <span class="text-xs"><span class="${hpColor}">❤️ ${hpPct}%</span> · <span class="${fedColor}">${S.fedLabel(meter)} ${Math.round(meter * 100)}%</span> ${trendTag}</span>
     </div>
-    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
+    <div class="text-xs text-zinc-400 mb-2">⚔️ ${cnt.deploy} deploy · 🚚 ${cnt.supply} supply · 🌱 ${cnt.farm} farmer${onRoute ? ` · <span class="text-sky-300">on supply route${routeLegend} · 🌾 ${Math.round(b0.order.cargo || 0)} / ${S.total(b0) * SUP.CARRY_PER_UNIT}</span>` : ''}${!multi && b0.eatingCargo != null && game.tick - b0.eatingCargo <= 5 ? ' · <span class="text-amber-300">🍽️ eating into its cargo</span>' : ''}${blobs.some(b => b.pillaging) ? ' · <span class="text-orange-400">pillaging</span>' : ''}${blobs.some(b => b.order && b.order.type === 'wall') ? ' · <span class="text-amber-300">🧱 building wall…</span>' : ''}${waitingBuild ? ` · <span class="text-amber-300">⏳ waiting for settlers (${tot}/${S.C.SETT_COST})</span>` : ''}${!multi && b0.working != null ? ' · <span class="text-emerald-300">working the fields</span>' : ''}</div>
     ${fighting ? `<div class="text-xs text-red-400 ${rearHit ? 'mb-1' : 'mb-2'}">⚔️ In combat</div>` : ''}
     ${rearHit ? '<div class="text-xs text-orange-400 mb-2">⚠️ Rear attack — taking extra damage from behind</div>' : ''}
     `;
@@ -4107,6 +4229,10 @@ function frame(ts) {
       let iter = 0;
       while (acc >= 100 && iter++ < 60) {
         if (!RP.stepPlayer(player)) break;
+        // #233: a replay rebuilds its own chart as it plays. sample() is
+        // idempotent per tick and truncates anything after the current one,
+        // so scrubbing backwards walks the graph back with it.
+        if (statsSeries) ST.sample(statsSeries, player.game);
         acc -= 100;
       }
       if (acc >= 100) acc = 0;
@@ -4124,6 +4250,7 @@ function frame(ts) {
       // sandbox (#212) switch the commander off; advance() knows that.
       RP.advance(game);
       if (recorder) RP.recordTick(recorder, game);
+      if (statsSeries) ST.sample(statsSeries, game);  // #233
       acc -= 100;
     }
     if (acc >= 100) acc = 0; // fell behind (background tab); drop the backlog
@@ -4132,8 +4259,11 @@ function frame(ts) {
   input.update(dt);
   if (game.tutorial) TUT.tick(game, ui); // markers/card before this frame draws
   if (CT.active()) CT.tick(view, ui, game); // gesture gates / ring / anchor (#212)
-  // desktop build/wall-placement preview follows the mouse (#94, #187)
-  ui.hover = (ui.pending === 'build' || ui.pending === 'wall') ? input.mouseWorld : null;
+  // desktop build/wall-placement preview follows the mouse (#94, #187).
+  // shotHover pins it instead: a headless screenshot never moves a mouse, so
+  // the hover-only states would otherwise be unreachable from a URL (#234).
+  ui.hover = shotHover
+    || ((ui.pending === 'build' || ui.pending === 'wall') ? input.mouseWorld : null);
   renderer.draw(game, view, ui, Math.max(0, Math.min(1, acc / 100)));
 
   if (ts - lastPanel > 400) {
@@ -4259,6 +4389,7 @@ function openReplay(payload) {
   // startMatch centres on the viewer's own start, which is exactly right here.
   resultPosted = true;         // a replay must never post a result or clear saves
   $('replay-bar').classList.remove('hidden');
+  layoutBottomStack();         // #237: lift the corner HUD clear of the bar
   refreshReplayUi();
 }
 
@@ -4316,8 +4447,33 @@ function showReplayEndCard() {
   $('end-detail').textContent = `Replay complete — ${fmtDur(S.gameSeconds(player.game.tick))} of play.`;
   $('end-rating').classList.add('hidden');
   $('btn-end-replay').classList.add('hidden');
+  // #232: the transport is still live behind this card, so offer the ways
+  // back into it instead of leaving "Back to menu" as the only exit.
+  $('end-replay-controls').classList.remove('hidden');
+  $('btn-end-stats').classList.toggle('hidden', !statsSeries || !statsSeries.rows.length);
   $('end-modal').classList.remove('hidden');
 }
+
+function dismissReplayEndCard() {
+  replayEndShown = true;   // stays dismissed until a seek re-arms it
+  $('end-modal').classList.add('hidden');
+}
+
+$('btn-end-keep').addEventListener('click', dismissReplayEndCard);
+$('btn-end-restart').addEventListener('click', () => {
+  dismissReplayEndCard();
+  paused = false;
+  $('replay-play').textContent = '⏸';
+  doReplaySeek(0);
+});
+$('btn-end-back30').addEventListener('click', () => {
+  if (!player) return;
+  dismissReplayEndCard();
+  paused = false;
+  $('replay-play').textContent = '⏸';
+  // 30 s of GAME time — gameSeconds is tick/5, so 30 s is 150 ticks
+  doReplaySeek(Math.max(0, player.game.tick - 150));
+});
 
 // Clock, scrub position and the drift notice. Cheap enough to call per frame,
 // but keyed on the tick so it only touches the DOM when something moved.
@@ -4332,9 +4488,20 @@ function refreshReplayUi() {
     : `${fmtDur(S.gameSeconds(t))} / ${fmtDur(S.gameSeconds(player.endTick))}`;
   const seek = $('replay-seek');
   if (document.activeElement !== seek) seek.value = String(t);
-  if (player.drift && $('replay-notice').classList.contains('hidden')) {
-    $('replay-notice').textContent = '⚠ This playback has drifted from the recording — it may not match exactly what happened.';
-    $('replay-notice').classList.remove('hidden');
+  // #232: the banner tracks the CURRENT playback, not the session. It used to
+  // latch on forever after one mismatched checkpoint, so a single hiccup made
+  // every later scrub look untrustworthy; reset() and rewindTo() now clear the
+  // flag, and this follows it in both directions.
+  const notice = $('replay-notice');
+  if (player.drift) {
+    if (notice.classList.contains('hidden')) {
+      notice.textContent = '⚠ This playback has drifted from the recording — it may not match exactly what happened.';
+      notice.classList.remove('hidden');
+      layoutBottomStack();   // the bar just got taller
+    }
+  } else if (!notice.classList.contains('hidden')) {
+    notice.classList.add('hidden');
+    layoutBottomStack();
   }
   if (RP.atEnd(player)) {
     if ($('replay-play').textContent !== '▶') $('replay-play').textContent = '▶';
@@ -4404,6 +4571,116 @@ async function doReplaySeek(tick) {
     doReplaySeek(next);
   }
 }
+
+// ---------------------------------------------------------------- match stats (#233)
+//
+// A canvas line chart of the sampled series: three metrics, both sides, one
+// shared time axis. Each metric is normalised to its OWN peak and drawn in
+// its own horizontal band, because units (tens), territory (hundreds of
+// tiles) and food rate (a fraction) share no scale — stacking them in bands
+// keeps all three legible at once instead of flattening two into the floor.
+// No fog: the match is over, and a post-mortem that hid the enemy's curve
+// would be a worse story, not a fairer one.
+
+const PLAYER_NAMES = ['You', 'Enemy'];
+
+function openStats() {
+  if (!statsSeries) return;
+  const rows = statsSeries.rows.filter(Boolean);
+  $('stats-empty').classList.toggle('hidden', rows.length > 0);
+  const sum = ST.summary(statsSeries);
+  $('stats-sub').textContent = sum
+    ? `${fmtDur(sum.seconds)} of play · ${rows.length} samples · both sides shown`
+    : 'Nothing sampled yet.';
+  // toggles
+  const tg = $('stats-toggles');
+  tg.innerHTML = ST.METRICS.map(m => `
+    <label class="flex items-center gap-2 cursor-pointer select-none">
+      <input type="checkbox" data-metric="${m.key}" ${statsMetric[m.key] ? 'checked' : ''}
+        class="accent-violet-500 w-4 h-4">
+      <span class="inline-block w-3 h-1 rounded" style="background:${m.color[0]}"></span>
+      <span class="inline-block w-3 h-1 rounded" style="background:${m.color[1]}"></span>
+      <span>${m.label}</span>
+    </label>`).join('');
+  for (const cb of tg.querySelectorAll('input[data-metric]')) {
+    cb.addEventListener('change', () => {
+      statsMetric[cb.dataset.metric] = cb.checked;
+      drawStats();
+    });
+  }
+  $('stats-legend').innerHTML = sum ? ST.METRICS.map(m => [0, 1].map(o =>
+    `<div><span class="inline-block w-3 h-1 rounded align-middle" style="background:${m.color[o]}"></span>
+      ${PLAYER_NAMES[o]} ${m.label}: <span class="text-zinc-200 tabular-nums">${m.fmt(sum.last[m.key][o])}</span>
+      ${m.key === 'units' ? `<span class="text-zinc-500">(peak ${sum.peakUnits[o]} at ${fmtDur(S.gameSeconds(sum.peakAt[o]))})</span>` : ''}</div>`
+  ).join('')).join('') : '';
+  $('stats-modal').classList.remove('hidden');
+  drawStats();
+}
+
+function drawStats() {
+  const cv = $('stats-chart');
+  if (!cv || !statsSeries) return;
+  const rows = statsSeries.rows.filter(Boolean);
+  const dpr = window.devicePixelRatio || 1;
+  const cw = cv.clientWidth || 640, chh = 300;
+  cv.width = Math.round(cw * dpr); cv.height = Math.round(chh * dpr);
+  const c = cv.getContext('2d');
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, cw, chh);
+  const shown = ST.METRICS.filter(m => statsMetric[m.key]);
+  if (!rows.length || !shown.length) return;
+
+  const padL = 8, padR = 8, padT = 10, padB = 22;
+  const plotW = cw - padL - padR;
+  const bandH = (chh - padT - padB) / shown.length;
+  const tMax = Math.max(1, rows[rows.length - 1].t);
+  const xAt = (t) => padL + (t / tMax) * plotW;
+
+  // time axis
+  c.strokeStyle = '#27272a'; c.lineWidth = 1;
+  c.fillStyle = '#52525b'; c.font = '10px system-ui'; c.textAlign = 'center';
+  const endS = S.gameSeconds(tMax);
+  const stepS = endS > 1800 ? 600 : endS > 600 ? 300 : 120;   // game seconds
+  for (let gs = 0; gs <= endS; gs += stepS) {
+    const x = Math.round(xAt(gs * 5)) + 0.5;
+    c.beginPath(); c.moveTo(x, padT); c.lineTo(x, chh - padB); c.stroke();
+    // the first and last gridlines sit on the plot edge — nudge their labels
+    // inward rather than letting the text clip off the canvas
+    c.textAlign = gs === 0 ? 'left' : x > cw - 40 ? 'right' : 'center';
+    c.fillText(fmtDur(gs), x, chh - padB + 13);
+  }
+  c.textAlign = 'center';
+
+  shown.forEach((m, bi) => {
+    const top = padT + bi * bandH, bot = top + bandH - 8;
+    const peak = Math.max(ST.peak(statsSeries, m.key), 1e-6);
+    // band frame + label
+    c.strokeStyle = '#3f3f46';
+    c.beginPath(); c.moveTo(padL, Math.round(bot) + 0.5); c.lineTo(cw - padR, Math.round(bot) + 0.5); c.stroke();
+    c.fillStyle = '#71717a'; c.textAlign = 'left'; c.font = '10px system-ui';
+    c.fillText(`${m.label} — peak ${m.fmt(peak)}`, padL + 2, top + 9);
+    for (const o of [0, 1]) {
+      c.strokeStyle = m.color[o];
+      c.lineWidth = 1.75;
+      c.beginPath();
+      rows.forEach((r, i) => {
+        const x = xAt(r.t);
+        const y = bot - (r[m.key][o] / peak) * (bandH - 20);
+        if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+      });
+      c.stroke();
+    }
+  });
+}
+
+$('btn-end-stats').addEventListener('click', openStats);
+$('btn-stats-close').addEventListener('click', () => $('stats-modal').classList.add('hidden'));
+$('stats-modal').addEventListener('click', (e) => {
+  if (e.target === $('stats-modal')) $('stats-modal').classList.add('hidden');
+});
+window.addEventListener('resize', () => {
+  if (!$('stats-modal').classList.contains('hidden')) drawStats();
+});
 
 // ---------------------------------------------------------------- replay shots (#223)
 
@@ -4835,6 +5112,133 @@ const TOUR_SHOTS = {
   'tutorial-prelude-desktop-end': { step: 3, tutorial: true, desk: true }, // ...and its hand-over page
 };
 
+// ---------------------------------------------------------------- shots for this change
+
+// `?shot=walls-far` (#236) — a long garrisoned wall zoomed OUT past the
+// per-tile chip threshold. That is the state the aggregate labels exist for:
+// below ~12 px/tile every tile chip was suppressed, so a 12-tile wall holding
+// eight units rendered as an anonymous grey line. One label per CHAIN now
+// carries the whole garrison. Fixed seed, sim paused, pure local UI state.
+function shotWallsFar() {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot236', 'small', 'normal');
+  const start = g.map.starts[0];
+  // one straight run of wall-legal tiles across the keep's own row band,
+  // scanned nearest-row-first so the same seed always builds the same line
+  // AND the line lands inside the opening vision circle — a chain out in the
+  // fog would screenshot as black nothing.
+  const rows = [];
+  for (let d = 0; d <= 6; d++) { rows.push(d); if (d) rows.push(-d); }
+  let best = null;
+  for (const dy of rows) {
+    if (best) break;
+    const y0 = start.y + dy;
+    const run = [];
+    for (let k = -6; k <= 5; k++) {
+      const res = S.canPlaceWall(g, 0, start.x + k, y0);
+      if (!res.ok || res.farm) { if (run.length >= 10) break; run.length = 0; continue; }
+      run.push({ x: start.x + k, y: y0 });
+    }
+    if (run.length >= 10) best = run;
+  }
+  if (!best) return;
+  // garrison spread along the chain: the point of the aggregate is that no
+  // single tile's count is the interesting number, the chain's total is
+  const per = [2, 0, 1, 0, 0, 3, 0, 0, 1, 0, 0, 1];
+  best.forEach((t, i) => {
+    const n = per[i] || 0;
+    S.spawnFinishedWall(g, 0, t.x, t.y, n ? { deploy: n } : {});
+  });
+  for (let i = 0; i < 3; i++) S.step(g);   // let the garrisons' own vision open the fog
+  startMatch(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  view.cx = best[0].x + best.length / 2;
+  view.cy = best[0].y + 0.5;
+  view.scale = 9;             // below drawWall's CHIP_MIN_S, on purpose
+  input.clampView();
+  renderPanel(true);
+}
+
+// `?shot=place-preview` (#234) — settlement placement armed with a site under
+// the cursor, so the floating score card (plots / land / food per minute now
+// and at full farms) renders from a URL. `place-preview-touch` pins the same
+// site through ui.buildSite instead, which is the touch path: no hover, so the
+// numbers ride the hint bar as a chip.
+function shotPlacePreview(touch) {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot234', 'small', 'normal');
+  const mine = g.blobs.find(b => b.owner === 0 && b.count.deploy > 0);
+  if (!mine) return;
+  // the legal site with the most plots within a short march, scanned in a
+  // fixed order so the same seed always scores the same ground. Visible
+  // tiles only: a site out in the fog would score fine and screenshot black.
+  let spot = null, bestPlots = -1;
+  for (let dy = -9; dy <= 9; dy++) {
+    for (let dx = -9; dx <= 9; dx++) {
+      const x = Math.floor(mine.x) + dx, y = Math.floor(mine.y) + dy;
+      if (x < 0 || y < 0 || x >= g.map.w || y >= g.map.h) continue;
+      if (g.fog[y * g.map.w + x] !== 2) continue;
+      const a = S.buildAnchorAt(g, x, y);
+      if (a.err) continue;
+      const sc = S.previewScore(g, a.x, a.y, 0);
+      if (sc.plots > bestPlots) { bestPlots = sc.plots; spot = { x, y }; }
+    }
+  }
+  if (!spot) return;
+  startMatch(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  ui.selected = { kind: 'blob', id: mine.id };
+  ui.pending = 'build';
+  if (touch) { ui.buildSite = { x: spot.x, y: spot.y }; ui.hover = shotHover = null; }
+  else { ui.buildSite = null; ui.hover = shotHover = { x: spot.x + 0.5, y: spot.y + 0.5 }; }
+  view.cx = spot.x + 0.5;
+  view.cy = spot.y + 0.5;
+  view.scale = 26;
+  input.clampView();
+  updateHint();
+  renderPanel(true);
+}
+
+// `?shot=stats` (#233) — the end-of-match graph. It reads a sampled series,
+// not the DB, so the shot simulates a real short match and samples it exactly
+// the way the frame loop does: honest curves, deterministic seed, no fixture.
+// `stats-one` shows the same screen with a single metric left ticked, which is
+// what the toggles are for.
+function shotStats(only) {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot233', 'xsmall', 'normal');
+  startMatch(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  for (let k = 0; k < 1500 && !g.result; k++) {
+    RP.advance(g);
+    ST.sample(statsSeries, g);
+  }
+  renderPanel(true);
+  if (only) statsMetric = { units: only === 'units', land: only === 'land', food: only === 'food' };
+  openStats();
+}
+
+// `?shot=replay-end` (#232) — the outcome card at the end of a playback, with
+// the transport controls that used to be missing: the only way out of this card
+// was Back to menu, even though the scrub bar was still live behind it.
+async function shotReplayEnd() {
+  openReplay(shotReplayPayload());
+  await doReplaySeek(1800);
+  paused = true;
+  $('replay-play').textContent = '▶';
+  lastReplayUi = -1;
+  refreshReplayUi();
+  renderPanel(true);
+  replayEndShown = false;
+  showReplayEndCard();
+}
+
 // The visibility machine's states (#212) are per-account, so no URL can reach
 // state 2 or 3 by itself — and a signed-in reviewer may already be in state 3,
 // where there is nothing to screenshot. These links pin the machine's inputs in
@@ -4993,6 +5397,19 @@ if (SHOT === 'replay') {
 }
 if (SHOT === 'replay-rewound') {
   try { shotReplayRewound().catch((e) => console.warn('shot link failed', e)); }
+  catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'walls-far') {
+  try { shotWallsFar(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'place-preview' || SHOT === 'place-preview-touch') {
+  try { shotPlacePreview(SHOT === 'place-preview-touch'); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'stats' || SHOT === 'stats-one') {
+  try { shotStats(SHOT === 'stats-one' ? 'units' : null); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'replay-end') {
+  try { shotReplayEnd().catch((e) => console.warn('shot link failed', e)); }
   catch (e) { console.warn('shot link failed', e); }
 }
 if (SHOT === 'replay-stale') {

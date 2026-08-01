@@ -5,7 +5,7 @@
 
 import * as S from './sim.js';
 import * as SUP from './supply.js';
-import { fertTier } from './mapgen.js';
+import { fertTier, FERT_TIERS } from './mapgen.js';
 
 const T = 16;     // terrain layer px per tile (drawn smoothed — kills shimmer)
 const FOG_T = 4;  // fog layer px per tile (tighter edge gradient)
@@ -550,6 +550,7 @@ export function createRenderer(canvas, minimap) {
           garrison: { deploy: 0, supply: 0, farm: 0 }, lastHitT: -999,
         }, wx, wy, s, true, wsel);
       }
+      drawWallChainLabels(game, wx, wy, s);
     }
 
     // working farmers — drawn before settlements so they can never cover
@@ -1082,6 +1083,10 @@ export function createRenderer(canvas, minimap) {
         dashedPlot(ax, ay,
           a.err ? 'rgba(248,113,113,0.95)' : 'rgba(74,222,128,0.95)',
           a.err ? 'rgba(248,113,113,0.14)' : 'rgba(74,222,128,0.14)');
+        // #234: say what the site is WORTH, not just where it fits.
+        // Phones get the same numbers in the hint bar (main.js) — there's
+        // no room for a floating card next to a thumb.
+        if (!a.err && !ui.buildSite) drawPlacementScore(game, ax, ay, wx, wy, s);
       }
     }
 
@@ -1404,6 +1409,134 @@ export function createRenderer(canvas, minimap) {
   // bright crenellated stone with an owner banner; unprotected walls as
   // dark flat stone with cracks growing as HP falls; construction sites
   // as translucent dashed scaffolding with an amber progress bar.
+  // #234: a small card pinned beside the dashed 2×2 footprint, reporting
+  // what the site is worth before you spend 5 units on it — how many farm
+  // plots it claims, how good the land is, and the food/min it earns bare
+  // vs fully manned. Every number comes from S.previewScore, which runs
+  // the sim's own previewFields → farmYield, so the card can't over-promise.
+  function drawPlacementScore(game, ax, ay, wx, wy, s) {
+    const sc = S.previewScoreCached(game, ax, ay, viewer(game));
+    const tier = FERT_TIERS[fertTier(sc.meanFert)];
+    const rows = [
+      ['Plots', `${sc.plots}`],
+      ['Land', `${tier} (${sc.meanFert.toFixed(2)})`],
+      ['Food/min', `${sc.nowPerMin.toFixed(1)} now`],
+      ['', `${sc.maxPerMin.toFixed(1)} max · ${sc.maxFarmers} 🌱`],
+    ];
+    ctx.save();
+    ctx.font = '11px system-ui';
+    let bw = 0;
+    for (const [k, v] of rows) bw = Math.max(bw, ctx.measureText(`${k}  ${v}`).width);
+    const padX = 8, padY = 6, lh = 14;
+    const w = bw + padX * 2 + 26, h = rows.length * lh + padY * 2;
+    // prefer the right of the plot; flip left / clamp so it never leaves the canvas
+    let cardX = wx(ax + 2) + 8, cardY = wy(ay) - 2;
+    if (cardX + w > cssW - 4) cardX = wx(ax) - w - 8;
+    cardX = Math.max(4, Math.min(cardX, cssW - w - 4));
+    cardY = Math.max(4, Math.min(cardY, cssH - h - 4));
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = 'rgba(9,9,11,0.86)';
+    ctx.strokeStyle = 'rgba(74,222,128,0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(cardX + 0.5, cardY + 0.5, w, h, 6);
+    ctx.fill(); ctx.stroke();
+    ctx.textBaseline = 'middle';
+    let ty = cardY + padY + lh / 2;
+    for (const [k, v] of rows) {
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#a1a1aa';
+      ctx.fillText(k, cardX + padX, ty);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = k === 'Food/min' || k === '' ? '#4ade80' : '#e4e4e7';
+      ctx.fillText(v, cardX + w - padX, ty);
+      ty += lh;
+    }
+    ctx.restore();
+  }
+
+  // #236: zoomed out past CHIP_MIN_S the per-tile garrison chips vanish
+  // (one tile can't hold a legible label — see the #211 fit test in
+  // drawWall), which left a long manned rampart looking identical to an
+  // empty one. Aggregate instead: flood-fill contiguous same-owner,
+  // same-build-state runs of wall and print ONE total per chain, in
+  // screen-space type, at the chain's centre. Fog is respected — an
+  // enemy chain only counts the tiles currently in sight, so the label
+  // can never leak numbers the viewer hasn't earned.
+  const CHAIN_LABEL_MAX_S = 12;   // == drawWall's CHIP_MIN_S
+  const CHAIN_MIN_EXTENT = 14;    // px: below this even one label is a smear
+  function drawWallChainLabels(game, wx, wy, s) {
+    if (s >= CHAIN_LABEL_MAX_S) return;   // per-tile chips already do this
+    const walls = game.walls || [];
+    if (!walls.length) return;
+    const mw = game.map.w, me = viewer(game);
+    const byId = new Map();
+    for (const w of walls) byId.set(w.id, w);
+    const seen = new Set();
+    for (const start of walls) {
+      if (seen.has(start.id)) continue;
+      // flood-fill this chain (4-connected, same owner, same build state —
+      // the same adjacency drawWall's `joins` uses for its stone seams)
+      const chain = [];
+      const stack = [start];
+      seen.add(start.id);
+      while (stack.length) {
+        const w = stack.pop();
+        chain.push(w);
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = w.x + dx, ny = w.y + dy;
+          if (nx < 0 || ny < 0 || nx >= game.map.w || ny >= game.map.h) continue;
+          const nid = game.wallAt ? game.wallAt[ny * mw + nx] : 0;
+          if (!nid || seen.has(nid)) continue;
+          const nw = byId.get(nid);
+          if (!nw || nw.owner !== w.owner || !nw.building !== !w.building) continue;
+          seen.add(nid); stack.push(nw);
+        }
+      }
+      // total over the tiles the viewer can actually account for
+      let tot = 0, cx = 0, cy = 0, n = 0;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const w of chain) {
+        const vis = w.owner === me || fogAt(game, w.y * mw + w.x) === 2;
+        if (!vis) continue;
+        const g = w.garrison ? w.garrison.deploy + w.garrison.supply + w.garrison.farm : 0;
+        tot += g; n++;
+        cx += w.x; cy += w.y;
+        if (w.x < minX) minX = w.x; if (w.x > maxX) maxX = w.x;
+        if (w.y < minY) minY = w.y; if (w.y > maxY) maxY = w.y;
+      }
+      if (!n || tot <= 0) continue;
+      if (Math.max(maxX - minX + 1, maxY - minY + 1) * s < CHAIN_MIN_EXTENT) continue;
+      // snap the centroid onto a real chain tile so the label always sits
+      // on stone rather than floating in the gap of an L-bend
+      cx /= n; cy /= n;
+      let anchor = null, bd = Infinity;
+      for (const w of chain) {
+        if (w.owner !== me && fogAt(game, w.y * mw + w.x) !== 2) continue;
+        const d = (w.x - cx) * (w.x - cx) + (w.y - cy) * (w.y - cy);
+        if (d < bd) { bd = d; anchor = w; }
+      }
+      if (!anchor) continue;
+      const icon = chain.some(w => w.garrison && w.garrison.deploy > 0) ? '⚔️'
+        : chain.some(w => w.garrison && w.garrison.supply > 0) ? '🚚' : '🌱';
+      const label = `${icon}${tot}`;
+      // screen-space type: the whole point is to stay readable when the
+      // tile is 6 px across, so this does NOT scale with s
+      const fs = 11;
+      const lx = wx(anchor.x) + s / 2, ly = wy(anchor.y) + s / 2;
+      ctx.globalAlpha = 1;
+      ctx.font = `600 ${fs}px system-ui`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(lx - tw / 2 - 3, ly - fs * 0.75, tw + 6, fs * 1.5);
+      ctx.fillStyle = ownerColor(game, chain[0].owner);
+      ctx.fillRect(lx - tw / 2 - 3, ly + fs * 0.75 - 2, tw + 6, 2);
+      ctx.fillStyle = '#e4e4e7';
+      ctx.fillText(label, lx, ly);
+    }
+  }
+
   function drawWall(game, w, wx, wy, s, ghost, sel) {
     const x0 = wx(w.x), y0 = wy(w.y);
     const size = s;

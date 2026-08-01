@@ -23,7 +23,11 @@ export const LOG_MAX_ENTRIES = 4000;      // orders past this: stop recording
 export const LOG_MAX_BYTES = 256 * 1024;  // serialized log cap
 export const CHECK_TICKS = 600;           // integrity checkpoint cadence
 export const KEYFRAME_TICKS = 600;        // in-memory seek keyframe cadence
-export const KEYFRAME_MAX = 12;           // keyframes held at once
+// Keyframes are now exact clones of the live game rather than save-format
+// snapshots (see keyframe/snapshot below), so each one costs more memory —
+// held count trimmed to match. Twelve minutes of scrub-back is still more
+// than the seek bar ever needs between slices.
+export const KEYFRAME_MAX = 8;            // keyframes held at once
 export const SEEK_SLICE = 300;            // ticks simulated per yielded slice
 export const LOCAL_MAX = 10;              // logs kept on the device
 
@@ -56,10 +60,73 @@ export function createRecorder(game) {
     mode: game.pvp ? 'pvp' : 'solo',
     viewer_owner: game.pvp ? (game.me || 0) : 0,
     sim_version: S.SIM_VERSION,
+    // #232: playback ALWAYS starts at tick 0, so a recorder that opened
+    // partway through a match (resuming a save) produces entries whose
+    // tick stamps mean nothing to the player. Recording it explicitly
+    // makes that a checkable fact instead of a silent offset.
+    start_tick: game.tick | 0,
     entries: [],
     lastCheck: -1,
     orders: 0,
     overflow: false,   // hit a cap — the match is finished but not replayable
+    end_tick: 0,
+  };
+}
+
+// ------------------------------------------------- resume journal (#232)
+//
+// Recording is per-session, but a match isn't: quit to the menu and resume
+// and the second session's recorder used to open at tick 4000 and stamp
+// its orders there, while playback dutifully started from zero. The order
+// log is therefore journaled to the device alongside the autosave, and a
+// resumed session picks the journal back up rather than starting a new,
+// offset recorder. If no journal matches the save being resumed, the match
+// is simply not recorded (see startMatch in main.js) — a missing replay is
+// honest; a misaligned one is not.
+
+export function journalOf(rec, game, stats) {
+  if (!rec) return null;
+  return {
+    seed: rec.seed,
+    size_key: rec.size_key,
+    difficulty: rec.difficulty,
+    mode: rec.mode,
+    viewer_owner: rec.viewer_owner,
+    sim_version: rec.sim_version,
+    start_tick: rec.start_tick | 0,
+    tick: game ? game.tick | 0 : 0,
+    lastCheck: rec.lastCheck,
+    orders: rec.orders,
+    overflow: !!rec.overflow,
+    entries: rec.entries,
+    stats: stats || null,
+  };
+}
+
+// Rebuild the in-flight recorder from a journal, but only when the journal
+// provably belongs to THIS resumed game: same match parameters, same engine
+// version, and stamped at exactly the tick the save was taken. Anything else
+// returns null and the session records nothing.
+export function recorderFromJournal(j, game) {
+  if (!j || !game) return null;
+  if ((j.sim_version | 0) !== S.SIM_VERSION) return null;
+  if ((j.start_tick | 0) !== 0) return null;
+  if (j.seed !== game.seed || j.size_key !== game.sizeKey) return null;
+  if (j.difficulty !== game.difficulty) return null;
+  if ((j.tick | 0) !== (game.tick | 0)) return null;
+  if (!Array.isArray(j.entries)) return null;
+  return {
+    seed: j.seed,
+    size_key: j.size_key,
+    difficulty: j.difficulty,
+    mode: j.mode,
+    viewer_owner: j.viewer_owner | 0,
+    sim_version: j.sim_version | 0,
+    start_tick: 0,
+    entries: j.entries.slice(),
+    lastCheck: j.lastCheck != null ? j.lastCheck : -1,
+    orders: j.orders | 0,
+    overflow: !!j.overflow,
     end_tick: 0,
   };
 }
@@ -113,6 +180,9 @@ export function logBytes(rec) {
 // recording overran its caps or never got going.
 export function finishRecording(rec) {
   if (!rec || rec.overflow || !rec.entries.length) return null;
+  // #232: fail closed. A log that doesn't cover the match from tick 0 can
+  // only ever replay wrong, so it is never published.
+  if ((rec.start_tick | 0) !== 0) return null;
   if (logBytes(rec) > LOG_MAX_BYTES) return null;
   return {
     seed: rec.seed,
@@ -169,6 +239,7 @@ export function reset(p) {
   p.game = g;
   p.i = 0;
   p.keyframes = [];
+  p.drift = false;        // #232: a fresh run has nothing to have drifted from
   applyAt(p, 0);          // tick-0 orders, if the log has any
   return g;
 }
@@ -196,11 +267,54 @@ function applyAt(p, tick) {
   }
 }
 
+// #232: a seek keyframe must be an EXACT snapshot, not a save file.
+// S.serialize is the save format — deliberately lossy about transient
+// state (engagement timers, chase targets, cached paths, hunger latches,
+// route delivery windows, the merge log, blob unit order). Restoring one
+// mid-match therefore lands on a game that is *nearly* the recorded one,
+// and every tick after that diverges a little further — which is what
+// made rewound playback jitter and mis-report. structuredClone copies the
+// whole live object graph, typed arrays and Sets included, so a rewind is
+// bit-identical to where playback actually was.
+//
+// The exception is game.map: it is large, immutable except for `fert`,
+// and the renderer keys its cached terrain layer on the map OBJECT, so
+// cloning it would silently invalidate that cache every rewind. The map
+// is lifted out, shared by reference, and only its mutable fertility
+// array is snapshotted alongside.
+function snapshot(g) {
+  const map = g.map;
+  g.map = null;
+  let data;
+  try {
+    data = structuredClone(g);
+  } finally {
+    g.map = map;
+  }
+  return { data, fert: map.fert.slice(), pillaged: new Set(g.pillaged) };
+}
+
+function restore(p, snap) {
+  const prev = p.game;
+  const map = prev.map;
+  // clone again on the way out: the keyframe has to stay reusable for the
+  // next rewind to the same tick
+  const g = structuredClone(snap.data);
+  g.map = map;
+  // roll fertility back and repaint every tile either state pillaged, so
+  // the terrain layer can't keep showing scorched ground that un-happened
+  for (let i = 0; i < map.fert.length; i++) map.fert[i] = snap.fert[i];
+  for (const i of prev.pillaged) g.dirty.add(i);
+  for (const i of snap.pillaged) g.dirty.add(i);
+  p.game = g;
+  return g;
+}
+
 function keyframe(p) {
   if (p.game.tick % KEYFRAME_TICKS !== 0) return;
   const last = p.keyframes[p.keyframes.length - 1];
   if (last && last.tick === p.game.tick) return;
-  p.keyframes.push({ tick: p.game.tick, data: S.serialize(p.game), i: p.i });
+  p.keyframes.push({ tick: p.game.tick, snap: snapshot(p.game), i: p.i });
   if (p.keyframes.length > KEYFRAME_MAX) p.keyframes.shift();
 }
 
@@ -230,17 +344,20 @@ export function atEnd(p) {
 }
 
 // Restore the newest keyframe at or before `tick` (rebuilding from scratch when
-// there isn't one). `prev` keeps the renderer's terrain layer keyed on the same
-// map object, per the note on S.deserialize.
+// there isn't one). The snapshot shares the previous game's map object, so the
+// renderer's terrain layer stays valid across the rewind.
 function rewindTo(p, tick) {
   let best = null;
   for (const k of p.keyframes) if (k.tick <= tick) best = k;
   if (!best) { reset(p); return; }
-  const prev = p.game;
-  p.game = S.deserialize(best.data, prev);
+  restore(p, best.snap);
   p.game.replay = true;
   if (p.game.pvp) S.setViewer(p.game, p.meta.viewer_owner | 0);
   p.i = best.i;
+  // #232: drift is a statement about the ticks currently on screen. Rewinding
+  // discards those ticks, so the banner must not survive the rewind — it
+  // re-raises by itself if the re-simulated run really does miss a checkpoint.
+  p.drift = false;
   while (p.keyframes.length && p.keyframes[p.keyframes.length - 1].tick > best.tick) {
     p.keyframes.pop();
   }

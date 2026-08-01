@@ -127,6 +127,30 @@
     { "name": "Engine-changed dialog names the reason", "path": "/?shot=replay-stale&demo=1", "expectText": "game engine has changed" },
     { "name": "Rewound replay still has a live viewer", "path": "/?shot=replay-rewound&demo=1", "expectSelector": "#replay-bar:not(.hidden)" },
     { "name": "Rewound replay is back at the start", "path": "/?shot=replay-rewound&demo=1", "expectText": "0m 00s" },
-    { "name": "Rewound replay keeps reveal map switched on", "path": "/?shot=replay-rewound&demo=1", "expectSelector": "#replay-fog.bg-sky-800" }
+    { "name": "Rewound replay keeps reveal map switched on", "path": "/?shot=replay-rewound&demo=1", "expectSelector": "#replay-fog.bg-sky-800" },
+
+    { "name": "Zoomed-out garrisoned wall chain boots into a match (#236)", "path": "/?shot=walls-far&demo=1", "expectSelector": "#game-ui:not(.hidden)" },
+    { "name": "The far-zoom wall shot keeps the minimap on screen (#236)", "path": "/?shot=walls-far&demo=1", "expectSelector": "#minimap" },
+    { "name": "Settlement placement preview boots armed (#234)", "path": "/?shot=place-preview&demo=1", "expectText": "Tap where to found the settlement" },
+    { "name": "Placement preview shot is in a live match (#234)", "path": "/?shot=place-preview&demo=1", "expectSelector": "#game-ui:not(.hidden)" },
+    { "name": "Touch placement puts the site's score in the hint bar (#234)", "path": "/?shot=place-preview-touch&demo=1", "expectSelector": "#hint-score:not(.hidden)" },
+    { "name": "The placement score counts the plots the site would win (#234)", "path": "/?shot=place-preview-touch&demo=1", "expectText": "20 plots" },
+    { "name": "The placement score names the land quality (#234)", "path": "/?shot=place-preview-touch&demo=1", "expectText": "Fertile" },
+    { "name": "The placement score reads food now and at full farms (#234)", "path": "/?shot=place-preview-touch&demo=1", "expectText": "36.0→396.0/min" },
+    { "name": "Match stats deep link opens the chart (#233)", "path": "/?shot=stats&demo=1", "expectSelector": "#stats-modal:not(.hidden)" },
+    { "name": "Match stats screen is titled (#233)", "path": "/?shot=stats&demo=1", "expectText": "Match statistics" },
+    { "name": "Match stats says it shows both sides (#233)", "path": "/?shot=stats&demo=1", "expectText": "both sides shown" },
+    { "name": "Match stats clock matches the match clock (#233)", "path": "/?shot=stats&demo=1", "expectText": "5m 00s of play" },
+    { "name": "Match stats draws a chart (#233)", "path": "/?shot=stats&demo=1", "expectSelector": "#stats-chart" },
+    { "name": "Match stats reports the enemy's curve too (#233)", "path": "/?shot=stats&demo=1", "expectText": "Enemy Territory" },
+    { "name": "Match stats reports a food rate per minute (#233)", "path": "/?shot=stats&demo=1", "expectText": "You Food/min" },
+    { "name": "Match stats metrics can be toggled off (#233)", "path": "/?shot=stats-one&demo=1", "expectSelector": "#stats-toggles input[data-metric=\"land\"]:not(:checked)" },
+    { "name": "One-metric stats keeps its own metric ticked (#233)", "path": "/?shot=stats-one&demo=1", "expectSelector": "#stats-toggles input[data-metric=\"units\"]:checked" },
+    { "name": "Replay end card offers the transport controls (#232)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#end-replay-controls:not(.hidden)" },
+    { "name": "Replay end card can stay in the viewer (#232)", "path": "/?shot=replay-end&demo=1", "expectText": "Keep watching" },
+    { "name": "Replay end card can jump back 30 seconds (#232)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#btn-end-back30" },
+    { "name": "Replay end card can restart the playback (#232)", "path": "/?shot=replay-end&demo=1", "expectText": "↺ Restart" },
+    { "name": "Replay end card links to the match stats (#233)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#btn-end-stats:not(.hidden)" },
+    { "name": "Replay end card leaves the transport live behind it (#232)", "path": "/?shot=replay-end&demo=1", "expectSelector": "#replay-bar:not(.hidden)" }
   ]
 }
