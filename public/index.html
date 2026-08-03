@@ -198,7 +198,9 @@
       <span id="record-warning" class="hidden text-amber-300 text-xs whitespace-nowrap"
             title="This match's order log couldn't be carried across the resume, so it can't be saved as a replay. The match itself is saving normally and its graph is intact.">⚠️ Replay off</span>
       <span class="flex-1"></span>
-      <button id="btn-help" aria-label="Controls help" title="Controls help" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">🕹️</button>
+      <!-- #248: no controls button here. The tutorial teaches the controls and
+           the menu's 🕹️ offers whichever set is still unread; the in-match
+           shortcut was clutter that already vanished once both were read. -->
       <button id="btn-pause" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">⏸</button>
       <select id="sel-speed" class="btn-sm px-2 rounded bg-zinc-800 hover:bg-zinc-700 font-mono text-zinc-100">
         <option value="1" selected>1×</option>

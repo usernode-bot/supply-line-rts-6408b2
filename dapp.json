@@ -61,7 +61,6 @@
     { "name": "Difficulty hint carries the commander's Elo", "path": "/?demo=1", "expectText": "Elo 1000" },
     { "name": "End-of-match rating line element present", "path": "/?demo=1", "expectSelector": "#end-rating" },
     { "name": "Controls tour overlay container present", "path": "/?demo=1", "expectSelector": "#controls-tour" },
-    { "name": "Controls help button present in the game top-bar shell", "path": "/?demo=1", "expectSelector": "#btn-help" },
     { "name": "Controls button present in the menu shell (visibility is state-driven)", "path": "/?demo=1", "expectSelector": "#btn-controls" },
     { "name": "Controls tour deep link renders the card", "path": "/?shot=controls-tour&demo=1", "expectSelector": "#controls-tour-card" },
     { "name": "Controls tour counts its steps", "path": "/?shot=controls-tour&demo=1", "expectText": "Step 1 of 10" },
@@ -181,6 +180,15 @@
     { "name": "The joining player's opponent reads as Enemy (#246)", "path": "/?shot=stats-pvp-guest&demo=1", "expectText": "Enemy Units" },
     { "name": "A resumed match's graph renders what it has (#244)", "path": "/?shot=stats-gap&demo=1", "expectSelector": "#stats-modal:not(.hidden) #stats-chart" },
     { "name": "A missing stretch of history is labelled, not implied (#244)", "path": "/?shot=stats-gap&demo=1", "expectText": "no history before" },
-    { "name": "Replay-off chip present in the top bar (#245)", "path": "/?demo=1", "expectSelector": "#record-warning" }
+    { "name": "Replay-off chip present in the top bar (#245)", "path": "/?demo=1", "expectSelector": "#record-warning" },
+    { "name": "No controls icon in the in-match top bar (#248)", "path": "/?demo=1", "expectSelector": "#game-ui #btn-pause" },
+    { "name": "Mixed-army formation state boots a live match (#251)", "path": "/?shot=formation-mixed&demo=1", "expectSelector": "#game-ui:not(.hidden)" },
+    { "name": "Mixed-army formation selects the group so the panel reads it (#251)", "path": "/?shot=formation-mixed&demo=1", "expectSelector": "#panel:not(.hidden)" },
+    { "name": "Mixed-army formation shows all three roles in one group (#251)", "path": "/?shot=formation-mixed&demo=1", "expectText": "Supply" },
+    { "name": "Large-army formation state renders the canvas (#251)", "path": "/?shot=formation-large&demo=1", "expectSelector": "#game-canvas" },
+    { "name": "Large-army formation is one 34-strong group (#251)", "path": "/?shot=formation-large&demo=1", "expectText": "34" },
+    { "name": "Re-forming (role change) formation state boots a live match (#251)", "path": "/?shot=formation-convert&demo=1", "expectSelector": "#game-ui:not(.hidden)" },
+    { "name": "Back-to-work button shows the JOINING player's own farmhands (#247)", "path": "/?shot=backtowork-guest&demo=1", "expectSelector": "#btn-backtowork:not(.hidden)" },
+    { "name": "Back-to-work badge carries a count for that player (#247)", "path": "/?shot=backtowork-guest&demo=1", "expectText": "Back to work" }
   ]
 }

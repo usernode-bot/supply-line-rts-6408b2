@@ -700,7 +700,17 @@ app.get('/api/lobbies/:id/state', async (req, res) => {
 app.post('/api/lobbies/:id/sync', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    const row = (await pool.query(`SELECT * FROM lobbies WHERE id = $1`, [id])).rows[0];
+    // #247: NOT `SELECT *`. The `snapshot` column is a 40-80 KB JSONB blob that
+    // pg parsed on every 1 s poll of every player, only for the runner to
+    // ignore it — one of the biggest contributors to how much this endpoint's
+    // latency varied, and correction size follows latency jitter directly. The
+    // revive-after-restart path is the only thing that needs it, so it's a
+    // thunk the runner calls only when there's no live runner to answer from.
+    const row = (await pool.query(`
+      SELECT id, status, host_user_id, guest_user_id, host_username, guest_username,
+             seed, size_key, winner_owner, end_reason
+        FROM lobbies WHERE id = $1
+    `, [id])).rows[0];
     if (!row) return res.status(404).json({ error: 'Lobby not found' });
     const uid = req.user.id;
     const isHost = row.host_user_id === uid;
@@ -711,7 +721,11 @@ app.post('/api/lobbies/:id/sync', async (req, res) => {
       return res.json({ status: row.status, guest_username: row.guest_username, command_ids: [] });
     }
 
-    const out = await matchRunner.sync(row, isHost ? 0 : 1, req.body || {});
+    const loadSnapshot = async () => {
+      const r = await pool.query(`SELECT snapshot FROM lobbies WHERE id = $1`, [id]);
+      return r.rows[0] ? r.rows[0].snapshot : null;
+    };
+    const out = await matchRunner.sync(row, isHost ? 0 : 1, req.body || {}, loadSnapshot);
     res.json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });

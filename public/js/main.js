@@ -17,6 +17,7 @@ import * as ST from './stats.js';
 import * as RES from './resume.js';
 import { dist, fertTier, FERT_TIERS, passable } from './mapgen.js';
 import { pickTol, blobOverlap, footprintDist, tileDist } from './pick.js';
+import { drainCatchUp, dropBacklog } from './motion.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -25,6 +26,11 @@ const apiHeaders = token ? { 'x-usernode-token': token } : {};
 const SAVE_KEY = RES.SAVE_KEY;
 const IS_DEMO = params.get('demo') === '1';
 const SHOT = params.get('shot') || ''; // screenshot-state deep link (#199)
+// `?mpdebug=1` (#247): logs, per snapshot, how long since the last one landed,
+// how many ticks the correction owed, and the biggest per-blob correction in
+// tiles. "Sometimes stuttery" needs a number; off by default, and nothing on
+// the normal path reads it.
+const MP_DEBUG = params.get('mpdebug') === '1';
 
 // A preview boot must not be able to touch a real player's match (#240).
 // `?shot=` links are opened with a live token by the platform's "Test this
@@ -195,7 +201,9 @@ async function refreshPlayerState() {
 // Three states, from the two controls marks plus the tutorial mark:
 //   1  tutorial not done      → no menu 🕹️; the tutorial teaches the controls
 //   2  one set still unread   → menu 🕹️ names that set and boots practice on it
-//   3  both sets read         → both 🕹️ buttons retire
+//   3  both sets read         → the menu 🕹️ retires
+// The in-match top-bar 🕹️ was removed in #248; the menu button is the only
+// controls entry point now, so this state machine drives one control.
 
 // The first unread set, preferring the one this screen actually uses.
 function unseenSet() {
@@ -211,7 +219,7 @@ function controlsState() {
   return unseenSet() === null ? 3 : 2;
 }
 
-// Both buttons stay in the DOM and are hidden by class. While the account's
+// The button stays in the DOM and is hidden by class. While the account's
 // copy is still in flight everything is hidden: a control may APPEAR once
 // progress is known, but must never vanish from under the player's finger.
 function refreshControlsVisibility() {
@@ -222,7 +230,6 @@ function refreshControlsVisibility() {
   if (unseen) {
     menu.textContent = unseen === 'touch' ? '🕹️ Show controls for mobile' : '🕹️ Show controls for desktop';
   }
-  $('btn-help').classList.toggle('hidden', state !== 1 && state !== 2);
 }
 
 let game = null;
@@ -1040,13 +1047,9 @@ function endPracticeIfPending(set) {
   backToMenu();
 }
 
-$('btn-help').addEventListener('click', () => {
-  // on the practice map the tour is the whole point — fold it away rather than
-  // closing it, so it can't be lost halfway
-  if (game && game.practice && CT.active()) { CT.toggleCollapse(); return; }
-  if (CT.active()) { CT.close({ seen: false }); return; }
-  CT.open({ mode: 'reference', set: isMobile() ? 'touch' : 'desktop' });
-});
+// #248: the in-match 🕹️ is gone. On the practice map the card's own ▾/▴ folds
+// the tour away, and CT.close covers every other exit — nothing here needed a
+// top-bar shortcut to remain reachable.
 $('btn-controls').addEventListener('click', () => {
   if (CT.active()) { CT.close({ seen: false }); return; }
   if (waiting) { showMenuError('Cancel your multiplayer lobby first.'); return; }
@@ -1352,6 +1355,10 @@ function beginPvp(role, lobbyId, opponent, snap) {
     lastSnapTick: -1, lastEventId: 0, oppSeen: null,
     ended: false, busy: false, noSnapPolls: 0, failN: 0,
     kick: null,
+    // #247: ticks still owed to a snapshot correction, drained a couple per
+    // frame by frameBody instead of all at once
+    catchUp: 0,
+    lastSnapAt: 0,
   };
   me = role === 'host' ? 0 : 1;
   // #240: the server forfeits an absent player after 60 s, so a reload has to
@@ -1412,6 +1419,26 @@ async function mpSync() {
   } finally { if (mp) mp.busy = false; }
 }
 
+// `?mpdebug=1` instrumentation (#247) — the three numbers that describe how
+// bad a correction was. Never called on the normal path.
+function logSnapshotDebug(oldGame, newGame, prevTick) {
+  const now = performance.now();
+  const gap = mp.lastSnapAt ? Math.round(now - mp.lastSnapAt) : 0;
+  mp.lastSnapAt = now;
+  const was = new Map();
+  for (const b of oldGame.blobs) if (!b.dead) was.set(b.id, b);
+  let worst = 0;
+  for (const b of newGame.blobs) {
+    if (b.dead) continue;
+    const ob = was.get(b.id);
+    if (!ob) continue;
+    const d = Math.hypot(ob.x - b.x, ob.y - b.y);
+    if (d > worst) worst = d;
+  }
+  console.log(`[mpdebug] gap ${gap}ms · catchUp ${Math.max(0, prevTick - newGame.tick)} ticks · `
+    + `worst correction ${worst.toFixed(2)} tiles · blobs ${newGame.blobs.length}`);
+}
+
 function applySnapshot(snap) {
   const firstSnap = !game;
   if (!game) {
@@ -1422,14 +1449,20 @@ function applySnapshot(snap) {
     const prevTick = game.tick;
     const g = S.deserialize(snap, game);
     S.setViewer(g, me);
+    if (MP_DEBUG && mp) logSnapshotDebug(game, g, prevTick);
+    // #247: ease the correction instead of snapping it. The renderer notes how
+    // far the authoritative state moved each blob away from where it was
+    // actually being DRAWN, and carries that offset back to zero over ~250 ms.
+    // Called BEFORE `game` is swapped — it needs both states.
+    if (renderer) { try { renderer.noteResync(game, g); } catch { } }
     game = g;
-    // dead-reckon back toward where we were rendering (bounded catch-up):
-    // a few ticks now, the rest credited to the frame accumulator so the
-    // frame loop absorbs them instead of hitching here
-    const ahead = Math.min(25, Math.max(0, prevTick - g.tick));
-    let now = Math.min(5, ahead);
-    while (now-- > 0 && !g.result) S.step(g);
-    acc += Math.max(0, ahead - 5) * 100;
+    // dead-reckon back toward where we were rendering (bounded catch-up).
+    // #247: this used to step 5 ticks here and credit the rest to `acc` — but
+    // the frame loop burns up to 40 ticks in ONE frame, so the credited ticks
+    // were consumed immediately and the whole correction landed as a single
+    // visible jump, about once a second. It's a counter now, drained a couple
+    // of ticks per frame by frameBody, so the catch-up is spread over frames.
+    if (mp) mp.catchUp = Math.min(25, Math.max(0, prevTick - g.tick));
   }
   if (mp) {
     // retire pending commands the server had applied before this snapshot,
@@ -1765,9 +1798,12 @@ function startMatch(g, opts) {
   $('end-modal').classList.add('hidden');
   $('game-ui').classList.remove('hidden');
   renderer.resize();
+  // a new match restarts blob ids, so the formation-walk and snapshot-resync
+  // caches have to go with the old one (#247, #251)
+  renderer.resetSmoothing();
   renderPanel(true);
   updateGroupsBar();
-  refreshControlsVisibility(); // the top-bar 🕹️ retires once both sets are read
+  refreshControlsVisibility(); // the menu 🕹️ retires once both sets are read
 
   // first-run controls tour (#212): phone widths only, and never on top of
   // the guided tutorial's own card, a PvP match (no pausing, an opponent is
@@ -4604,7 +4640,11 @@ function updateHUD() {
   $('stat-units').textContent = `👥 ${p.units}`;
   $('stat-setts').textContent = `🏠 ${p.setts}`;
   $('stat-time').textContent = fmtDur(S.gameSeconds(game.tick));
-  const idle = S.idleFarmers(game, 0);
+  // #247: `me`, never a hard-coded 0 — the joining player in a PvP match was
+  // shown the HOST's idle-farmer count, so their button appeared and hid on
+  // the opponent's state and pressing it reported "no idle farmers" against a
+  // non-zero badge. The op itself (opBackToWork(game, me)) was always correct.
+  const idle = S.idleFarmers(game, me);
   const idleN = idle.field + idle.walk;
   const btw = $('btn-backtowork');
   btw.classList.toggle('hidden', idleN === 0 || !!game.result || !!game.replay);
@@ -4626,6 +4666,11 @@ function updateHUD() {
 // repeat sixty times a second — and the dev-console bridge posts every one of
 // them to the parent window. Catch it once, pause, and save what we have:
 // a frozen-but-saved match is recoverable, a crash loop is not (#240).
+// #247: how many catch-up ticks one frame may absorb. Two is invisible at the
+// PvP rate (one tick per 200 ms of wall clock) and drains even a 25-tick
+// correction inside a quarter-second, where the old code did all 25 at once.
+const CATCHUP_PER_FRAME = 2;
+
 let frameCrashed = false;
 function frame(ts) {
   requestAnimationFrame(frame);
@@ -4691,7 +4736,17 @@ function frameBody(ts) {
       if (statsSeries) ST.sample(statsSeries, game);  // #233
       acc -= 100;
     }
-    if (acc >= 100) acc = 0; // fell behind (background tab); drop the backlog
+    // fell behind (background tab): drop the backlog but KEEP THE PHASE (#247).
+    // Zeroing it snapped the render alpha to 0 and broke interpolation
+    // continuity every time the loop overran.
+    acc = dropBacklog(acc, 100);
+    // #247: drain a snapshot correction a couple of ticks per frame, so the
+    // catch-up is spread across frames rather than landing as one jump.
+    if (mp && mp.catchUp > 0 && !game.result) {
+      const d = drainCatchUp(mp.catchUp, CATCHUP_PER_FRAME);
+      mp.catchUp = d.left;
+      for (let i = 0; i < d.run && !game.result; i++) RP.advance(game);
+    }
   }
 
   input.update(dt);
@@ -5943,6 +5998,135 @@ function shotControlsTour(desc) {
   CT.open(opts);
 }
 
+// ---------------------------------------------------------------- formation shots (#251)
+
+// A group of exactly the requested composition, parked in open ground next to
+// the player's starting town and selected — the one thing no plain URL can
+// reach, because a mixed army is the product of mid-match merges. Roles are
+// rewritten on real units drawn from the sim's own seeded stream (newGame made
+// them), so nothing here forges state the sim couldn't produce itself.
+function stageFormationGroup(seed, comp, scale) {
+  clearSaves();
+  me = 0;
+  const g = S.newGame(seed, 'small', 'normal');
+  const army = g.blobs.find(b => b.owner === 0 && b.working == null && S.total(b) > 0);
+  if (!army) return null;
+  const want = comp.deploy + comp.supply + comp.farm;
+  // grow the group to the size the shot needs by cloning its own units, each
+  // carrying a distinct seed off the sim's stream so the formation's
+  // (role, seed) ordering has something deterministic to sort by
+  while (army.units.length < want) {
+    const src = army.units[army.units.length % Math.max(1, army.units.length)];
+    army.units.push({ role: src.role, hp: src.hp, seed: S.simRand(g) });
+  }
+  army.units.length = want;
+  let i = 0;
+  for (const role of ['deploy', 'supply', 'farm']) {
+    for (let k = 0; k < comp[role]; k++) { army.units[i].role = role; army.units[i].hp = S.unitMaxHP(role); i++; }
+  }
+  army.count = { deploy: comp.deploy, supply: comp.supply, farm: comp.farm };
+  army.food = S.foodCap(army);
+  army.order = null; army.path = null; army.pathGoal = null;
+  // open ground a few tiles out from the keep, scanned in a fixed order so the
+  // same seed always stages the identical field
+  const start = g.map.starts[0];
+  let spot = null;
+  for (let r = 4; r <= 8 && !spot; r++) {
+    for (let dy = -r; dy <= r && !spot; dy++) {
+      for (let dx = -r; dx <= r && !spot; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = start.x + 1 + dx, y = start.y + 1 + dy;
+        if (!passable(g.map, x, y)) continue;
+        if (g.settAt && g.settAt[y * g.map.w + x]) continue;
+        spot = { x: x + 0.5, y: y + 0.5 };
+      }
+    }
+  }
+  if (spot) { army.x = spot.x; army.y = spot.y; army.prevX = army.x; army.prevY = army.y; }
+  army.facing = 0;   // ranks across the screen, front rank to the right
+  startMatch(g);
+  for (let i2 = 0; i2 < 3; i2++) S.step(g);   // settles fog so the group is lit
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  ui.selected = { kind: 'blob', id: army.id };
+  view.cx = army.x; view.cy = army.y; view.scale = scale;
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+  return { g, army };
+}
+
+// `?shot=formation-mixed` (#251) — a mixed army: attackers bracketing the
+// suppliers and farmhands in their own blocks of rows. The composition is the
+// whole point of the issue and is unreachable by URL otherwise.
+function shotFormationMixed() {
+  stageFormationGroup('shot251', { deploy: 9, supply: 6, farm: 4 }, 34);
+}
+
+// `?shot=formation-large` (#251) — a big pure-attack army, which is the only
+// size that actually reaches the 10-per-row ceiling, at a zoom where the rear
+// rows' dimming reads.
+function shotFormationLarge() {
+  stageFormationGroup('shot251b', { deploy: 34, supply: 0, farm: 0 }, 40);
+}
+
+// `?shot=formation-convert` (#251) — a mixed army RE-FORMING: the whole group
+// arms up, so the suppliers and farmhands walk out of their own blocks and into
+// the attackers' ranks instead of teleporting there.
+//
+// The role change is fired a beat AFTER the boot on purpose. The walk is a
+// half-second animation from wherever the figures already stood, so issuing it
+// before the first frame would leave nothing to walk from — the group would
+// simply appear in its new shape. This way the still shows the re-formed group
+// and the animated capture shows it re-forming. The op and its countdown are
+// the real ones; the sim stays paused throughout.
+function shotFormationConvert() {
+  const staged = stageFormationGroup('shot251c', { deploy: 6, supply: 8, farm: 4 }, 40);
+  if (!staged) return;
+  const { g, army } = staged;
+  setTimeout(() => {
+    if (game !== g || army.dead) return;
+    applyCommand(g, 0, { op: 'setRole', blobId: army.id, role: 'deploy' });
+    // run the arm-up countdown out: finishConvert rewrites every role, which is
+    // what moves the formation's targets and starts the walk
+    const until = (army.convert ? army.convert.done : g.tick) + 1;
+    while (g.tick < until && !g.result) S.step(g);
+    renderPanel(true);
+    updateHUD();
+  }, 1200);
+}
+
+// `?shot=backtowork-guest` (#247) — the reported bug's seat. The "Back to work"
+// badge read owner 0 whoever was looking, so the JOINING player saw the host's
+// idle-farmhand count: the button appeared on the opponent's state and pressing
+// it said "no idle farmers" over a non-zero number. That seat needs a live lobby
+// and a second human, so it was unreachable by URL and invisible to tests. Here
+// owner 1 (the joiner, whose view this is) has idle garrisoned farmhands and
+// owner 0 has none — so a correct badge shows a count, and the old bug would
+// hide the button entirely. Pure local UI state, no writes.
+function shotBackToWorkGuest() {
+  clearSaves();
+  me = 1;
+  const g = S.newGame('shot247', 'xsmall', 'normal', true);
+  S.setViewer(g, 1);
+  const mine = g.settlements.find(s => s.owner === 1 && !s.building);
+  const theirs = g.settlements.find(s => s.owner === 0 && !s.building);
+  if (!mine || !theirs) return;
+  // my farmhands come off the fields and sit in the keep; the opponent's stay
+  // out working, which is exactly the asymmetry the bug inverted
+  applyCommand(g, 1, { op: 'garrisonRole', settlementId: mine.id, role: 'farm' });
+  mine.garrison = { deploy: 0, supply: 0, farm: Math.max(4, mine.garrison.farm) };
+  theirs.garrison = { deploy: 0, supply: 0, farm: 0 };
+  startMatch(g);
+  for (let i = 0; i < 3; i++) S.step(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  view.cx = mine.x + 1; view.cy = mine.y + 1; view.scale = 26;
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+}
+
 // ---------------------------------------------------------------- offline boot (#221)
 
 // `?shot=offline-menu` renders the menu exactly as it looks with no
@@ -6152,6 +6336,18 @@ if (SHOT === 'merged-supply' || SHOT === 'merged-supply-armed' || SHOT === 'merg
 if (SHOT === 'replay-end') {
   try { shotReplayEnd().catch((e) => console.warn('shot link failed', e)); }
   catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'formation-mixed') {
+  try { shotFormationMixed(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'formation-large') {
+  try { shotFormationLarge(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'formation-convert') {
+  try { shotFormationConvert(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'backtowork-guest') {
+  try { shotBackToWorkGuest(); } catch (e) { console.warn('shot link failed', e); }
 }
 if (SHOT === 'replay-stale') {
   // the list, then its engine-changed dialog — so the message itself is
