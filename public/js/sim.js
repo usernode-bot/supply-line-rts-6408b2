@@ -2111,10 +2111,19 @@ function leaveRoute(game, b) {
 
 // ---------------------------------------------------------------- queries for UI
 
-export function blobAt(game, wx, wy, maxD) {
+// Nearest blob to a world point by EDGE distance, within maxD of its circle.
+//
+// `filter` (#243) narrows the search to blobs the caller could actually use.
+// Picking the nearest blob of ANY kind and testing its owner afterwards is a
+// silent trap: the player's own army is usually the biggest circle on the map,
+// so a click on a small enemy caravan standing beside it resolved to the army,
+// failed the ownership test, and the attack order degraded to a plain march
+// with nothing said. A predicate makes "nearest ENEMY" expressible instead.
+export function blobAt(game, wx, wy, maxD, filter) {
   let best = null, bd = maxD;
   for (const b of game.blobs) {
     if (b.dead) continue;
+    if (filter && !filter(b)) continue;
     const d = dist(b.x, b.y, wx, wy) - blobRadius(b);
     if (d < bd) { bd = d; best = b; }
   }

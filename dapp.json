@@ -172,6 +172,15 @@
     { "name": "An expired session says what to do about it (#240)", "path": "/?shot=session-expired&demo=1", "expectText": "Your Usernode session has expired" },
     { "name": "An expired session collapses multiplayer with a reason (#240)", "path": "/?shot=session-expired&demo=1", "expectSelector": "#mp-expired:not(.hidden)" },
     { "name": "An expired session is not shown as offline (#240)", "path": "/?shot=session-expired&demo=1", "expectSelector": "#offline-badge.hidden" },
-    { "name": "Autosave warning chip present in the top bar (#240)", "path": "/?demo=1", "expectSelector": "#save-warning" }
+    { "name": "Autosave warning chip present in the top bar (#240)", "path": "/?demo=1", "expectSelector": "#save-warning" },
+    { "name": "Attacking an enemy caravan opens the action list (#243)", "path": "/?shot=attack-caravan&demo=1", "expectSelector": "#order-popup:not(.hidden)" },
+    { "name": "The action list offers Attack on an enemy caravan (#243)", "path": "/?shot=attack-caravan&demo=1", "expectText": "Attack" },
+    { "name": "A caravan in the open is still a live match (#243)", "path": "/?shot=attack-caravan&demo=1", "expectSelector": "#game-ui:not(.hidden)" },
+    { "name": "Multiplayer stats render for the joining player (#246)", "path": "/?shot=stats-pvp-guest&demo=1", "expectSelector": "#stats-modal:not(.hidden) #stats-chart" },
+    { "name": "The joining player reads their own side as You (#246)", "path": "/?shot=stats-pvp-guest&demo=1", "expectText": "You Units" },
+    { "name": "The joining player's opponent reads as Enemy (#246)", "path": "/?shot=stats-pvp-guest&demo=1", "expectText": "Enemy Units" },
+    { "name": "A resumed match's graph renders what it has (#244)", "path": "/?shot=stats-gap&demo=1", "expectSelector": "#stats-modal:not(.hidden) #stats-chart" },
+    { "name": "A missing stretch of history is labelled, not implied (#244)", "path": "/?shot=stats-gap&demo=1", "expectText": "no history before" },
+    { "name": "Replay-off chip present in the top bar (#245)", "path": "/?demo=1", "expectSelector": "#record-warning" }
   ]
 }
