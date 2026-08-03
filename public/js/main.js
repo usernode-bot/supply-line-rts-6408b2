@@ -195,7 +195,9 @@ async function refreshPlayerState() {
 // Three states, from the two controls marks plus the tutorial mark:
 //   1  tutorial not done      → no menu 🕹️; the tutorial teaches the controls
 //   2  one set still unread   → menu 🕹️ names that set and boots practice on it
-//   3  both sets read         → both 🕹️ buttons retire
+//   3  both sets read         → the menu 🕹️ retires
+// The in-match top-bar 🕹️ was removed in #248; the menu button is the only
+// controls entry point now, so this state machine drives one control.
 
 // The first unread set, preferring the one this screen actually uses.
 function unseenSet() {
@@ -211,7 +213,7 @@ function controlsState() {
   return unseenSet() === null ? 3 : 2;
 }
 
-// Both buttons stay in the DOM and are hidden by class. While the account's
+// The button stays in the DOM and is hidden by class. While the account's
 // copy is still in flight everything is hidden: a control may APPEAR once
 // progress is known, but must never vanish from under the player's finger.
 function refreshControlsVisibility() {
@@ -222,7 +224,6 @@ function refreshControlsVisibility() {
   if (unseen) {
     menu.textContent = unseen === 'touch' ? '🕹️ Show controls for mobile' : '🕹️ Show controls for desktop';
   }
-  $('btn-help').classList.toggle('hidden', state !== 1 && state !== 2);
 }
 
 let game = null;
@@ -1040,13 +1041,9 @@ function endPracticeIfPending(set) {
   backToMenu();
 }
 
-$('btn-help').addEventListener('click', () => {
-  // on the practice map the tour is the whole point — fold it away rather than
-  // closing it, so it can't be lost halfway
-  if (game && game.practice && CT.active()) { CT.toggleCollapse(); return; }
-  if (CT.active()) { CT.close({ seen: false }); return; }
-  CT.open({ mode: 'reference', set: isMobile() ? 'touch' : 'desktop' });
-});
+// #248: the in-match 🕹️ is gone. On the practice map the card's own ▾/▴ folds
+// the tour away, and CT.close covers every other exit — nothing here needed a
+// top-bar shortcut to remain reachable.
 $('btn-controls').addEventListener('click', () => {
   if (CT.active()) { CT.close({ seen: false }); return; }
   if (waiting) { showMenuError('Cancel your multiplayer lobby first.'); return; }
@@ -1767,7 +1764,7 @@ function startMatch(g, opts) {
   renderer.resize();
   renderPanel(true);
   updateGroupsBar();
-  refreshControlsVisibility(); // the top-bar 🕹️ retires once both sets are read
+  refreshControlsVisibility(); // the menu 🕹️ retires once both sets are read
 
   // first-run controls tour (#212): phone widths only, and never on top of
   // the guided tutorial's own card, a PvP match (no pausing, an opponent is

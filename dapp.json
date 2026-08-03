@@ -61,7 +61,6 @@
     { "name": "Difficulty hint carries the commander's Elo", "path": "/?demo=1", "expectText": "Elo 1000" },
     { "name": "End-of-match rating line element present", "path": "/?demo=1", "expectSelector": "#end-rating" },
     { "name": "Controls tour overlay container present", "path": "/?demo=1", "expectSelector": "#controls-tour" },
-    { "name": "Controls help button present in the game top-bar shell", "path": "/?demo=1", "expectSelector": "#btn-help" },
     { "name": "Controls button present in the menu shell (visibility is state-driven)", "path": "/?demo=1", "expectSelector": "#btn-controls" },
     { "name": "Controls tour deep link renders the card", "path": "/?shot=controls-tour&demo=1", "expectSelector": "#controls-tour-card" },
     { "name": "Controls tour counts its steps", "path": "/?shot=controls-tour&demo=1", "expectText": "Step 1 of 10" },
