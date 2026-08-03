@@ -427,6 +427,32 @@ console.log('local store — recordings on the device');
   check('a stale local log is swept on read', RP.localIndex(store)['cid-old'] === undefined);
 }
 
+// #245: the shelf of finished matches' logs is expendable history, and ten of
+// them at LOG_MAX_BYTES is 2.5 MB — enough, on a device near its quota, for the
+// LIVE match's own save to be the write that gets refused. So the shelf is
+// capped by SIZE as well as by count, oldest shed first.
+{
+  const store = createStore(null);
+  const fat = (n) => ({
+    seed: 'fat', size_key: 'xsmall', difficulty: 'normal', mode: 'solo',
+    viewer_owner: 0, sim_version: S.SIM_VERSION, end_tick: 100,
+    log: [{ t: 1, c: { op: 'setMode', settlementId: 1, mode: 'farm', pad: 'x'.repeat(n) } }],
+  });
+  const big = 200 * 1024;
+  for (let i = 0; i < 6; i++) RP.saveLocal(store, 'fat' + i, fat(big));
+  const rows = RP.readLocal(store);
+  const bytes = JSON.stringify(rows).length;
+  check('the shelf stops well short of six fat logs', rows.length < 6, String(rows.length));
+  check('and it fits its byte budget', bytes <= RP.LOCAL_MAX_BYTES + big, String(bytes));
+  check('the newest fat log is the one that survived', !!RP.takeLocal(store, 'fat5'));
+  check('the oldest is gone', RP.takeLocal(store, 'fat0') === null);
+  // one log bigger than the whole budget is still kept: dropping the match that
+  // just finished would be the one loss the player would actually notice
+  const solo = createStore(null);
+  RP.saveLocal(solo, 'huge', fat(RP.LOCAL_MAX_BYTES + 1024));
+  check('a single oversized log is never the one dropped', !!RP.takeLocal(solo, 'huge'));
+}
+
 // ---------------------------------------------------------------- pvp shape
 
 console.log('pvp — both sides\' orders replay from one log');
@@ -502,6 +528,18 @@ console.log('resume journal — a recording covers the match or it does not exis
   check('a journal from another engine version is refused',
     RP.recorderFromJournal({ ...j, sim_version: S.SIM_VERSION + 1 }, resumed) === null);
   check('a missing journal is refused', RP.recorderFromJournal(null, resumed) === null);
+
+  // #244: the CHART is not the replay. A journal the recorder refuses still
+  // hands its sampled series back, and a journal written with no order log at
+  // all (the log sacrificed to a full quota) is a valid stats journal.
+  check('a refused journal still yields its stats series',
+    !!RP.statsFromJournal({ ...j, sim_version: S.SIM_VERSION + 1 }, resumed));
+  const statsOnly = RP.statsJournalOf(g, { rows: [{ t: 0, units: [12, 12], land: [0, 0], food: [0, 0] }] });
+  check('a stats-only journal carries no order log', statsOnly.entries === undefined);
+  check('a stats-only journal round-trips its series',
+    RP.statsFromJournal(statsOnly, resumed).rows.length === 1);
+  check('…and is never mistaken for a recording',
+    RP.recorderFromJournal(statsOnly, resumed) === null);
 
   // continuing the restored recorder produces one continuous log
   RP.recordEnd(back, resumed, 'win');

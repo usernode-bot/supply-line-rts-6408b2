@@ -74,6 +74,31 @@ export function peak(series, key) {
   return m;
 }
 
+// What span of the match this series actually covers (#244).
+//
+// Rows are sparse by tick index, so a series that only started at the resume
+// point leaves holes at rows[0..n] and `filter(Boolean)` quietly hands back a
+// chart that begins mid-match against a full-width time axis — which reads as
+// "the match started here" rather than "this part wasn't recorded". The chart
+// asks this instead and labels the hole.
+export function coverage(series) {
+  const rows = series && Array.isArray(series.rows) ? series.rows : [];
+  let first = null, last = null, samples = 0;
+  for (const r of rows) {
+    if (!r) continue;
+    if (!first) first = r;
+    last = r;
+    samples++;
+  }
+  if (!first) return { samples: 0, fromTick: 0, toTick: 0, gap: false };
+  return {
+    samples,
+    fromTick: first.t | 0,
+    toTick: last.t | 0,
+    gap: (first.t | 0) > 0,
+  };
+}
+
 // Headline numbers for the end card: where each side finished, and when
 // each side's units peaked (the "high-water mark" a match turns on).
 export function summary(series) {

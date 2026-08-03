@@ -15,7 +15,7 @@ import * as OFF from './offline.js';
 import * as RP from './replay.js';
 import * as ST from './stats.js';
 import * as RES from './resume.js';
-import { dist, fertTier, FERT_TIERS } from './mapgen.js';
+import { dist, fertTier, FERT_TIERS, passable } from './mapgen.js';
 import { pickTol, blobOverlap, footprintDist, tileDist } from './pick.js';
 
 const $ = (id) => document.getElementById(id);
@@ -276,11 +276,22 @@ function readJournal() {
   if (!persistenceEnabled) return null;
   return saveStore.read(JOURNAL_KEY, null);
 }
+// The journal beside the autosave: the in-flight order log AND the sampled
+// stats series while a recording is live, the stats series ALONE once it
+// isn't (#244). The chart is a record of what the viewer watched, not
+// simulation state, so it must not be lost to the replay's strict provenance
+// rules — a resumed match whose log couldn't be proved still keeps its graph.
+//
+// Returns whether the write landed (#245): the save is the authority on tick,
+// so a journal that silently failed is stale the moment the save lands and
+// every later resume would reject it. The caller acts on that instead.
 function writeJournal() {
-  if (!persistenceEnabled || !recorder || !game) return;
-  // a full quota is not worth losing the match over — the resume will
-  // just find no journal and decline to record
-  saveStore.write(JOURNAL_KEY, RP.journalOf(recorder, game, statsSeries));
+  if (!persistenceEnabled || !game) return false;
+  const payload = recorder
+    ? RP.journalOf(recorder, game, statsSeries)
+    : RP.statsJournalOf(game, statsSeries);
+  if (!payload) return false;
+  return saveStore.write(JOURNAL_KEY, payload);
 }
 function clearJournal() {
   if (!persistenceEnabled) return;
@@ -1661,22 +1672,32 @@ function startMatch(g, opts) {
   const recordable = !g.replay && !g.pvp && !g.tutorial && !g.practice && !g.sandbox;
   recordingLost = false;
   statsSeries = ST.createSeries();   // #233: every match keeps its own graph
+  const resumed = recordable && g.tick > 0;
+  const journal = resumed ? readJournal() : null;
   if (!recordable) {
     recorder = null;
-  } else if (g.tick > 0) {
+  } else if (resumed) {
     // Resumed match (#232). A recorder opened here would stamp its orders
     // at tick 4000-something while playback starts from zero — the exact
     // offset that made rewound replays show a match that never happened.
     // Pick the journaled log back up instead, and if there isn't one that
     // provably belongs to this save, record nothing and say so.
-    const j = readJournal();
-    recorder = RP.recorderFromJournal(j, g);
-    if (recorder && j.stats && Array.isArray(j.stats.rows)) statsSeries = { rows: j.stats.rows };
+    recorder = RP.recorderFromJournal(journal, g);
     recordingLost = !recorder;
-    if (!recorder) clearJournal();
   } else {
     recorder = RP.createRecorder(g);
     clearJournal();
+  }
+  if (resumed) {
+    // #244: the chart is restored on its OWN, looser gate. It used to ride
+    // the replay's strict check and then get deleted with the rejected
+    // journal, which is why a resumed match's graph started mid-match with
+    // the earlier half of the game simply missing.
+    const back = RP.statsFromJournal(journal, g);
+    if (back) statsSeries = back;
+    // A journal that can't be a replay must not be left behind claiming to be
+    // one — but the history it carried is re-journaled rather than dropped.
+    if (!recorder) { clearJournal(); writeJournal(); }
   }
   ST.sample(statsSeries, g);   // an opening data point, before any ticks run
   endReplay = null;
@@ -1763,6 +1784,11 @@ function startMatch(g, opts) {
   // remount or a phone dropping the tab lands in.
   saveGame(true);
   refreshSaveWarning();
+  // #245: a resumed match that can no longer be recorded says so NOW. The end
+  // card still explains it for anyone who missed this, but finding out then is
+  // finding out too late to do anything about it.
+  refreshReplayNotice();
+  if (recordingLost) toast("⚠ This match can no longer be saved as a replay — the graph is intact.");
 }
 
 function backToMenu() {
@@ -1827,25 +1853,26 @@ function saveGame(push, opts) {
   data.savedAt = Date.now();
   data.view = { cx: view.cx, cy: view.cy, scale: view.scale };
 
+  // #232/#245: the order log lives or dies with the save it belongs to, and it
+  // is written FIRST. Both writes happen in this one call at one tick, so the
+  // journal's stamped tick matches the save's either way — but ordering it
+  // first means a failure leaves the journal AHEAD of the save (recoverable,
+  // and detected right here) rather than a stale journal behind a newer save,
+  // which every later resume would silently reject.
+  if (!writeJournal() && recorder) dropRecording();
+
   // #240: a quota-full localStorage used to make this a silent no-op forever —
   // the match kept playing and then vanished on the next reload. Free the
-  // biggest expendable things first (finished matches' replay logs, then this
-  // match's own order journal) and retry after each; only give up out loud.
+  // biggest expendable things first — finished matches' replay logs, ALL of
+  // them if that's what it takes (the step repeats, #245), and only then this
+  // match's own order log — and retry after each; only give up out loud.
   const res = RES.persistSave(saveStore, data, [
     { name: 'replays', run: () => dropOldestLocalReplay() },
-    { name: 'journal', run: () => { clearJournal(); recordingLost = true; recorder = null; return true; } },
+    { name: 'journal', run: () => dropRecording() },
   ]);
   const wasDegraded = saveDegraded;
   saveDegraded = !res.ok;
-  if (res.pruned.includes('journal')) {
-    // #232 already has the vocabulary for this: no journal, no replay.
-    $('btn-end-replay').classList.add('hidden');
-  }
   if (res.ok) {
-    // #232: the order log lives or dies with the save it belongs to. Written
-    // in the same breath so the journal's stamped tick always matches the
-    // save's — that equality is what proves the two describe one match.
-    writeJournal();
     // The breadcrumb that turns a reload into a resume (#240): its presence on
     // the next boot means the page went away MID-MATCH. Every deliberate exit
     // clears it, so it can never auto-resume someone who quit to the menu.
@@ -1865,6 +1892,25 @@ function saveGame(push, opts) {
       keepalive: unload,
     }).catch(() => { });
   }
+}
+
+// Give up recording THIS match: the last thing sacrificed when storage is
+// tight, and the honest answer when the journal write itself failed.
+//
+// The stats series is re-journaled on its own (#244) — it is orders of
+// magnitude smaller than the order log and it is what the end card's graph is
+// made of, so "no replay" must never also mean "no graph". Returns false when
+// there is no recording left to give up, which is how persistSave knows this
+// step has nothing more to free.
+function dropRecording() {
+  if (!recorder) return false;
+  recorder = null;
+  recordingLost = true;
+  clearJournal();
+  writeJournal();                                  // stats-only from here on
+  $('btn-end-replay').classList.add('hidden');     // #232: no journal, no replay
+  refreshReplayNotice();
+  return true;
 }
 
 // One expendable thing to free when the quota bites: the oldest finished
@@ -1906,6 +1952,17 @@ function refreshSaveWarning() {
   el.classList.toggle('hidden', !(saveDegraded && game && savableGame(game)));
 }
 
+// The "⚠️ Replay off" chip (#245). Recording being lost used to surface ONLY
+// in the end card, twenty minutes after the fact; said here it lands while the
+// player can still understand what happened (they just resumed, or storage is
+// full). The match itself keeps saving — that is what makes this a separate,
+// quieter chip than the autosave warning beside it.
+function refreshReplayNotice() {
+  const el = $('record-warning');
+  if (!el) return;
+  el.classList.toggle('hidden', !(recordingLost && game && savableGame(game)));
+}
+
 function showEndModal(win, reason) {
   $('end-emoji').textContent = win ? '🏆' : '🏳️';
   $('end-title').textContent = win ? 'Victory!' : (reason === 'surrender' ? 'Surrendered' : 'Defeat');
@@ -1926,6 +1983,11 @@ function showEndModal(win, reason) {
   // PvP recordings are written server-side, so there is nothing in memory to
   // rewatch from here — the match's row in the history list carries it.
   $('btn-end-replay').classList.add('hidden');
+  $('end-replay-controls').classList.add('hidden');   // live card, no transport
+  // #246: the graph is sampled for a multiplayer match exactly as for a solo
+  // one, but this card never offered it — so the only route to the chart after
+  // a PvP game was watching its replay.
+  $('btn-end-stats').classList.toggle('hidden', !statsSeries || !statsSeries.rows.filter(Boolean).length);
   $('end-modal').classList.remove('hidden');
 }
 
@@ -1948,13 +2010,16 @@ function endMatch(result) {
     : `Your war effort collapsed after ${fmtDur(S.gameSeconds(game.tick))}.`;
   $('end-rating').classList.add('hidden');   // filled in once the post answers
   $('end-replay-controls').classList.add('hidden');   // live card, no transport
-  // #233: the graph of how the match actually went, whatever the outcome
-  $('btn-end-stats').classList.toggle('hidden', !statsSeries || !statsSeries.rows.length);
+  // #233: the graph of how the match actually went, whatever the outcome.
+  // Holes are possible now (#244) — a resumed match can be missing the part of
+  // its history that lived on another device — so it's the SAMPLES that decide
+  // whether there is a chart, not the sparse array's length.
+  $('btn-end-stats').classList.toggle('hidden', !statsSeries || !statsSeries.rows.filter(Boolean).length);
   if (recordingLost) {
     // #232: say it plainly rather than silently producing no replay row.
     // A log that doesn't start at tick 0 can only replay wrong, so the
-    // honest outcome is no replay at all.
-    $('end-detail').textContent += ' This match resumed from a save without its order log, so no replay was recorded.';
+    // honest outcome is no replay at all. #244: the graph survives it.
+    $('end-detail').textContent += " This match's order log couldn't be carried across the resume, so no replay was recorded — the graph below still covers what was sampled.";
   }
   $('end-modal').classList.remove('hidden');
   if (game.sandbox) return;
@@ -2318,7 +2383,7 @@ function onTap(world, pointerType, screen) {
   if (mobile && sel.length > 0) {
     // ask before acting — Move/Attack at the tap point, or Deselect, so a
     // stray tap can't send the group marching across the map
-    showOrderPopup(world, screen, findEnemyTargetAt(world));
+    showOrderPopup(world, screen, findEnemyTargetAt(world, tapHitR()));
     return;
   }
   // tap elsewhere with blobs selected → inline order popup at the tap
@@ -2326,7 +2391,7 @@ function onTap(world, pointerType, screen) {
   // Mouse skips this (#79): on desktop left-click only selects/inspects —
   // right-click is the order button. (≥640px touch only — phones use the
   // mode-based dispatch above.)
-  if (!mobile && pointerType !== 'mouse' && selectedBlobs().length > 0) { showOrderPopup(world, screen, findEnemyTargetAt(world)); return; }
+  if (!mobile && pointerType !== 'mouse' && selectedBlobs().length > 0) { showOrderPopup(world, screen, findEnemyTargetAt(world, tapHitR())); return; }
   // nothing selected → inspect what was tapped; an enemy settlement's
   // footprint outranks any unit overlapping it (#165)
   const known = game.pvp ? game.knowns[me] : game.known;
@@ -2403,10 +2468,32 @@ function onBox(rect, additive) {
   renderPanel(true);
 }
 
+// An enemy group this player could actually order an attack on: not theirs,
+// not a field hand carpeting a farm, and currently in sight. Handed to
+// S.blobAt as a filter (#243) rather than tested after the fact — the pick
+// used to take the nearest blob of ANY kind and then check its owner, so one
+// of the player's own groups standing nearer the cursor made the whole
+// function answer "no enemy here" and the attack order degraded to a plain
+// march. Own armies are the biggest circles on the map and they end up right
+// beside whatever they were sent at, so every retry failed the same way.
+function targetableEnemy(b) {
+  return b.owner !== me && b.working == null && S.isVisible(game, b.x, b.y);
+}
+
+// The forgiving pick radius the tap flows already use for route endpoints —
+// a finger is not a cursor. Shared so the order popup's enemy pick matches it.
+function tapHitR() { return Math.max(1.5, 24 / view.scale); }
+
 // Enemy entity under a world point that the current player may target
 // directly: a visible enemy blob, or an enemy settlement that is visible
 // or remembered on the map.
-function findEnemyTargetAt(world) {
+//
+// `tol` is the slack past a blob's own circle that still counts as a hit.
+// Right-clicks keep the tight #201 grab (0.9); the tap popup passes its
+// generous radius, because it ASKS which order the player meant instead of
+// committing to one — which is what #201's own comment always claimed.
+function findEnemyTargetAt(world, tol) {
+  const grab = tol != null ? tol : 0.9;
   const known = game.pvp ? game.knowns[me] : game.known;
   // footprint-first (#165): a tap on an enemy settlement's 2×2 grounds
   // targets the settlement even when an enemy blob overlaps it
@@ -2425,13 +2512,41 @@ function findEnemyTargetAt(world) {
   // move only becomes an attack when the click lands on (or right at the
   // edge of) the enemy itself; the touch popup keeps its generous pick
   // because it asks the player which order they meant.
-  const eb = S.blobAt(game, world.x, world.y, 0.9);
-  if (eb && eb.owner !== me && S.isVisible(game, eb.x, eb.y)) return { kind: 'blob', id: eb.id };
-  const st = S.settlementAt(game, world.x, world.y, 1.9);
+  const eb = S.blobAt(game, world.x, world.y, grab, targetableEnemy);
+  if (eb) return { kind: 'blob', id: eb.id };
+  const st = S.settlementAt(game, world.x, world.y, Math.max(1.9, grab));
   if (st && st.owner !== me && (S.settVisible(game, st) || known[st.id])) {
     return { kind: 'settlement', id: st.id };
   }
   return null;
+}
+
+// The order's destination lands INSIDE a visible enemy group's circle, so the
+// order can only mean "attack it" (#243). Without this, a click that missed the
+// grab radius became a plain tile move onto the enemy — and a plain move plans
+// around visible enemies, so the group halted an avoidance ring short (~2.8
+// tiles, circles touching on screen) with its order quietly completed and not a
+// word said. Deliberately an ORDER-ISSUING rule here in the dispatch, not in
+// the sim: opMove's #74 invariant ("a plain tile move never diverts to attack")
+// stays exactly as written, and what goes over the PvP wire / into the replay
+// log is an ordinary targeted order.
+function attackTargetFor(world, target) {
+  if (target) return target;
+  const inside = S.blobAt(game, world.x, world.y, 0, targetableEnemy);
+  return inside ? { kind: 'blob', id: inside.id } : null;
+}
+
+// The own wall / own settlement destination a click resolved to, UNLESS the
+// click landed on an enemy group (#243). opMove already documents the rule this
+// restores: cancelling a target on the player's own grounds "would forbid
+// attacking an enemy standing in your own town square". An exact own WALL tile
+// still wins — blockedTiles keeps enemies off it, so nothing legitimate is
+// lost — and a click with no enemy under it is a garrison march as before.
+function garrisonTargetUnlessEnemy(world, enemy) {
+  const garr = ownGarrisonTargetAt(world);
+  if (!garr) return null;
+  if (garr.kind === 'wall' && wallAtPoint(world)) return garr;
+  return enemy && enemy.kind === 'blob' ? null : garr;
 }
 
 // An own-entity destination under a world point (#201): one of the
@@ -2513,9 +2628,12 @@ function onRightClick(world) {
   }
   // own wall / own settlement under the cursor is a garrison march, never
   // an attack on whatever enemy happens to stand beside it (#201) — and
-  // it marches to the entity's own tile, not the raw cursor point (#222)
-  const garr = ownGarrisonTargetAt(world);
-  orderMove(blobs, world, garr ? null : findEnemyTargetAt(world), garr);
+  // it marches to the entity's own tile, not the raw cursor point (#222).
+  // A click ON an enemy group outranks that (#243): the garrison rule is
+  // about ground nobody is standing on.
+  const enemy = findEnemyTargetAt(world);
+  const garr = garrisonTargetUnlessEnemy(world, enemy);
+  orderMove(blobs, world, garr ? null : attackTargetFor(world, enemy), garr);
 }
 
 // Shared move dispatch: issue the order to every selected blob, ping the
@@ -3478,9 +3596,12 @@ function resolvePending(world, pointerType, screen) {
     if (!blobs.length) return;
     // tapping an enemy targets it; an own wall/settlement is a garrison
     // march that a neighbouring enemy can never steal (#201), aimed at
-    // that entity's own tile rather than the tap point (#222)
-    const garr = ownGarrisonTargetAt(world);
-    orderMove(blobs, world, garr ? null : findEnemyTargetAt(world), garr);
+    // that entity's own tile rather than the tap point (#222). Same
+    // enemy-first precedence and same "landed inside an enemy means attack
+    // it" upgrade as the right-click dispatch (#243).
+    const enemy = findEnemyTargetAt(world, tapHitR());
+    const garr = garrisonTargetUnlessEnemy(world, enemy);
+    orderMove(blobs, world, garr ? null : attackTargetFor(world, enemy), garr);
   } else if (pending === 'route') {
     // supply routes take two taps (#131): first the source settlement the
     // caravans load from, then the destination. Every selected blob holding
@@ -3523,8 +3644,10 @@ function resolvePending(world, pointerType, screen) {
     }
     let tgt = null;
     if (!st && !wl) {
-      tgt = S.blobAt(game, world.x, world.y, hitR);
-      if (tgt && (tgt.owner !== me || tgt.working != null || carriers.some(c => c.id === tgt.id))) tgt = null;
+      // filtered pick, not nearest-then-reject (#243): an enemy group standing
+      // beside the army being supplied used to shadow it and lose the tap
+      tgt = S.blobAt(game, world.x, world.y, hitR,
+        (b) => b.owner === me && b.working == null && !carriers.some(c => c.id === b.id));
       if (!tgt) {
         st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
         if (st && st.owner !== me) st = null;
@@ -3560,8 +3683,9 @@ function resolvePending(world, pointerType, screen) {
       if (!r.err) pingRoute(wlT.x + 0.5, wlT.y + 0.5);
       toast(r.err ? r.err : '🚚 Supply route established');
     } else {
-      const tgt = S.blobAt(game, world.x, world.y, hitR);
-      if (tgt && tgt.owner === me && tgt.working == null) {
+      const tgt = S.blobAt(game, world.x, world.y, hitR,
+        (b) => b.owner === me && b.working == null);   // #243: never shadowed by an enemy
+      if (tgt) {
         const r = doSupplyRoute(src, { kind: 'blob', id: tgt.id });
         if (!r.err) pingRoute(tgt.x, tgt.y);
         toast(r.err ? r.err : '🚚 Supply route established');
@@ -4898,15 +5022,36 @@ async function doReplaySeek(tick) {
 // No fog: the match is over, and a post-mortem that hid the enemy's curve
 // would be a worse story, not a fairer one.
 
+// Labels and colours are VIEWER-RELATIVE (#246), exactly like every colour on
+// the map (render.js's ownerColor). The chart used to index PLAYER_NAMES and
+// METRICS[].color by the raw owner number, which is only "you" for the player
+// who HOSTED: a PvP guest — and anyone watching a PvP replay from the guest's
+// seat — read their own army under "Enemy", in the opponent's colour.
 const PLAYER_NAMES = ['You', 'Enemy'];
+
+function statsViewer() {
+  if (player && player.meta) return player.meta.viewer_owner | 0;   // a replay's recorded seat
+  return game ? (game.me | 0) : 0;
+}
+// Which owner fills a viewer-relative slot (0 = you, 1 = them), so the legend
+// and the lines are drawn in the same order for both seats.
+function statsOwnerForSlot(s) {
+  const v = statsViewer();
+  return s === 0 ? v : 1 - v;
+}
 
 function openStats() {
   if (!statsSeries) return;
   const rows = statsSeries.rows.filter(Boolean);
   $('stats-empty').classList.toggle('hidden', rows.length > 0);
   const sum = ST.summary(statsSeries);
+  const cov = ST.coverage(statsSeries);
   $('stats-sub').textContent = sum
     ? `${fmtDur(sum.seconds)} of play · ${rows.length} samples · both sides shown`
+      // #244: a resumed match whose earlier history didn't come back with it.
+      // Say so — drawing the lines flush to the axis would claim the match
+      // started at the resume point.
+      + (cov.gap ? ` · no history before ${fmtDur(S.gameSeconds(cov.fromTick))} (recorded on another device, or lost)` : '')
     : 'Nothing sampled yet.';
   // toggles
   const tg = $('stats-toggles');
@@ -4924,11 +5069,12 @@ function openStats() {
       drawStats();
     });
   }
-  $('stats-legend').innerHTML = sum ? ST.METRICS.map(m => [0, 1].map(o =>
-    `<div><span class="inline-block w-3 h-1 rounded align-middle" style="background:${m.color[o]}"></span>
-      ${PLAYER_NAMES[o]} ${m.label}: <span class="text-zinc-200 tabular-nums">${m.fmt(sum.last[m.key][o])}</span>
-      ${m.key === 'units' ? `<span class="text-zinc-500">(peak ${sum.peakUnits[o]} at ${fmtDur(S.gameSeconds(sum.peakAt[o]))})</span>` : ''}</div>`
-  ).join('')).join('') : '';
+  $('stats-legend').innerHTML = sum ? ST.METRICS.map(m => [0, 1].map(s => {
+    const o = statsOwnerForSlot(s);   // #246: slot 0 is whoever is looking
+    return `<div><span class="inline-block w-3 h-1 rounded align-middle" style="background:${m.color[s]}"></span>
+      ${PLAYER_NAMES[s]} ${m.label}: <span class="text-zinc-200 tabular-nums">${m.fmt(sum.last[m.key][o])}</span>
+      ${m.key === 'units' ? `<span class="text-zinc-500">(peak ${sum.peakUnits[o]} at ${fmtDur(S.gameSeconds(sum.peakAt[o]))})</span>` : ''}</div>`;
+  }).join('')).join('') : '';
   $('stats-modal').classList.remove('hidden');
   drawStats();
 }
@@ -4967,6 +5113,17 @@ function drawStats() {
   }
   c.textAlign = 'center';
 
+  // #244: shade the stretch of the match this series has no samples for, so
+  // the curves visibly START somewhere rather than pretending to cover it.
+  const cov = ST.coverage(statsSeries);
+  if (cov.gap) {
+    const gx = Math.min(cw - padR, xAt(cov.fromTick));
+    c.fillStyle = 'rgba(63,63,70,0.35)';
+    c.fillRect(padL, padT, Math.max(0, gx - padL), chh - padT - padB);
+    c.fillStyle = '#a1a1aa'; c.font = '10px system-ui'; c.textAlign = 'center';
+    if (gx - padL > 46) c.fillText('no history', (padL + gx) / 2, (padT + chh - padB) / 2);
+  }
+
   shown.forEach((m, bi) => {
     const top = padT + bi * bandH, bot = top + bandH - 8;
     const peak = Math.max(ST.peak(statsSeries, m.key), 1e-6);
@@ -4975,8 +5132,9 @@ function drawStats() {
     c.beginPath(); c.moveTo(padL, Math.round(bot) + 0.5); c.lineTo(cw - padR, Math.round(bot) + 0.5); c.stroke();
     c.fillStyle = '#71717a'; c.textAlign = 'left'; c.font = '10px system-ui';
     c.fillText(`${m.label} — peak ${m.fmt(peak)}`, padL + 2, top + 9);
-    for (const o of [0, 1]) {
-      c.strokeStyle = m.color[o];
+    for (const s of [0, 1]) {
+      const o = statsOwnerForSlot(s);   // #246
+      c.strokeStyle = m.color[s];
       c.lineWidth = 1.75;
       c.beginPath();
       rows.forEach((r, i) => {
@@ -5540,6 +5698,108 @@ function shotStats(only) {
   openStats();
 }
 
+// `?shot=stats-pvp-guest` (#246) — the graph as the player who JOINED the match
+// sees it. That seat is unreachable by URL (it needs a live lobby and a second
+// human), and it is the whole bug: the chart indexed its labels and colours by
+// the raw owner number, so the guest read their own army under "Enemy". A real
+// PvP game viewed from owner 1, sampled the way the frame loop samples, so the
+// legend is honest output rather than a fixture.
+function shotStatsPvpGuest() {
+  clearSaves();
+  me = 1;
+  const g = S.newGame('shot246', 'xsmall', 'normal', true);
+  S.setViewer(g, 1);
+  startMatch(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  // both towns put their hands in the fields, so the curves actually move
+  // without either side needing a commander
+  for (const s of g.settlements) applyCommand(g, s.owner, { op: 'setMode', settlementId: s.id, mode: 'farm' });
+  for (let k = 0; k < 1500 && !g.result; k++) {
+    RP.advance(g);
+    ST.sample(statsSeries, g);
+  }
+  renderPanel(true);
+  openStats();
+}
+
+// `?shot=stats-gap` (#244) — the graph of a match whose earlier history didn't
+// come back with the save (the other device kept it). Staged the only honest
+// way: the series simply has no samples before the resume point, exactly as a
+// resumed session's does, so the shaded stretch and the "no history before…"
+// line come from the real coverage check.
+function shotStatsGap() {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot244', 'xsmall', 'normal');
+  startMatch(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  statsSeries = ST.createSeries();      // nothing sampled for the first stretch
+  for (let k = 0; k < 1500 && !g.result; k++) {
+    RP.advance(g);
+    if (g.tick >= 600) ST.sample(statsSeries, g);
+  }
+  renderPanel(true);
+  openStats();
+}
+
+// `?shot=attack-caravan` (#243) — the reported state, one tap from the fix.
+// An armed group is standing right on top of an enemy CARAVAN in open field
+// (deploy 0, so it can't fight back) — which is where a failed attack order
+// used to leave it, halted an avoidance ring short with nothing said. The
+// action list is opened on the caravan, so the ⚔️ Attack row that the pick used
+// to lose is on screen from a URL alone. Fixed seed, sim paused, no writes.
+function shotAttackCaravan() {
+  clearSaves();
+  me = 0;
+  const g = S.newGame('shot243', 'small', 'normal');
+  const army = g.blobs.find(b => b.owner === 0 && b.count.deploy > 0 && b.working == null);
+  const foe = g.blobs.find(b => b.owner === 1 && S.total(b) >= 3 && b.working == null);
+  if (!army || !foe) return;
+  // the enemy's opening party re-rolled as pure carriers: no fighters is what
+  // makes this the reported case, and it is why nothing ever happened
+  for (const u of foe.units) u.role = 'supply';
+  foe.count = { deploy: 0, supply: foe.units.length, farm: 0 };
+  foe.food = S.foodCap(foe);
+  foe.order = null; foe.path = null; foe.pathGoal = null;
+  // open ground out past the player's farmland, scanned in a fixed order so the
+  // same seed always stages the identical field
+  const start = g.map.starts[0];
+  let spot = null;
+  for (let r = 5; r <= 9 && !spot; r++) {
+    for (let dy = -r; dy <= r && !spot; dy++) {
+      for (let dx = -r; dx <= r && !spot; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = start.x + 1 + dx, y = start.y + 1 + dy;
+        if (!passable(g.map, x, y) || !passable(g.map, x - 2, y)) continue;
+        if (g.settAt && g.settAt[y * g.map.w + x]) continue;
+        spot = { x: x + 0.5, y: y + 0.5 };
+      }
+    }
+  }
+  if (!spot) return;
+  foe.x = spot.x; foe.y = spot.y;
+  foe.prevX = foe.x; foe.prevY = foe.y;
+  // …and the army parked where the old plain-move order left it: two tiles out,
+  // circles touching, doing nothing
+  army.x = spot.x - 2; army.y = spot.y;
+  army.prevX = army.x; army.prevY = army.y;
+  army.order = null; army.path = null; army.pathGoal = null;
+  startMatch(g);
+  for (let i = 0; i < 3; i++) S.step(g);   // refreshes fog so the caravan is in sight
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  ui.selected = { kind: 'blob', id: army.id };
+  view.cx = foe.x; view.cy = foe.y; view.scale = 34;
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+  // the tap-again action list, opened on the caravan with the same generous
+  // pick a finger gets — the ⚔️ Attack row is the point of the shot
+  showOrderPopup({ x: foe.x, y: foe.y }, null, findEnemyTargetAt({ x: foe.x, y: foe.y }, tapHitR()));
+}
+
 // `?shot=merged-supply` (#239) — a MERGED supply/army group selected, which is
 // the state the bug lives in: idle carriers fold into an idle army and the
 // group's "🚚 Supply route…" button used to go dead, with no way to un-mix it
@@ -5875,6 +6135,15 @@ if (SHOT === 'place-preview' || SHOT === 'place-preview-touch') {
 }
 if (SHOT === 'stats' || SHOT === 'stats-one') {
   try { shotStats(SHOT === 'stats-one' ? 'units' : null); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'stats-pvp-guest') {
+  try { shotStatsPvpGuest(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'stats-gap') {
+  try { shotStatsGap(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'attack-caravan') {
+  try { shotAttackCaravan(); } catch (e) { console.warn('shot link failed', e); }
 }
 if (SHOT === 'merged-supply' || SHOT === 'merged-supply-armed' || SHOT === 'merged-supply-running') {
   try { shotMergedSupply(SHOT.slice('merged-supply-'.length) || null); }

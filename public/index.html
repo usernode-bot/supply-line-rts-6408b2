@@ -191,6 +191,12 @@
            discovering it on the menu afterwards is discovering it too late. -->
       <span id="save-warning" class="hidden text-amber-300 text-xs whitespace-nowrap"
             title="This device's storage is full, so the match can't be saved. Free some space, or finish this match before reloading.">⚠️ Autosave off</span>
+      <!-- #245: this match can no longer be saved as a replay (its order log
+           didn't survive the resume, or storage was too tight to keep it). Said
+           in the match, not twenty minutes later in the end card. The match
+           itself is still saving normally, and the graph is unaffected. -->
+      <span id="record-warning" class="hidden text-amber-300 text-xs whitespace-nowrap"
+            title="This match's order log couldn't be carried across the resume, so it can't be saved as a replay. The match itself is saving normally and its graph is intact.">⚠️ Replay off</span>
       <span class="flex-1"></span>
       <button id="btn-help" aria-label="Controls help" title="Controls help" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">🕹️</button>
       <button id="btn-pause" class="btn-sm px-3 rounded bg-zinc-800 hover:bg-zinc-700">⏸</button>

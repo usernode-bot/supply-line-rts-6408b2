@@ -269,6 +269,54 @@ console.log('quota — a failed write prunes and retries instead of giving up si
   check('only the effective step is reported',
     res2.ok === true && res2.pruned.join(',') === 'journal', res2.pruned.join(','));
 
+  // #245: a step is REPEATED while it keeps freeing something. Each step used
+  // to run exactly once, so "drop the oldest finished match's replay log" freed
+  // ONE log and the sequence then sacrificed the live match's own order journal
+  // — with nine more expendable logs still sitting on the device.
+  {
+    const storage3 = memStorage({ rejectKeys: new Set([RES.SAVE_KEY]) });
+    const store3 = O.createStore(storage3);
+    let shelf = 4, journalGone = false;
+    const res3 = RES.persistSave(store3, data, [
+      {
+        name: 'replays',
+        run: () => {
+          if (shelf === 0) return false;             // nothing left of this kind
+          shelf--;
+          if (shelf === 0) storage3.setRejectKeys(null);   // the last one frees room
+          return true;
+        },
+      },
+      { name: 'journal', run: () => { journalGone = true; return true; } },
+    ]);
+    check('the repeated step drains its own kind first', shelf === 0);
+    check('and the save lands on it', res3.ok === true);
+    check('the journal is never touched while logs remain', journalGone === false);
+    check('every pass is reported', res3.pruned.join(',') === 'replays,replays,replays,replays',
+      res3.pruned.join(','));
+  }
+  {
+    // …and once the shelf really is empty, the journal step is still reached
+    const storage4 = memStorage({ rejectKeys: new Set([RES.SAVE_KEY]) });
+    const store4 = O.createStore(storage4);
+    const order = [];
+    const res4 = RES.persistSave(store4, data, [
+      { name: 'replays', run: () => { order.push('replays'); return false; } },
+      { name: 'journal', run: () => { order.push('journal'); storage4.setRejectKeys(null); return true; } },
+    ]);
+    check('an empty shelf falls through to the journal', order.join(',') === 'replays,journal');
+    check('and that save lands', res4.ok === true && res4.pruned.join(',') === 'journal');
+  }
+  {
+    // a step that never stops freeing must not spin forever
+    const storage5 = memStorage({ rejectKeys: new Set([RES.SAVE_KEY]) });
+    const store5 = O.createStore(storage5);
+    let passes = 0;
+    const res5 = RES.persistSave(store5, data, [{ name: 'endless', run: () => { passes++; return true; } }]);
+    check('a step that always frees something is bounded', passes === RES.PRUNE_MAX_PASSES, String(passes));
+    check('and the failure is still reported out loud', res5.ok === false);
+  }
+
   // A store with no backing storage at all (the ?shot= memory store) still
   // works — a preview boot must never crash on a save it isn't allowed to make.
   const mem = O.createStore(null);

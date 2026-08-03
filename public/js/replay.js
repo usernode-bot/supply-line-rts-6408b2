@@ -16,6 +16,7 @@
 import * as S from './sim.js';
 import { aiTick } from './ai.js';
 import { applyCommand } from './commands.js';
+import { SAMPLE_TICKS } from './stats.js';
 
 export const REPLAY_KEY = 'supply-line-replays-v1';
 
@@ -30,6 +31,11 @@ export const KEYFRAME_TICKS = 600;        // in-memory seek keyframe cadence
 export const KEYFRAME_MAX = 8;            // keyframes held at once
 export const SEEK_SLICE = 300;            // ticks simulated per yielded slice
 export const LOCAL_MAX = 10;              // logs kept on the device
+// …and a budget for the shelf as a whole (#245). Ten logs at LOG_MAX_BYTES is
+// 2.5 MB of finished-match history, which on a tight device crowds out the
+// LIVE match's own save — and the quota then bites the thing the player still
+// cares about. Expendable history gets a fixed ceiling instead.
+export const LOCAL_MAX_BYTES = 600 * 1024;
 
 // ---------------------------------------------------------------- advance
 
@@ -101,6 +107,44 @@ export function journalOf(rec, game, stats) {
     entries: rec.entries,
     stats: stats || null,
   };
+}
+
+// The journal with the order log left out (#244): the match's identity plus
+// the sampled stats series. Written when there is no recorder left to journal
+// — a rejected journal on resume, or the log sacrificed to a full quota —
+// because the end card's chart is a record of what the viewer WATCHED, not
+// simulation state, and has no business dying with the replay's provenance.
+export function statsJournalOf(game, stats) {
+  if (!game) return null;
+  return {
+    seed: game.seed,
+    size_key: game.sizeKey,
+    difficulty: game.difficulty,
+    tick: game.tick | 0,
+    stats: stats || null,
+  };
+}
+
+// The stats series out of a journal, on its OWN, looser gate (#244).
+//
+// recorderFromJournal below must fail closed — a misaligned order log replays
+// a match that never happened. The chart cannot: it is just numbers with tick
+// stamps, so it only has to belong to the same match (same seed, size and
+// difficulty). Engine version and the exact save tick are deliberately NOT
+// checked, which is what keeps the whole match's history on screen even when
+// the replay itself couldn't be recovered.
+export function statsFromJournal(j, game) {
+  if (!j || !game) return null;
+  if (j.seed !== game.seed || j.size_key !== game.sizeKey) return null;
+  if (j.difficulty !== game.difficulty) return null;
+  const rows = j.stats && Array.isArray(j.stats.rows) ? j.stats.rows : null;
+  if (!rows) return null;
+  // Never claim samples the resumed game hasn't reached: pickSave can hand
+  // back a copy OLDER than the journal, and rows describing a future that was
+  // rolled back would draw a match that isn't being played. Same truncation
+  // S.sample already enforces when a replay rewinds.
+  const keep = Math.floor(Math.max(0, game.tick | 0) / SAMPLE_TICKS) + 1;
+  return { rows: rows.slice(0, keep) };
 }
 
 // Rebuild the in-flight recorder from a journal, but only when the journal
@@ -410,7 +454,24 @@ export function saveLocal(store, clientId, payload) {
   if (!clientId || !payload) return;
   const rows = readLocal(store).filter((r) => r && r.client_id !== clientId);
   rows.unshift({ client_id: String(clientId).slice(0, 64), ...payload });
-  store.write(REPLAY_KEY, rows.slice(0, LOCAL_MAX));
+  store.write(REPLAY_KEY, trimLocal(rows));
+}
+
+// Newest-first, capped by COUNT and by TOTAL SIZE (#245). The newest row is
+// always kept however big it is — dropping it would make the match that just
+// finished unrewatchable — and older ones are shed until the shelf fits its
+// byte budget.
+export function trimLocal(rows) {
+  const out = [];
+  let bytes = 0;
+  for (const r of rows.slice(0, LOCAL_MAX)) {
+    let n = 0;
+    try { n = JSON.stringify(r).length; } catch { n = Infinity; }
+    if (out.length && bytes + n > LOCAL_MAX_BYTES) break;
+    out.push(r);
+    bytes += n;
+  }
+  return out;
 }
 
 // A stale-engine local log can never be played and nothing else consumes it,

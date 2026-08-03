@@ -122,15 +122,26 @@ export function saveSummary(data, now) {
 //
 // `steps` is [{ name, run }]; a step that throws or returns false is skipped
 // without counting as a prune.
+//
+// A step is REPEATED while it keeps returning true (#245). Each step used to
+// run exactly once, so "drop the oldest finished match's replay log" freed one
+// log and then the sequence moved on to sacrificing the LIVE match's order
+// journal — with up to nine more expendable logs, far larger, still sitting on
+// the device. A repeatable step drains its own kind first; it terminates by
+// returning false when there is nothing left of it to free.
+export const PRUNE_MAX_PASSES = 16;
+
 export function persistSave(store, data, steps) {
   if (store.write(SAVE_KEY, data)) return { ok: true, pruned: [] };
   const pruned = [];
   for (const step of (Array.isArray(steps) ? steps : [])) {
-    let ran = false;
-    try { ran = step && step.run && step.run() !== false; } catch { ran = false; }
-    if (!ran) continue;
-    pruned.push(step.name);
-    if (store.write(SAVE_KEY, data)) return { ok: true, pruned };
+    for (let pass = 0; pass < PRUNE_MAX_PASSES; pass++) {
+      let ran = false;
+      try { ran = step && step.run && step.run() !== false; } catch { ran = false; }
+      if (!ran) break;
+      pruned.push(step.name);
+      if (store.write(SAVE_KEY, data)) return { ok: true, pruned };
+    }
   }
   return { ok: false, pruned };
 }
