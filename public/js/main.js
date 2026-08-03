@@ -1798,6 +1798,9 @@ function startMatch(g, opts) {
   $('end-modal').classList.add('hidden');
   $('game-ui').classList.remove('hidden');
   renderer.resize();
+  // a new match restarts blob ids, so the formation-walk and snapshot-resync
+  // caches have to go with the old one (#247, #251)
+  renderer.resetSmoothing();
   renderPanel(true);
   updateGroupsBar();
   refreshControlsVisibility(); // the menu 🕹️ retires once both sets are read

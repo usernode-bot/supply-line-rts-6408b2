@@ -175,6 +175,17 @@ export function createRenderer(canvas, minimap) {
     for (const id of [...resync.keys()]) if (!drawnAt.has(id)) resync.delete(id);
   }
 
+  // A NEW match starts blob ids over, so both smoothing caches have to be
+  // dropped or a leftover entry lands on an unrelated blob — a figure gliding
+  // in from nowhere, or a quarter-second of offset on someone else's army.
+  // Called from startMatch, deliberately NOT keyed on game identity: a PvP
+  // snapshot replaces the game object every second, and treating that as a new
+  // match would throw away the very state these caches exist to carry.
+  function resetSmoothing() {
+    resync.clear();
+    formCache.clear();
+  }
+
   function decayResync(dt) {
     if (!resync.size) return;
     for (const [id, r] of resync) {
@@ -1953,5 +1964,8 @@ export function createRenderer(canvas, minimap) {
     mctx.strokeRect(view.cx * sx - vw / 2, view.cy * sy - vh / 2, vw, vh);
   }
 
-  return { draw, resize, noteResync, get cssSize() { return { w: cssW, h: cssH }; } };
+  return {
+    draw, resize, noteResync, resetSmoothing,
+    get cssSize() { return { w: cssW, h: cssH }; },
+  };
 }
