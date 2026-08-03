@@ -17,6 +17,7 @@ import * as ST from './stats.js';
 import * as RES from './resume.js';
 import { dist, fertTier, FERT_TIERS, passable } from './mapgen.js';
 import { pickTol, blobOverlap, footprintDist, tileDist } from './pick.js';
+import { drainCatchUp, dropBacklog } from './motion.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -25,6 +26,11 @@ const apiHeaders = token ? { 'x-usernode-token': token } : {};
 const SAVE_KEY = RES.SAVE_KEY;
 const IS_DEMO = params.get('demo') === '1';
 const SHOT = params.get('shot') || ''; // screenshot-state deep link (#199)
+// `?mpdebug=1` (#247): logs, per snapshot, how long since the last one landed,
+// how many ticks the correction owed, and the biggest per-blob correction in
+// tiles. "Sometimes stuttery" needs a number; off by default, and nothing on
+// the normal path reads it.
+const MP_DEBUG = params.get('mpdebug') === '1';
 
 // A preview boot must not be able to touch a real player's match (#240).
 // `?shot=` links are opened with a live token by the platform's "Test this
@@ -1349,6 +1355,10 @@ function beginPvp(role, lobbyId, opponent, snap) {
     lastSnapTick: -1, lastEventId: 0, oppSeen: null,
     ended: false, busy: false, noSnapPolls: 0, failN: 0,
     kick: null,
+    // #247: ticks still owed to a snapshot correction, drained a couple per
+    // frame by frameBody instead of all at once
+    catchUp: 0,
+    lastSnapAt: 0,
   };
   me = role === 'host' ? 0 : 1;
   // #240: the server forfeits an absent player after 60 s, so a reload has to
@@ -1409,6 +1419,26 @@ async function mpSync() {
   } finally { if (mp) mp.busy = false; }
 }
 
+// `?mpdebug=1` instrumentation (#247) — the three numbers that describe how
+// bad a correction was. Never called on the normal path.
+function logSnapshotDebug(oldGame, newGame, prevTick) {
+  const now = performance.now();
+  const gap = mp.lastSnapAt ? Math.round(now - mp.lastSnapAt) : 0;
+  mp.lastSnapAt = now;
+  const was = new Map();
+  for (const b of oldGame.blobs) if (!b.dead) was.set(b.id, b);
+  let worst = 0;
+  for (const b of newGame.blobs) {
+    if (b.dead) continue;
+    const ob = was.get(b.id);
+    if (!ob) continue;
+    const d = Math.hypot(ob.x - b.x, ob.y - b.y);
+    if (d > worst) worst = d;
+  }
+  console.log(`[mpdebug] gap ${gap}ms · catchUp ${Math.max(0, prevTick - newGame.tick)} ticks · `
+    + `worst correction ${worst.toFixed(2)} tiles · blobs ${newGame.blobs.length}`);
+}
+
 function applySnapshot(snap) {
   const firstSnap = !game;
   if (!game) {
@@ -1419,14 +1449,20 @@ function applySnapshot(snap) {
     const prevTick = game.tick;
     const g = S.deserialize(snap, game);
     S.setViewer(g, me);
+    if (MP_DEBUG && mp) logSnapshotDebug(game, g, prevTick);
+    // #247: ease the correction instead of snapping it. The renderer notes how
+    // far the authoritative state moved each blob away from where it was
+    // actually being DRAWN, and carries that offset back to zero over ~250 ms.
+    // Called BEFORE `game` is swapped — it needs both states.
+    if (renderer) { try { renderer.noteResync(game, g); } catch { } }
     game = g;
-    // dead-reckon back toward where we were rendering (bounded catch-up):
-    // a few ticks now, the rest credited to the frame accumulator so the
-    // frame loop absorbs them instead of hitching here
-    const ahead = Math.min(25, Math.max(0, prevTick - g.tick));
-    let now = Math.min(5, ahead);
-    while (now-- > 0 && !g.result) S.step(g);
-    acc += Math.max(0, ahead - 5) * 100;
+    // dead-reckon back toward where we were rendering (bounded catch-up).
+    // #247: this used to step 5 ticks here and credit the rest to `acc` — but
+    // the frame loop burns up to 40 ticks in ONE frame, so the credited ticks
+    // were consumed immediately and the whole correction landed as a single
+    // visible jump, about once a second. It's a counter now, drained a couple
+    // of ticks per frame by frameBody, so the catch-up is spread over frames.
+    if (mp) mp.catchUp = Math.min(25, Math.max(0, prevTick - g.tick));
   }
   if (mp) {
     // retire pending commands the server had applied before this snapshot,
@@ -4601,7 +4637,11 @@ function updateHUD() {
   $('stat-units').textContent = `👥 ${p.units}`;
   $('stat-setts').textContent = `🏠 ${p.setts}`;
   $('stat-time').textContent = fmtDur(S.gameSeconds(game.tick));
-  const idle = S.idleFarmers(game, 0);
+  // #247: `me`, never a hard-coded 0 — the joining player in a PvP match was
+  // shown the HOST's idle-farmer count, so their button appeared and hid on
+  // the opponent's state and pressing it reported "no idle farmers" against a
+  // non-zero badge. The op itself (opBackToWork(game, me)) was always correct.
+  const idle = S.idleFarmers(game, me);
   const idleN = idle.field + idle.walk;
   const btw = $('btn-backtowork');
   btw.classList.toggle('hidden', idleN === 0 || !!game.result || !!game.replay);
@@ -4623,6 +4663,11 @@ function updateHUD() {
 // repeat sixty times a second — and the dev-console bridge posts every one of
 // them to the parent window. Catch it once, pause, and save what we have:
 // a frozen-but-saved match is recoverable, a crash loop is not (#240).
+// #247: how many catch-up ticks one frame may absorb. Two is invisible at the
+// PvP rate (one tick per 200 ms of wall clock) and drains even a 25-tick
+// correction inside a quarter-second, where the old code did all 25 at once.
+const CATCHUP_PER_FRAME = 2;
+
 let frameCrashed = false;
 function frame(ts) {
   requestAnimationFrame(frame);
@@ -4688,7 +4733,17 @@ function frameBody(ts) {
       if (statsSeries) ST.sample(statsSeries, game);  // #233
       acc -= 100;
     }
-    if (acc >= 100) acc = 0; // fell behind (background tab); drop the backlog
+    // fell behind (background tab): drop the backlog but KEEP THE PHASE (#247).
+    // Zeroing it snapped the render alpha to 0 and broke interpolation
+    // continuity every time the loop overran.
+    acc = dropBacklog(acc, 100);
+    // #247: drain a snapshot correction a couple of ticks per frame, so the
+    // catch-up is spread across frames rather than landing as one jump.
+    if (mp && mp.catchUp > 0 && !game.result) {
+      const d = drainCatchUp(mp.catchUp, CATCHUP_PER_FRAME);
+      mp.catchUp = d.left;
+      for (let i = 0; i < d.run && !game.result; i++) RP.advance(game);
+    }
   }
 
   input.update(dt);

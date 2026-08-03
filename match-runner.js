@@ -311,16 +311,25 @@ async function start(row) {
 
 // Get the runner for an active lobby, lazily reviving from the persisted
 // snapshot after a restart. Returns null when the lobby isn't active.
-async function ensure(row) {
+//
+// `loadSnapshot` (#247) is an optional async thunk resolving the row's
+// `snapshot` column. The sync path no longer SELECTs that column — it's 40-80
+// KB of JSONB that pg parsed on every 1 s poll of every player purely so this
+// function could ignore it while a live runner existed. Callers that can't
+// cheaply supply the thunk may still pass the column on the row.
+async function ensure(row, loadSnapshot) {
   const existing = runners.get(row.id);
   if (existing) return existing;
   if (row.status !== 'active') return null;
   const { S } = await loadMods();
   let game, nextCmdId = 0, nextEvId = 0;
-  if (row.snapshot) {
-    game = S.deserialize(row.snapshot);
-    nextCmdId = row.snapshot.appliedCmdId || 0;
-    for (const ev of row.snapshot.netEvents || []) nextEvId = Math.max(nextEvId, ev.id || 0);
+  const snapshot = row.snapshot !== undefined
+    ? row.snapshot
+    : (loadSnapshot ? await loadSnapshot() : null);
+  if (snapshot) {
+    game = S.deserialize(snapshot);
+    nextCmdId = snapshot.appliedCmdId || 0;
+    for (const ev of snapshot.netEvents || []) nextEvId = Math.max(nextEvId, ev.id || 0);
   } else {
     // legacy active row with no snapshot yet — start from tick 0
     game = S.newGame(row.seed, row.size_key, 'normal', true);
@@ -335,8 +344,8 @@ async function ensure(row) {
 
 // The polling endpoint's core: register presence, apply the caller's
 // commands, answer with status + (when the caller is behind) a snapshot.
-async function sync(row, owner, body) {
-  const r = await ensure(row);
+async function sync(row, owner, body, loadSnapshot) {
+  const r = await ensure(row, loadSnapshot);
   if (!r) {
     return {
       status: row.status,
@@ -363,8 +372,16 @@ async function sync(row, owner, body) {
   if (r.status === 'active' && r.game.result) {
     const winner = r.game.result === 'p0-win' ? 0 : 1;
     await finalize(r, winner, r.game.resultReason || 'elimination');
+    // the result has to be in the snapshot both clients read next
+    if (r.snapDirty) buildSnapshot(r);
   }
-  if (r.snapDirty) buildSnapshot(r);
+  // #247: NO snapshot rebuild in the request path. This used to rebuild on
+  // every poll that carried a command, so a full serialize (both fog planes
+  // base64'd) ran several times a second while anyone was giving orders — and
+  // every one of those snapshots became another visible correction on both
+  // clients. beat() owns the cadence now (100 ms scheduler, at least every
+  // SNAP_TICKS), which costs at most one beat of extra latency to the opponent
+  // and is well inside the 200 ms tick.
   const haveTick = parseInt(body.haveTick, 10);
   const wantSnap = isNaN(haveTick) || haveTick < r.snapTick;
   return {

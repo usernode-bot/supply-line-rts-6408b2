@@ -337,5 +337,36 @@ function check(name, cond, detail) {
   }
 }
 
+// ------------------------------------------------ #247 idleFarmers is per-owner
+{
+  console.log('idleFarmers counts ONE side (#247)');
+  // The HUD's "Back to work" badge read idleFarmers(game, 0) regardless of
+  // which seat the player held, so the joining player in a PvP match was shown
+  // the host's count. The op it fires has always been per-owner; this locks the
+  // query the badge reads to the same contract.
+  const game = S.newGame('sim247', 'xsmall', 'normal', true);
+  const mine = game.settlements.find(s => s.owner === 1 && !s.building);
+  const theirs = game.settlements.find(s => s.owner === 0 && !s.building);
+  check('both sides have a settlement', !!mine && !!theirs);
+  // owner 1 keeps farmhands sitting in the garrison; owner 0 keeps none
+  mine.garrison = { deploy: 0, supply: 0, farm: 4 };
+  theirs.garrison = { deploy: 0, supply: 0, farm: 0 };
+  for (const b of game.blobs) if (!b.dead) b.dead = true;   // no field groups either way
+
+  const one = S.idleFarmers(game, 1);
+  const zero = S.idleFarmers(game, 0);
+  check('the side WITH idle farmhands reports them', one.field === 4, JSON.stringify(one));
+  check('the side WITHOUT them reports none',
+    zero.field === 0 && zero.walk === 0, JSON.stringify(zero));
+
+  // and the op moves the same side the query counted
+  const res = S.opBackToWork(game, 1);
+  check('back-to-work fields exactly that side', res.fielded === 4, JSON.stringify(res));
+  check('the other side was not touched',
+    theirs.garrison.farm === 0 && S.idleFarmers(game, 0).field === 0);
+  check('and the badge empties once they are working',
+    S.idleFarmers(game, 1).field === 0, JSON.stringify(S.idleFarmers(game, 1)));
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall sim-rule checks passed');
 process.exit(failures ? 1 : 0);
