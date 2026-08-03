@@ -5940,6 +5940,135 @@ function shotControlsTour(desc) {
   CT.open(opts);
 }
 
+// ---------------------------------------------------------------- formation shots (#251)
+
+// A group of exactly the requested composition, parked in open ground next to
+// the player's starting town and selected — the one thing no plain URL can
+// reach, because a mixed army is the product of mid-match merges. Roles are
+// rewritten on real units drawn from the sim's own seeded stream (newGame made
+// them), so nothing here forges state the sim couldn't produce itself.
+function stageFormationGroup(seed, comp, scale) {
+  clearSaves();
+  me = 0;
+  const g = S.newGame(seed, 'small', 'normal');
+  const army = g.blobs.find(b => b.owner === 0 && b.working == null && S.total(b) > 0);
+  if (!army) return null;
+  const want = comp.deploy + comp.supply + comp.farm;
+  // grow the group to the size the shot needs by cloning its own units, each
+  // carrying a distinct seed off the sim's stream so the formation's
+  // (role, seed) ordering has something deterministic to sort by
+  while (army.units.length < want) {
+    const src = army.units[army.units.length % Math.max(1, army.units.length)];
+    army.units.push({ role: src.role, hp: src.hp, seed: S.simRand(g) });
+  }
+  army.units.length = want;
+  let i = 0;
+  for (const role of ['deploy', 'supply', 'farm']) {
+    for (let k = 0; k < comp[role]; k++) { army.units[i].role = role; army.units[i].hp = S.unitMaxHP(role); i++; }
+  }
+  army.count = { deploy: comp.deploy, supply: comp.supply, farm: comp.farm };
+  army.food = S.foodCap(army);
+  army.order = null; army.path = null; army.pathGoal = null;
+  // open ground a few tiles out from the keep, scanned in a fixed order so the
+  // same seed always stages the identical field
+  const start = g.map.starts[0];
+  let spot = null;
+  for (let r = 4; r <= 8 && !spot; r++) {
+    for (let dy = -r; dy <= r && !spot; dy++) {
+      for (let dx = -r; dx <= r && !spot; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = start.x + 1 + dx, y = start.y + 1 + dy;
+        if (!passable(g.map, x, y)) continue;
+        if (g.settAt && g.settAt[y * g.map.w + x]) continue;
+        spot = { x: x + 0.5, y: y + 0.5 };
+      }
+    }
+  }
+  if (spot) { army.x = spot.x; army.y = spot.y; army.prevX = army.x; army.prevY = army.y; }
+  army.facing = 0;   // ranks across the screen, front rank to the right
+  startMatch(g);
+  for (let i2 = 0; i2 < 3; i2++) S.step(g);   // settles fog so the group is lit
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  ui.selected = { kind: 'blob', id: army.id };
+  view.cx = army.x; view.cy = army.y; view.scale = scale;
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+  return { g, army };
+}
+
+// `?shot=formation-mixed` (#251) — a mixed army: attackers bracketing the
+// suppliers and farmhands in their own blocks of rows. The composition is the
+// whole point of the issue and is unreachable by URL otherwise.
+function shotFormationMixed() {
+  stageFormationGroup('shot251', { deploy: 9, supply: 6, farm: 4 }, 34);
+}
+
+// `?shot=formation-large` (#251) — a big pure-attack army, which is the only
+// size that actually reaches the 10-per-row ceiling, at a zoom where the rear
+// rows' dimming reads.
+function shotFormationLarge() {
+  stageFormationGroup('shot251b', { deploy: 34, supply: 0, farm: 0 }, 40);
+}
+
+// `?shot=formation-convert` (#251) — a mixed army RE-FORMING: the whole group
+// arms up, so the suppliers and farmhands walk out of their own blocks and into
+// the attackers' ranks instead of teleporting there.
+//
+// The role change is fired a beat AFTER the boot on purpose. The walk is a
+// half-second animation from wherever the figures already stood, so issuing it
+// before the first frame would leave nothing to walk from — the group would
+// simply appear in its new shape. This way the still shows the re-formed group
+// and the animated capture shows it re-forming. The op and its countdown are
+// the real ones; the sim stays paused throughout.
+function shotFormationConvert() {
+  const staged = stageFormationGroup('shot251c', { deploy: 6, supply: 8, farm: 4 }, 40);
+  if (!staged) return;
+  const { g, army } = staged;
+  setTimeout(() => {
+    if (game !== g || army.dead) return;
+    applyCommand(g, 0, { op: 'setRole', blobId: army.id, role: 'deploy' });
+    // run the arm-up countdown out: finishConvert rewrites every role, which is
+    // what moves the formation's targets and starts the walk
+    const until = (army.convert ? army.convert.done : g.tick) + 1;
+    while (g.tick < until && !g.result) S.step(g);
+    renderPanel(true);
+    updateHUD();
+  }, 1200);
+}
+
+// `?shot=backtowork-guest` (#247) — the reported bug's seat. The "Back to work"
+// badge read owner 0 whoever was looking, so the JOINING player saw the host's
+// idle-farmhand count: the button appeared on the opponent's state and pressing
+// it said "no idle farmers" over a non-zero number. That seat needs a live lobby
+// and a second human, so it was unreachable by URL and invisible to tests. Here
+// owner 1 (the joiner, whose view this is) has idle garrisoned farmhands and
+// owner 0 has none — so a correct badge shows a count, and the old bug would
+// hide the button entirely. Pure local UI state, no writes.
+function shotBackToWorkGuest() {
+  clearSaves();
+  me = 1;
+  const g = S.newGame('shot247', 'xsmall', 'normal', true);
+  S.setViewer(g, 1);
+  const mine = g.settlements.find(s => s.owner === 1 && !s.building);
+  const theirs = g.settlements.find(s => s.owner === 0 && !s.building);
+  if (!mine || !theirs) return;
+  // my farmhands come off the fields and sit in the keep; the opponent's stay
+  // out working, which is exactly the asymmetry the bug inverted
+  applyCommand(g, 1, { op: 'garrisonRole', settlementId: mine.id, role: 'farm' });
+  mine.garrison = { deploy: 0, supply: 0, farm: Math.max(4, mine.garrison.farm) };
+  theirs.garrison = { deploy: 0, supply: 0, farm: 0 };
+  startMatch(g);
+  for (let i = 0; i < 3; i++) S.step(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  view.cx = mine.x + 1; view.cy = mine.y + 1; view.scale = 26;
+  input.clampView();
+  renderPanel(true);
+  updateHUD();
+}
+
 // ---------------------------------------------------------------- offline boot (#221)
 
 // `?shot=offline-menu` renders the menu exactly as it looks with no
@@ -6149,6 +6278,18 @@ if (SHOT === 'merged-supply' || SHOT === 'merged-supply-armed' || SHOT === 'merg
 if (SHOT === 'replay-end') {
   try { shotReplayEnd().catch((e) => console.warn('shot link failed', e)); }
   catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'formation-mixed') {
+  try { shotFormationMixed(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'formation-large') {
+  try { shotFormationLarge(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'formation-convert') {
+  try { shotFormationConvert(); } catch (e) { console.warn('shot link failed', e); }
+}
+if (SHOT === 'backtowork-guest') {
+  try { shotBackToWorkGuest(); } catch (e) { console.warn('shot link failed', e); }
 }
 if (SHOT === 'replay-stale') {
   // the list, then its engine-changed dialog — so the message itself is

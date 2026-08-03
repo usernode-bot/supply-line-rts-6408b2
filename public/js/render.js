@@ -5,6 +5,8 @@
 
 import * as S from './sim.js';
 import * as SUP from './supply.js';
+import * as FORM from './formation.js';
+import * as MOT from './motion.js';
 import { fertTier, FERT_TIERS } from './mapgen.js';
 
 const T = 16;     // terrain layer px per tile (drawn smoothed — kills shimmer)
@@ -120,6 +122,67 @@ export function createRenderer(canvas, minimap) {
   // per-settlement territory border segments derived from the exclusive
   // ownership map (#188), cached until the sim rebuilds it (terrVer)
   let terrEdges = null, terrEdgesVer = -1, terrEdgesGame = null;
+
+  // Formation state (#251), render-only and never serialized:
+  //   formCache  blobId -> { seen, facing, pos: Map<unit.seed, {x,y}> } of the
+  //              last-drawn LOCAL (unrotated) figure offsets, so a role change
+  //              walks a figure to its new place instead of teleporting it
+  //   resync     blobId -> {dx,dy} visual correction offset in world tiles,
+  //              eased to zero after a PvP snapshot lands (#247)
+  const formCache = new Map();
+  const resync = new Map();
+  let lastAlpha = 1;   // the interpolation phase the last frame actually drew
+  // canvas animation isn't covered by the stylesheet's prefers-reduced-motion
+  // block, so ask directly and snap instead of easing
+  const reduceMotion = !!(window.matchMedia
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+  // A PvP snapshot has replaced the game (#247). Corrections used to be applied
+  // in a single frame, which read as a jerk about once a second — and more often
+  // the more orders were being given. Remember, per blob, how far the
+  // authoritative state moved it away from where it was actually BEING DRAWN,
+  // and let bx/by carry that offset back to zero over ~250 ms so the correction
+  // glides instead. A genuinely large jump still snaps: past RESYNC_MAX the blob
+  // really did move, and sliding it across the map would be a lie.
+  // The physics live in motion.js so they're testable (test/motion.mjs).
+  const RESYNC_MAX = 3;          // tiles
+  const RESYNC_DEAD = 0.02;      // tiles — a quarter-pixel at the default zoom
+  const RESYNC_TAU = 90;         // ms time constant (~250 ms to settle)
+  function noteResync(oldGame, newGame) {
+    if (!oldGame || !newGame || reduceMotion) return;
+    const drawnAt = new Map();
+    for (const b of oldGame.blobs) {
+      if (b.dead) continue;
+      drawnAt.set(b.id, {
+        x: lerp(b.prevX != null ? b.prevX : b.x, b.x, lastAlpha),
+        y: lerp(b.prevY != null ? b.prevY : b.y, b.y, lastAlpha),
+      });
+    }
+    for (const b of newGame.blobs) {
+      if (b.dead) continue;
+      const was = drawnAt.get(b.id);
+      if (!was) continue;
+      // the incoming blob draws from its own anchors, so measure against where
+      // the new state STARTS its interpolation, not against its target
+      const now = {
+        x: b.prevX != null ? b.prevX : b.x,
+        y: b.prevY != null ? b.prevY : b.y,
+      };
+      const off = MOT.resyncOffset(was, now, RESYNC_MAX, RESYNC_DEAD);
+      if (off) resync.set(b.id, off); else resync.delete(b.id);
+    }
+    // blobs that vanished in the snapshot keep no correction
+    for (const id of [...resync.keys()]) if (!drawnAt.has(id)) resync.delete(id);
+  }
+
+  function decayResync(dt) {
+    if (!resync.size) return;
+    for (const [id, r] of resync) {
+      r.dx = MOT.easeToward(r.dx, 0, dt, RESYNC_TAU);
+      r.dy = MOT.easeToward(r.dy, 0, dt, RESYNC_TAU);
+      if (Math.abs(r.dx) <= RESYNC_DEAD && Math.abs(r.dy) <= RESYNC_DEAD) resync.delete(id);
+    }
+  }
 
   // Border segments of each settlement's OWNED tiles, in world tile
   // coordinates: `outer` faces unowned or enemy-owned ground (the
@@ -366,7 +429,10 @@ export function createRenderer(canvas, minimap) {
     const now = performance.now();
     const dt = Math.min(100, now - lastFrameT || 16);
     lastFrameT = now;
+    lastAlpha = alpha;      // noteResync needs the phase this frame drew at
     updateFog(game, dt);
+    decayResync(dt);        // PvP snapshot corrections glide back to zero (#247)
+    sweepFormCache(now);
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#05060a';
@@ -379,9 +445,16 @@ export function createRenderer(canvas, minimap) {
     const oy = Math.round((cssH / 2 - view.cy * s) * dpr) / dpr;
     const wx = x => x * s + ox;
     const wy = y => y * s + oy;
-    // interpolated blob position for smooth motion between sim ticks
-    const bx = b => lerp(b.prevX != null ? b.prevX : b.x, b.x, alpha);
-    const by = b => lerp(b.prevY != null ? b.prevY : b.y, b.y, alpha);
+    // interpolated blob position for smooth motion between sim ticks, plus any
+    // still-decaying PvP resync offset (#247) so a correction glides in
+    const bx = b => {
+      const r = resync.get(b.id);
+      return lerp(b.prevX != null ? b.prevX : b.x, b.x, alpha) + (r ? r.dx : 0);
+    };
+    const by = b => {
+      const r = resync.get(b.id);
+      return lerp(b.prevY != null ? b.prevY : b.y, b.y, alpha) + (r ? r.dy : 0);
+    };
 
     // terrain (high-res layer drawn smoothed — no nearest-neighbour shimmer)
     ctx.imageSmoothingEnabled = true;
@@ -649,7 +722,7 @@ export function createRenderer(canvas, minimap) {
       ctx.fill();
       ctx.globalAlpha = 1;
       // individual unit figures inside the ring (number-only at far zoom)
-      if (r >= 12) drawBlobUnits(game, b, px, py, r);
+      if (r >= 12) drawBlobUnits(game, b, px, py, r, dt);
       // solid team band under the fed ring: band color = allegiance,
       // dash color on top = fed state (#122). The band doubles as the
       // group's total-health meter (#139): a dim full circle with a
@@ -1201,32 +1274,166 @@ export function createRenderer(canvas, minimap) {
     drawMinimap(game, view);
   }
 
-  // Individual unit figures inside a blob's dashed ring: a deterministic
-  // golden-angle spiral (index-ordered, jittered per unit from its seed —
-  // no Math.random(), so host/guest frames match). Heads are role-tinted;
-  // bodies use the owner's dark tone. Capped for very large armies — the
-  // count badge stays authoritative.
-  const GOLDEN_ANGLE = 2.399963229728653;
-  function drawBlobUnits(game, b, px, py, rPx) {
-    const n = Math.min(b.units.length, 40);
-    if (!n) return;
-    const ur = Math.max(1.5, Math.min(4, rPx / (2.2 * Math.sqrt(n))));
+  // Individual unit figures inside a blob's dashed ring, drawn in FORMATION
+  // (#251): balanced rows of at most ten, front rows full, roles in their own
+  // blocks with the attackers bracketing anything they're escorting, rear ranks
+  // dimmed for depth. The slot a figure takes comes from formation.js keyed on
+  // (role block, unit seed) — never the array index, because deserialize()
+  // re-sorts b.units by seed and an index-keyed formation would reshuffle on
+  // every PvP snapshot. Jitter is derived from the seed, so no Math.random()
+  // and host/guest frames match. Capped for very large armies — the count
+  // badge stays authoritative.
+  const FIG_CAP = 40;
+  const FORM_TAU = 140;        // ms: a re-forming figure settles in ~0.5 s
+  const SILHOUETTE_MIN = 3;    // px figure radius below which detail is noise
+
+  // Drop the walk-animation memory of blobs we haven't drawn for a while, so
+  // a long match can't grow the cache without bound.
+  function sweepFormCache(now) {
+    if (formCache.size < 64) return;
+    for (const [id, e] of formCache) if (now - e.seen > 5000) formCache.delete(id);
+  }
+
+  function roleHead(role) {
+    return role === 'deploy' ? '#f4f4f5' : role === 'supply' ? '#7dd3fc' : '#86efac';
+  }
+
+  // One figure at (ux, uy) with `ur` body radius. The kit is drawn in SCREEN
+  // space — swords go up, packs sit low — with `hand` (+1/-1, from the unit's
+  // own seed) choosing which side it's carried on. Deliberately NOT rotated by
+  // the group's facing: these figures are 3-8 px tall, and a rotated sword
+  // collapses onto the body the moment the group faces along an axis. Which way
+  // the group faces is already told by the formation's shape and by the
+  // attack-direction line. Kit only draws once there are pixels for it to read
+  // as a sword / pack / hoe rather than a smudge.
+  function drawFigure(role, ux, uy, ur, body, hand, detail) {
+    if (detail && role === 'supply') {
+      // pack behind the shoulders — drawn UNDER the body so it reads as carried
+      ctx.beginPath();
+      ctx.arc(ux - hand * ur * 0.75, uy + ur * 0.55, ur * 0.66, 0, Math.PI * 2);
+      ctx.fillStyle = '#0369a1';
+      ctx.fill();
+    }
+    // body
+    ctx.beginPath();
+    ctx.arc(ux, uy + ur * 0.3, ur, 0, Math.PI * 2);
+    ctx.fillStyle = body;
+    ctx.fill();
+    if (detail) {
+      ctx.lineCap = 'round';
+      if (role === 'deploy') {
+        // sword raised on one side, round shield on the other
+        ctx.strokeStyle = '#e4e4e7';
+        ctx.lineWidth = Math.max(1, ur * 0.3);
+        ctx.beginPath();
+        ctx.moveTo(ux + hand * ur * 1.05, uy + ur * 0.6);
+        ctx.lineTo(ux + hand * ur * 1.25, uy - ur * 1.5);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(ux - hand * ur * 0.95, uy + ur * 0.45, ur * 0.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#9ca3af';
+        ctx.fill();
+      } else if (role === 'farm') {
+        // hoe: a shaft over one shoulder with a short blade across its head
+        const hx = ux + hand * ur * 1.05;
+        ctx.strokeStyle = '#a8a29e';
+        ctx.lineWidth = Math.max(1, ur * 0.26);
+        ctx.beginPath();
+        ctx.moveTo(hx, uy + ur * 0.7);
+        ctx.lineTo(hx + hand * ur * 0.25, uy - ur * 1.55);
+        ctx.stroke();
+        ctx.strokeStyle = '#e7e5e4';
+        ctx.lineWidth = Math.max(1, ur * 0.24);
+        ctx.beginPath();
+        ctx.moveTo(hx + hand * ur * 0.2, uy - ur * 1.45);
+        ctx.lineTo(hx + hand * ur * 0.95, uy - ur * 1.15);
+        ctx.stroke();
+      }
+    }
+    // head last so kit never covers the role tint
+    ctx.beginPath();
+    ctx.arc(ux, uy - ur * 0.75, ur * 0.55, 0, Math.PI * 2);
+    ctx.fillStyle = roleHead(role);
+    ctx.fill();
+  }
+
+  function drawBlobUnits(game, b, px, py, rPx, dt) {
+    const shown = Math.min(b.units.length, FIG_CAP);
+    if (!shown) return;
+    const units = b.units.length > FIG_CAP
+      ? FORM.orderUnits(b.units).slice(0, FIG_CAP)
+      : b.units;
+    // rows narrow on a small disc: ten abreast inside 60 px is two pixels each
+    const cols = FORM.fitCols(rPx, 4.5);
+    // the slot assignment only changes when the group's membership, its roles or
+    // the row width do, so memo it per blob rather than re-sorting every frame
+    let sig = `${cols}|${units.length}|${b.count.deploy},${b.count.supply},${b.count.farm}|`;
+    let sum = 0;
+    for (const u of units) sum += u.seed;
+    sig += sum.toFixed(6);
+    let memo = formCache.get(b.id);
+    const pairs = (memo && memo.sig === sig && memo.pairs)
+      ? memo.pairs : FORM.assign(units, cols);
+    if (!pairs.length) return;
+    let span = 0, wide = 1;
+    for (const p of pairs) {
+      const d = Math.abs(p.slot.y) * 2;
+      if (d > span) span = d;
+      if (p.slot.rowWidth > wide) wide = p.slot.rowWidth;
+    }
+    const { pitchX, pitchY, figR } = FORM.fitPitch(rPx, wide, span);
+    const detail = figR >= SILHOUETTE_MIN;
     const body = ownerBody(game, b.owner);
-    for (let i = 0; i < n; i++) {
-      const u = b.units[i];
-      const h = Math.floor(u.seed * 4096);
-      const fr = n === 1 ? 0 : Math.sqrt((i + 0.5) / n) * rPx * 0.72;
-      const ang = i * GOLDEN_ANGLE + ((h & 63) / 63 - 0.5) * 0.4;
-      const ux = px + Math.cos(ang) * fr + (((h >> 6) & 3) - 1.5) * ur * 0.2;
-      const uy = py + Math.sin(ang) * fr + (((h >> 8) & 3) - 1.5) * ur * 0.2;
-      ctx.beginPath();
-      ctx.arc(ux, uy + ur * 0.3, ur, 0, Math.PI * 2);
-      ctx.fillStyle = body;
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(ux, uy - ur * 0.75, ur * 0.55, 0, Math.PI * 2);
-      ctx.fillStyle = u.role === 'deploy' ? '#f4f4f5' : u.role === 'supply' ? '#7dd3fc' : '#86efac';
-      ctx.fill();
+
+    // the ranks face the way the group does, eased so a repathing army's
+    // formation doesn't snap around mid-march
+    const want = b.facing || 0;
+    let entry = memo;
+    if (!entry) { entry = { seen: 0, facing: want, pos: new Map() }; formCache.set(b.id, entry); }
+    entry.seen = lastFrameT;
+    entry.sig = sig;
+    entry.pairs = pairs;
+    entry.facing = reduceMotion ? want : MOT.easeAngle(entry.facing, want, dt, 120);
+    // rows run across the facing: +y (rearward in slot space) points BACK
+    const fx = Math.cos(entry.facing), fy = Math.sin(entry.facing);
+
+    const live = new Set();
+    let maxDepth = 0;
+    for (const p of pairs) if (p.slot.depth > maxDepth) maxDepth = p.slot.depth;
+
+    for (const p of pairs) {
+      const u = p.unit;
+      live.add(u.seed);
+      const h = Math.floor(Math.abs(u.seed) * 4096);
+      // deterministic per-unit jitter, so ranks read as people not pixels
+      const jx = (((h >> 6) & 7) / 7 - 0.5) * 0.22;
+      const jy = (((h >> 9) & 7) / 7 - 0.5) * 0.22;
+      const tx = (p.slot.x + jx) * pitchX;
+      const ty = (p.slot.y + jy) * pitchY;
+      // walk from the old local offset to the new one (#251): a role change,
+      // a merge or a split moves a figure through the formation instead of
+      // teleporting it
+      let cur = entry.pos.get(u.seed);
+      if (!cur) { cur = { x: reduceMotion ? tx : 0, y: reduceMotion ? ty : 0 }; entry.pos.set(u.seed, cur); }
+      if (reduceMotion) { cur.x = tx; cur.y = ty; }
+      else {
+        cur.x = MOT.easeToward(cur.x, tx, dt, FORM_TAU);
+        cur.y = MOT.easeToward(cur.y, ty, dt, FORM_TAU);
+        if (Math.abs(tx - cur.x) < 0.4) cur.x = tx;   // sub-pixel: snap
+        if (Math.abs(ty - cur.y) < 0.4) cur.y = ty;
+      }
+      // rotate the local offset into screen space
+      const ux = px + cur.x * -fy + cur.y * -fx;
+      const uy = py + cur.x * fx + cur.y * -fy;
+      // rear ranks a touch dimmer, so a big army reads as ranks not a smear
+      ctx.globalAlpha = maxDepth > 0 ? Math.max(0.62, 1 - 0.09 * p.slot.depth) : 1;
+      drawFigure(u.role, ux, uy, figR, body, (h & 1) ? 1 : -1, detail);
+    }
+    ctx.globalAlpha = 1;
+    ctx.lineCap = 'butt';
+    // forget figures that are no longer in this group
+    if (entry.pos.size > live.size) {
+      for (const seed of [...entry.pos.keys()]) if (!live.has(seed)) entry.pos.delete(seed);
     }
   }
 
@@ -1746,5 +1953,5 @@ export function createRenderer(canvas, minimap) {
     mctx.strokeRect(view.cx * sx - vw / 2, view.cy * sy - vh / 2, vw, vh);
   }
 
-  return { draw, resize, get cssSize() { return { w: cssW, h: cssH }; } };
+  return { draw, resize, noteResync, get cssSize() { return { w: cssW, h: cssH }; } };
 }
