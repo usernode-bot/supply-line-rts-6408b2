@@ -7,6 +7,8 @@
 //         builds: same plot count, same opening income.
 //  #239 — a MIXED supply/army blob runs a route as ONE escorted group:
 //         supply units haul, fighters guard and eat off the load.
+//  #253 — a founding party whose plot is claimed mid-march still founds:
+//         beside the plan when there's room, a clear cancel when not.
 
 import * as S from '../public/js/sim.js';
 import * as SUP from '../public/js/supply.js';
@@ -366,6 +368,96 @@ function check(name, cond, detail) {
     theirs.garrison.farm === 0 && S.idleFarmers(game, 0).field === 0);
   check('and the badge empties once they are working',
     S.idleFarmers(game, 1).field === 0, JSON.stringify(S.idleFarmers(game, 1)));
+}
+
+// ------------------------------------------- #253 founding a claimed plot
+// A party that reaches its site used to retry only the planned 2×2 and
+// the three placements sharing its corner tile — so a single tile claimed
+// during the march (a neighbour's scaffold, its farm ring on completion,
+// a wall) dropped the order and left the party standing on the spot.
+{
+  console.log('founding party whose plot was claimed mid-march (#253)');
+  // an open meadow: every anchor within 3 of (ax, ay) fits, and the army
+  // starts a real march away from it
+  function setup() {
+    const game = S.newGame('t253', 'small', 'normal');
+    const army = game.blobs.find(b => !b.dead && b.owner === 0 && b.working == null && S.total(b) >= 10);
+    let site = null;
+    for (let ay = 3; ay < game.map.h - 5 && !site; ay++) {
+      for (let ax = 3; ax < game.map.w - 5 && !site; ax++) {
+        const d = Math.hypot(ax + 1 - army.x, ay + 1 - army.y);
+        if (d < 6 || d > 9) continue;
+        let open = true;
+        for (let dy = -3; dy <= 3 && open; dy++) {
+          for (let dx = -3; dx <= 3 && open; dx++) open = S.footprintFits(game, ax + dx, ay + dy);
+        }
+        if (open) site = { x: ax, y: ay };
+      }
+    }
+    return { game, army, site };
+  }
+
+  {
+    const { game, army, site } = setup();
+    check('found an open meadow a march away', !!site);
+    const blocker = S.opSplit(game, army, 5).blob;
+    const r = S.opBuildAt(game, army, site.x + 0.5, site.y + 0.5);
+    check('founding order accepted on the planned plot',
+      r.ok && r.site.x === site.x && r.site.y === site.y, JSON.stringify(r));
+    // another party founds right on the plan's corner tile mid-march
+    blocker.x = site.x - 0.5; blocker.y = site.y - 0.5;
+    const rb = S.opBuild(game, blocker);
+    check('the neighbour scaffold covers the planned corner tile',
+      rb.ok && rb.settlement.x === site.x - 1 && rb.settlement.y === site.y - 1, JSON.stringify(rb.err));
+    check('…which every old re-snap candidate shares',
+      !!S.buildAnchorAt(game, site.x, site.y).err);
+
+    const known = new Set(game.settlements.map(s => s.id));
+    let predicted = null, built = null;
+    const msgs = [];
+    for (let t = 0; t < 400 && !built; t++) {
+      if (army.order && army.order.build) predicted = S.foundingAnchor(game, army.order.build);
+      S.step(game);
+      for (const e of game.events) if (e.owner === 0) msgs.push(e.msg);
+      game.events.length = 0;
+      built = game.settlements.find(s => s.owner === 0 && !known.has(s.id)) || null;
+      if (!army.order && !built) break;
+    }
+    check('construction started anyway', !!built && built.building, msgs.join(' | '));
+    if (built) {
+      check('…on a clear 2×2 beside the plan',
+        Math.abs(built.x - site.x) <= 2 && Math.abs(built.y - site.y) <= 2
+        && !(built.x === site.x && built.y === site.y), `${built.x},${built.y}`);
+      check('…exactly where the marching outline said it would go',
+        !!predicted && predicted.moved && predicted.x === built.x && predicted.y === built.y,
+        JSON.stringify(predicted));
+    }
+    check('the player is told the site moved',
+      msgs.some(m => /Site was taken/.test(m)), msgs.join(' | '));
+  }
+
+  {
+    const { game, army, site } = setup();
+    const r = S.opBuildAt(game, army, site.x + 0.5, site.y + 0.5);
+    check('second founding order accepted', !!r.ok);
+    // claim every plot within reach of the plan (farmland, as a neighbour's
+    // completed ring would) — there is nowhere left to found
+    const home = game.settlements.find(s => s.owner === 0);
+    for (let ty = site.y - 2; ty <= site.y + 3; ty++) {
+      for (let tx = site.x - 2; tx <= site.x + 3; tx++) game.tilledBy[ty * game.map.w + tx] = home.id;
+    }
+    check('nothing near the plan fits any more', S.foundingAnchor(game, army.order.build) === null);
+    const n0 = game.settlements.length;
+    const msgs = [];
+    for (let t = 0; t < 400 && army.order; t++) {
+      S.step(game);
+      for (const e of game.events) if (e.owner === 0) msgs.push(e.msg);
+      game.events.length = 0;
+    }
+    check('no site is conjured on claimed ground', game.settlements.length === n0);
+    check('the order ends instead of hanging', !army.order);
+    check('…and says why', msgs.some(m => /Can't build there anymore/.test(m)), msgs.join(' | '));
+  }
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall sim-rule checks passed');

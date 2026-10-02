@@ -1109,7 +1109,12 @@ export function createRenderer(canvas, minimap) {
     for (const b of game.blobs) {
       if (b.dead || b.owner !== viewer(game)) continue;
       if (!b.order || b.order.type !== 'move' || !b.order.build) continue;
-      dashedPlot(b.order.build.x, b.order.build.y, 'rgba(255,255,255,0.75)');
+      // follow the plot the party will actually found on arrival (#253):
+      // shifted beside the plan when its ground was claimed mid-march,
+      // red on the plan when nothing near it is clear any more
+      const at = S.foundingAnchor(game, b.order.build);
+      if (at) dashedPlot(at.x, at.y, 'rgba(255,255,255,0.75)');
+      else dashedPlot(b.order.build.x, b.order.build.y, 'rgba(248,113,113,0.95)', 'rgba(248,113,113,0.14)');
     }
     // queued wall tiles (#187): every own builder's remaining line draws
     // as dashed ghost markers — like the founding-site outlines above —

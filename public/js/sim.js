@@ -20,7 +20,9 @@ import * as SUP from './supply.js';
 // v4: a mixed supply/army blob runs a route AS ONE GROUP — its supply units
 //     haul, its fighters escort and eat off the load, and cargo capacity
 //     comes from the supply units alone (#239).
-export const SIM_VERSION = 4;
+// v5: a founding party whose planned plot was claimed during the march
+//     builds on the nearest clear 2×2 beside it instead of giving up (#253).
+export const SIM_VERSION = 5;
 
 // Save-payload version (#240). SEPARATE from SIM_VERSION: this one describes
 // the SHAPE of what serialize() writes, not how the sim behaves, so a save
@@ -1776,6 +1778,37 @@ export function buildAnchorAt(game, tx, ty) {
   return { err: 'No room for a settlement here — needs a clear 2×2 area' };
 }
 
+// Where a founding party that has reached its site actually builds
+// (#253). The site was clear when it was ordered, but a march takes time
+// and the ground can change under it: a neighbouring construction site
+// finishing tills its farm ring over the plot, another party founds next
+// door, a wall goes up. Arrival used to retry only buildAnchorAt — the
+// planned 2×2 and the three placements sharing its corner tile, which
+// all contain that same tile — so one claimed tile dropped the order and
+// left the party standing on the spot with no site. Now the planned
+// anchor still wins when it fits; otherwise the nearest clear 2×2 within
+// FOUND_RESNAP tiles of it does (by centre distance, then row, then
+// column, so every client resolves it identically). null only when
+// nothing near the site fits. Also drives the marching outline, so what
+// the player sees while the party walks is where the site will go.
+const FOUND_RESNAP = 2;
+export function foundingAnchor(game, build) {
+  if (!build) return null;
+  if (footprintFits(game, build.x, build.y)) return { x: build.x, y: build.y, moved: false };
+  let best = null, bestD = Infinity;
+  for (let dy = -FOUND_RESNAP; dy <= FOUND_RESNAP; dy++) {
+    for (let dx = -FOUND_RESNAP; dx <= FOUND_RESNAP; dx++) {
+      if (!dx && !dy) continue;
+      const d = dx * dx + dy * dy;
+      if (d >= bestD) continue; // row-major scan: ties keep the first found
+      if (!footprintFits(game, build.x + dx, build.y + dy)) continue;
+      best = { x: build.x + dx, y: build.y + dy, moved: true };
+      bestD = d;
+    }
+  }
+  return best;
+}
+
 export function canBuildAt(game, b) {
   return buildAnchorAt(game, Math.floor(b.x), Math.floor(b.y));
 }
@@ -2422,12 +2455,18 @@ function tickOrder(game, b) {
         return;
       }
       b.order = null;
-      const spot = buildAnchorAt(game, build.x, build.y);
-      if (spot.err) {
-        game.events.push({ owner: b.owner, msg: '🔨 Can\'t build there anymore — order cancelled', x: b.x, y: b.y });
+      // the ground may have changed during the march (#253): build on the
+      // planned plot, or the nearest clear one beside it
+      const spot = foundingAnchor(game, build);
+      if (!spot) {
+        game.events.push({ owner: b.owner, msg: '🔨 Can\'t build there anymore — no clear 2×2 nearby, order cancelled', x: b.x, y: b.y });
       } else {
         startConstruction(game, b, spot.x, spot.y);
-        game.events.push({ owner: b.owner, msg: '🔨 Construction started', x: spot.x + 1, y: spot.y + 1 });
+        game.events.push({
+          owner: b.owner,
+          msg: spot.moved ? '🔨 Site was taken — construction started beside it' : '🔨 Construction started',
+          x: spot.x + 1, y: spot.y + 1,
+        });
       }
       return;
     }
