@@ -543,18 +543,27 @@ export function createRenderer(canvas, minimap) {
       ctx.stroke();
     }
     const edges = ensureTerrEdges(game);
+    // soft round joins so the wide underlay doesn't spike at corners
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
     for (const st of game.settlements) {
       if (st.building) continue; // construction sites feed nobody — no ring yet (#95)
       if (st.owner !== viewer(game) && !settSeen(game, st)) continue;
       const e = edges.get(st.id);
       if (!e) continue;
       ctx.strokeStyle = ownerColor(game, st.owner);
-      ctx.globalAlpha = 0.55;
-      ctx.lineWidth = 2;
+      // two passes — a soft wide underlay behind a crisp core — so the
+      // boundary reads as a band with a faint glow, not a thin hard line
+      ctx.globalAlpha = 0.18;
+      ctx.lineWidth = 6;
+      strokeSegs(e.outer);
+      ctx.globalAlpha = 0.75;
+      ctx.lineWidth = 2.5;
       strokeSegs(e.outer);
       if (e.seam.length) {
+        // same-owner seams stay a distinct, thinner province line
         ctx.globalAlpha = 0.35;
-        ctx.lineWidth = 1;
+        ctx.lineWidth = 1.5;
         strokeSegs(e.seam);
       }
     }
@@ -568,14 +577,21 @@ export function createRenderer(canvas, minimap) {
       }
       ctx.stroke();
     }
-    ctx.lineWidth = 2;
     for (const k of Object.values(knownOf(game))) {
       if (settSeen(game, k)) continue;
       ctx.strokeStyle = OWNER_COLOR[1];
-      ctx.globalAlpha = 0.25;
+      // same two-pass read as live borders, just fainter — the ghost is
+      // a memory, not a claim
+      ctx.globalAlpha = 0.10;
+      ctx.lineWidth = 6;
+      strokeTerritory(k.x, k.y);
+      ctx.globalAlpha = 0.30;
+      ctx.lineWidth = 2;
       strokeTerritory(k.x, k.y);
     }
     ctx.globalAlpha = 1;
+    ctx.lineJoin = 'miter';
+    ctx.lineCap = 'butt';
 
     // selected blob paths (own blobs only — never reveal enemy plans)
     if (selSet) {
@@ -1513,6 +1529,22 @@ export function createRenderer(canvas, minimap) {
     ctx.globalAlpha = 1;
   }
 
+  // simulated-glass backing card for name plates and garrison chips —
+  // canvas can't blur what's behind, so the glass look is two stacked
+  // translucent dark fills under a thin light stroke, matching the dark
+  // zinc panels the DOM UI uses (selection panel, order popup)
+  function glassCard(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.roundRect(x + 0.5, y + 0.5, w, h, r);
+    ctx.fillStyle = 'rgba(24,24,27,0.55)';
+    ctx.fill();
+    ctx.fillStyle = 'rgba(9,9,11,0.55)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(228,228,231,0.25)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
   function drawSettlement(game, st, wx, wy, s, ghost, sel, workingN) {
     // fills the 2×2 footprint exactly: a plain square keep — no roof
     // triangle (#67) — with unit counts inside in a loose triangle (#40)
@@ -1577,8 +1609,8 @@ export function createRenderer(canvas, minimap) {
       }
       for (const [label, lx, ly] of chips) {
         const tw = ctx.measureText(label).width;
-        ctx.fillStyle = 'rgba(0,0,0,0.45)';
-        ctx.fillRect(lx - tw / 2 - 2, ly - fs * 0.7, tw + 4, fs * 1.4);
+        const cw = tw + 12, ch = fs * 1.4 + 4;
+        glassCard(lx - cw / 2, ly - ch / 2, cw, ch, ch / 2);
         ctx.fillStyle = '#e4e4e7';
         ctx.fillText(label, lx, ly);
       }
@@ -1610,8 +1642,8 @@ export function createRenderer(canvas, minimap) {
       ctx.textBaseline = 'middle';
       const ny = y0 - nfs * 0.9;
       const ntw = ctx.measureText(st.name).width;
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fillRect(cx - ntw / 2 - 3, ny - nfs * 0.7, ntw + 6, nfs * 1.4);
+      const nw = ntw + 18, nh = nfs * 1.4 + 6;
+      glassCard(cx - nw / 2, ny - nh / 2, nw, nh, Math.min(5, nh / 2));
       ctx.fillStyle = ghost ? '#a1a1aa' : '#e4e4e7';
       ctx.fillText(st.name, cx, ny);
     }
