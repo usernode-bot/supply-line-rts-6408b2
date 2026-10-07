@@ -1774,8 +1774,10 @@ function startMatch(g, opts) {
   input.setMapSize(g.map.w, g.map.h);
   const start = g.map.starts[me] || g.map.starts[0];
   view.cx = start.x + 2; view.cy = start.y;
-  const cssW = window.innerWidth;
-  view.scale = Math.max(10, Math.min(20, cssW / (cssW < 640 ? 22 : 30)));
+  const cssW = window.innerWidth, cssH = window.innerHeight;
+  // settled start area: the TERRITORY(5) disc around the 2x2 settlement
+  // footprint is about 12 tiles across; size it to ~65% of the shorter side
+  view.scale = Math.max(10, Math.min(60, Math.round(0.65 * Math.min(cssW, cssH) / 12)));
   // A resume that dumps you back at your home settlement isn't a resume (#240):
   // the saved camera comes back with the match. Non-sim data, so it rides in
   // the payload beside savedAt and needs no version bump.

@@ -239,12 +239,12 @@ const TOUCH_STEPS = [
 const DESK_STEPS = [
   {
     title: 'Mouse',
-    text: 'Left-click selects and inspects; right-click is the order button — right-click ground to move, an enemy to attack, your own wall or town to march in and garrison. Left-drag box-selects, and shift-drag adds to the selection.',
+    text: 'Left-click selects and inspects; right-click is the order button — right-click ground to move, an enemy to attack, your own wall or town to march in and garrison. Left-drag pans the map, and shift-drag box-selects, adding to the selection.',
     figure: FIG_MOUSE,
   },
   {
     title: 'Camera',
-    text: 'Pan with WASD or the arrow keys, by dragging with the middle mouse button, or by pushing the pointer against a screen edge. The wheel zooms; on a trackpad, two-finger scroll pans and pinch zooms. Clicking or dragging the minimap jumps the view.',
+    text: 'Pan with WASD or the arrow keys, by dragging with the left or middle mouse button, or by pushing the pointer against a screen edge. The wheel zooms; on a trackpad, two-finger scroll pans and pinch zooms. Clicking or dragging the minimap jumps the view.',
     figure: FIG_KEYS,
   },
   {

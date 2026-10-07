@@ -1,9 +1,9 @@
 // Pointer-first input: one Pointer Events code path for mouse, touch and
-// pen. Single-pointer drag pans (touch) or box-selects (mouse); pinch
-// zooms; a tap within the slop threshold selects / resolves an armed
-// order. Desktop extras (right-click orders, WASD/edge pan, wheel zoom,
-// trackpad scroll-pan / pinch-zoom, Esc) are shortcuts layered on top —
-// never the only path.
+// pen. Single-pointer drag pans; shift-drag (mouse) or the phone UI's Drag
+// mode (one finger, touch) box-selects; pinch zooms; a tap within the slop
+// threshold selects / resolves an armed order. Desktop extras (right-click
+// orders, WASD/edge pan, wheel zoom, trackpad scroll-pan / pinch-zoom, Esc)
+// are shortcuts layered on top — never the only path.
 
 const SLOP = 8; // CSS px before a press becomes a drag
 
@@ -107,7 +107,11 @@ export function createInput({ canvas, minimap, view, handlers }) {
         // draws a selection box (always additive — each box unions into
         // the drag group); two-finger pan/pinch is untouched
         const touchBox = start.type !== 'mouse' && handlers.touchBox && handlers.touchBox();
-        mode = ((start.type === 'mouse' && start.button === 0) || touchBox) ? 'box' : 'pan';
+        // left-drag pans; Shift is the desktop box-select modifier. The
+        // phone's Drag mode keeps its one-finger box via touchBox (mouse
+        // never reaches it)
+        const mouseBox = start.type === 'mouse' && start.button === 0 && e.shiftKey;
+        mode = (mouseBox || touchBox) ? 'box' : 'pan';
         if (mode === 'box') boxAdditive = touchBox || e.shiftKey; // shift = add to selection (#136)
         if (handlers.gesture) handlers.gesture();
       }

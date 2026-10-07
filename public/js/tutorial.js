@@ -83,7 +83,7 @@ const STEPS = [
     // the first poll, since the player may pan during the welcome card.
     text: (m) => m
       ? 'Look around: drag with one finger to pan and pinch to zoom — or tap the minimap to jump. Pan the camera a little to continue.'
-      : 'Look around: pan the map with WASD or the arrow keys — dragging with the middle mouse button or clicking the minimap works too, and the mouse wheel zooms. Pan the camera a little to continue.',
+      : 'Look around: pan the map with WASD or the arrow keys — dragging with the left or middle mouse button or clicking the minimap works too, and the mouse wheel zooms. Pan the camera a little to continue.',
     done: () => {
       const v = deps && deps.view;
       if (!v) return true; // no camera handle — never block the tour
