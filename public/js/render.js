@@ -208,7 +208,9 @@ export function createRenderer(canvas, minimap) {
     terrEdges = new Map();
     const bag = (sid) => {
       let e = terrEdges.get(sid);
-      if (!e) { e = { outer: [], seam: [] }; terrEdges.set(sid, e); }
+      // `tiles` collects the owned footprint as one Path2D (world tile
+      // coords) so the region tint costs a single ctx.fill per frame (#263)
+      if (!e) { e = { outer: [], seam: [], tiles: new Path2D() }; terrEdges.set(sid, e); }
       return e;
     };
     const terr = game.terr;
@@ -218,6 +220,7 @@ export function createRenderer(canvas, minimap) {
         if (!sid) continue;
         const s = byId.get(sid);
         if (!s) continue;
+        bag(sid).tiles.rect(tx, ty, 1, 1);
         // [neighbor tx, neighbor ty, edge x1, y1, x2, y2]
         const sides = [
           [tx, ty - 1, tx, ty, tx + 1, ty],
@@ -533,7 +536,9 @@ export function createRenderer(canvas, minimap) {
     // outline of the tiles it OWNS, so close settlements split the land
     // at the midline instead of drawing overlapping rings. Seams between
     // two same-player settlements draw thinner, reading as a province
-    // line rather than a frontier.
+    // line rather than a frontier. (#263) Each region also wears a faint
+    // owner tint and a soft glow under the line, so the areas read at a
+    // glance instead of a thin rigid outline.
     function strokeSegs(segs) {
       ctx.beginPath();
       for (const [x1, y1, x2, y2] of segs) {
@@ -548,12 +553,27 @@ export function createRenderer(canvas, minimap) {
       if (st.owner !== viewer(game) && !settSeen(game, st)) continue;
       const e = edges.get(st.id);
       if (!e) continue;
-      ctx.strokeStyle = ownerColor(game, st.owner);
-      ctx.globalAlpha = 0.55;
+      const col = ownerColor(game, st.owner);
+      // faint region tint: the cached owned-tile path is in world tile
+      // coords, so fill it under a temporary world→screen transform
+      ctx.fillStyle = col;
+      ctx.globalAlpha = 0.10;
+      ctx.save();
+      ctx.translate(ox, oy);
+      ctx.scale(s, s);
+      ctx.fill(e.tiles);
+      ctx.restore();
+      ctx.strokeStyle = col;
+      // soft glow underlay under the frontier line
+      ctx.globalAlpha = 0.15;
+      ctx.lineWidth = 6;
+      strokeSegs(e.outer);
+      // the frontier line itself, a touch stronger than before (#263)
+      ctx.globalAlpha = 0.75;
       ctx.lineWidth = 2;
       strokeSegs(e.outer);
       if (e.seam.length) {
-        ctx.globalAlpha = 0.35;
+        ctx.globalAlpha = 0.45;
         ctx.lineWidth = 1;
         strokeSegs(e.seam);
       }
@@ -1538,19 +1558,17 @@ export function createRenderer(canvas, minimap) {
     ctx.strokeRect(x0, y0, size, size);
     ctx.setLineDash([]);
     // siege state (#108): amber dashed halo + ⏳ — income cut, deliveries
-    // blocked, the stockpile is the clock. Visible to both players.
+    // blocked, the stockpile is the clock. Visible to both players. The
+    // halo draws here; the ⏳ waits until after the card (#263) so the
+    // taller card can never cover it.
+    let besieged = false;
     if (!ghost && !building && S.besieged(game, st)) {
+      besieged = true;
       ctx.strokeStyle = '#fbbf24';
       ctx.lineWidth = 2;
       ctx.setLineDash([4, 3]);
       ctx.strokeRect(x0 - 3, y0 - 3, size + 6, size + 6);
       ctx.setLineDash([]);
-      if (s >= 6) {
-        ctx.font = `${Math.max(9, Math.min(16, s * 0.7))}px system-ui`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('⏳', x0 + size, y0 - 2);
-      }
     }
     if (building && s >= 5) {
       const fs = Math.max(10, Math.min(22, s * 0.9));
@@ -1558,30 +1576,6 @@ export function createRenderer(canvas, minimap) {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('🔨', cx, cy);
-    }
-    // unit counts inside, loose triangle: ⚔️ upper-left, 🚚 upper-right,
-    // 🌱 (garrisoned + working the fields) bottom-center; own settlements
-    // also show the 🌾 stockpile top-center (#86 — the enemy's stays private)
-    if (!ghost && !building && st.garrison && s >= 8) {
-      const fs = Math.max(9, Math.min(12, s * 0.55));
-      ctx.font = `600 ${fs}px system-ui`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const chips = [
-        [`⚔️${st.garrison.deploy}`, cx - 0.45 * s, cy - 0.05 * s],
-        [`🚚${st.garrison.supply}`, cx + 0.45 * s, cy + 0.10 * s],
-        [`🌱${st.garrison.farm + (workingN || 0)}`, cx, cy + 0.60 * s],
-      ];
-      if (st.owner === viewer(game) && st.stockpile != null) {
-        chips.push([`🌾${Math.floor(st.stockpile)}`, cx, cy - 0.55 * s]);
-      }
-      for (const [label, lx, ly] of chips) {
-        const tw = ctx.measureText(label).width;
-        ctx.fillStyle = 'rgba(0,0,0,0.45)';
-        ctx.fillRect(lx - tw / 2 - 2, ly - fs * 0.7, tw + 4, fs * 1.4);
-        ctx.fillStyle = '#e4e4e7';
-        ctx.fillText(label, lx, ly);
-      }
     }
     // health / production bars just below the plot — amber while under
     // construction, so the fill reads as build progress (#95)
@@ -1601,20 +1595,6 @@ export function createRenderer(canvas, minimap) {
       ctx.fillRect(x0, barY, size * (st.trainAcc / S.C.TRAIN_COST), 3);
       barY += 4;
     }
-    // name plate above the keep — every settlement wears its name; ghosts
-    // keep the last-seen name from the viewer's memory
-    if (st.name && s >= 5) {
-      const nfs = Math.max(9, Math.min(13, s * 0.55));
-      ctx.font = `600 ${nfs}px system-ui`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const ny = y0 - nfs * 0.9;
-      const ntw = ctx.measureText(st.name).width;
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fillRect(cx - ntw / 2 - 3, ny - nfs * 0.7, ntw + 6, nfs * 1.4);
-      ctx.fillStyle = ghost ? '#a1a1aa' : '#e4e4e7';
-      ctx.fillText(st.name, cx, ny);
-    }
     // garrison arm-up progress (#108, own settlements only)
     if (!ghost && st.owner === viewer(game) && st.convert) {
       const p = Math.max(0, Math.min(1, 1 - (st.convert.done - game.tick) / S.C.CONVERT_TICKS));
@@ -1623,6 +1603,82 @@ export function createRenderer(canvas, minimap) {
       ctx.fillStyle = '#f59e0b';
       ctx.fillRect(x0, barY, size * p, 3);
       barY += 4;
+    }
+    // settlement card (#263): one rounded dark-glass card floating above
+    // the keep, holding the name on top and — when garrisoned — the
+    // status chips in one evenly spaced row beneath it. Replaces the old
+    // flat name strip plus the loose chips inside the keep. Canvas can't
+    // backdrop-blur, so the glass is a semi-transparent fill plus a thin
+    // light border, the same language as the HUD panels.
+    const showName = st.name && s >= 5;   // ghosts keep their last-seen name
+    const showChips = !ghost && !building && st.garrison && s >= 8;
+    if (showName || showChips) {
+      const padX = Math.max(6, s * 0.5), padY = Math.max(4, s * 0.3);
+      const rowGap = Math.max(3, s * 0.25), chipGap = Math.max(8, s * 0.6);
+      const nfs = Math.max(9, Math.min(13, s * 0.55));
+      const cfs = Math.max(9, Math.min(12, s * 0.55));
+      ctx.textBaseline = 'middle';
+      // chips in today's order: 🌾 stockpile first (#86 — the enemy's stays
+      // private), then ⚔️ deploy, 🚚 supply, 🌱 farm + working the fields
+      const chips = [];
+      let chipsW = 0;
+      if (showChips) {
+        ctx.font = `600 ${cfs}px system-ui`;
+        if (st.owner === viewer(game) && st.stockpile != null) {
+          chips.push(`🌾${Math.floor(st.stockpile)}`);
+        }
+        chips.push(`⚔️${st.garrison.deploy}`, `🚚${st.garrison.supply}`,
+          `🌱${st.garrison.farm + (workingN || 0)}`);
+        for (const label of chips) chipsW += ctx.measureText(label).width;
+        chipsW += chipGap * (chips.length - 1);
+      }
+      let nameW = 0;
+      if (showName) {
+        ctx.font = `600 ${nfs}px system-ui`;
+        nameW = ctx.measureText(st.name).width;
+      }
+      const w = Math.max(nameW, chipsW) + padX * 2;
+      const nameH = showName ? nfs : 0;
+      const chipsH = showChips ? cfs : 0;
+      const h = padY * 2 + nameH + (showName && showChips ? rowGap : 0) + chipsH;
+      // bottom edge a small gap above the keep's top; clamp left/right so
+      // edge settlements never clip (same pattern as the placement card)
+      const cardX = Math.max(4, Math.min(cx - w / 2, cssW - w - 4));
+      const cardY = y0 - 4 - h;
+      const midX = cardX + w / 2;
+      ctx.fillStyle = 'rgba(24,24,27,0.72)';
+      ctx.strokeStyle = 'rgba(228,228,231,0.25)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(cardX + 0.5, cardY + 0.5, w, h, Math.max(3, Math.min(8, s * 0.45)));
+      ctx.fill();
+      ctx.stroke();
+      let ty = cardY + padY;
+      if (showName) {
+        ctx.font = `600 ${nfs}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = ghost ? '#a1a1aa' : '#e4e4e7';
+        ctx.fillText(st.name, midX, ty + nameH / 2);
+        ty += nameH + rowGap;
+      }
+      if (showChips) {
+        ctx.font = `600 ${cfs}px system-ui`;
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#e4e4e7';
+        let tx = midX - chipsW / 2;
+        for (const label of chips) {
+          ctx.fillText(label, tx, ty + chipsH / 2);
+          tx += ctx.measureText(label).width + chipGap;
+        }
+      }
+    }
+    // besieged ⏳ draws after the card (#263) so the taller card never
+    // hides it — same spot at the keep's top-right as before
+    if (besieged && s >= 6) {
+      ctx.font = `${Math.max(9, Math.min(16, s * 0.7))}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⏳', x0 + size, y0 - 2);
     }
     ctx.globalAlpha = 1;
   }
