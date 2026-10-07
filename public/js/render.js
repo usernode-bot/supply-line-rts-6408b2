@@ -251,6 +251,97 @@ export function createRenderer(canvas, minimap) {
   window.addEventListener('resize', resize);
   resize();
 
+  // Sea backdrop (#260): the area outside the map rectangle used to be a
+  // flat #05060a fill; it now reads as very dark deep water. Two 256 px
+  // tiles are built once and cached as CanvasPatterns — a low-frequency
+  // swell and a sparser caustic shimmer — drifting at different speeds so
+  // the combined motion never visibly repeats. The tiles come from
+  // integer-hash pseudo-randomness and wrap-safe sinusoids (the paintTile
+  // idiom), never Math.random(), so the sea looks identical on every load.
+  // Render-only: nothing here touches sim state, so SIM_VERSION is untouched.
+  const SEA_TILE = 256;
+  // same near-black darkness as #05060a, shifted blue-green
+  const SEA_BASE = '#05131a';
+  const SEA_SWELL_DRIFT = [5.7, 1.7];    // px/s — roughly direction (1, 0.3)
+  const SEA_CAUSTIC_DRIFT = [-5.7, 9.4]; // px/s — roughly direction (-0.6, 1)
+  let seaPatterns = null;
+
+  function ensureSeaPatterns() {
+    if (seaPatterns) return;
+    const TAU = Math.PI * 2;
+    // swell tile: soft wave bands over a broad luminance variation, both
+    // from sinusoids whose wavelength divides the tile edge so it wraps
+    const swell = document.createElement('canvas');
+    swell.width = SEA_TILE; swell.height = SEA_TILE;
+    const sg = swell.getContext('2d');
+    const simg = sg.createImageData(SEA_TILE, SEA_TILE);
+    const sd = simg.data;
+    for (let y = 0; y < SEA_TILE; y++) {
+      for (let x = 0; x < SEA_TILE; x++) {
+        const a1 = Math.sin((x + 3 * y) / SEA_TILE * TAU);
+        const a2 = Math.sin((3 * x - 2 * y) / SEA_TILE * TAU + 1.7);
+        const crest = Math.max(0, a1 * 0.7 + a2 * 0.3);
+        // rgba(20,80,100) at up to 0.10 on crests, flat troughs
+        const bandA = 0.10 * crest * crest;
+        // broad drift toward #040c10, its own wrap-safe frequency
+        const darkA = 0.12 * (0.5 + 0.5 * Math.sin((2 * x + y) / SEA_TILE * TAU + 0.9));
+        // composite: band colour over darkening colour, one pixel
+        const o = (y * SEA_TILE + x) * 4;
+        const a = bandA + darkA * (1 - bandA);
+        if (a > 0) {
+          const w = darkA * (1 - bandA);
+          sd[o]     = (20 * bandA + 4 * w) / a;
+          sd[o + 1] = (80 * bandA + 12 * w) / a;
+          sd[o + 2] = (100 * bandA + 16 * w) / a;
+          sd[o + 3] = a * 255;
+        }
+      }
+    }
+    sg.putImageData(simg, 0, 0);
+    // caustic tile: sparse soft speckles at a different visual frequency,
+    // hashed like paintTile's flecks; each is stamped through its wrapped
+    // coordinates so speckles near an edge repeat on the opposite edge
+    const caustic = document.createElement('canvas');
+    caustic.width = SEA_TILE; caustic.height = SEA_TILE;
+    const cg = caustic.getContext('2d');
+    const cimg = cg.createImageData(SEA_TILE, SEA_TILE);
+    const cd = cimg.data;
+    for (let k = 0; k < 40; k++) {
+      let h = ((k + 1) * 2654435761) >>> 0;
+      h = Math.imul(h ^ (h >>> 15), 2246822519) >>> 0;
+      h = (h ^ (h >>> 13)) >>> 0;
+      const cx = h % SEA_TILE;
+      const cy = (h >>> 5) % SEA_TILE;
+      const r = 3 + ((h >>> 9) % 12);
+      const peak = 0.03 + ((h >>> 17) & 3) * 0.013;   // up to ~0.07
+      for (let oy = -r; oy <= r; oy++) {
+        const py = ((cy + oy) % SEA_TILE + SEA_TILE) % SEA_TILE;
+        for (let ox = -r; ox <= r; ox++) {
+          const d = Math.sqrt(ox * ox + oy * oy);
+          if (d >= r) continue;
+          const a = peak * (1 - d / r) * (1 - d / r);
+          const px = ((cx + ox) % SEA_TILE + SEA_TILE) % SEA_TILE;
+          const o = (py * SEA_TILE + px) * 4;
+          // additive over whatever speck is already there
+          const oa = cd[o + 3] / 255;
+          const na = a + oa * (1 - a);
+          if (na > 0) {
+            const w = oa * (1 - a);
+            cd[o]     = (45 * a + cd[o] * w) / na;
+            cd[o + 1] = (150 * a + cd[o + 1] * w) / na;
+            cd[o + 2] = (160 * a + cd[o + 2] * w) / na;
+            cd[o + 3] = na * 255;
+          }
+        }
+      }
+    }
+    cg.putImageData(cimg, 0, 0);
+    seaPatterns = [
+      [ctx.createPattern(swell, 'repeat'), SEA_SWELL_DRIFT],
+      [ctx.createPattern(caustic, 'repeat'), SEA_CAUSTIC_DRIFT],
+    ];
+  }
+
   function ensureLayers(game) {
     // A reveal toggle keeps the same map but changes what the terrain layer is
     // allowed to show, so it forces the same full repaint a new map does.
@@ -446,8 +537,27 @@ export function createRenderer(canvas, minimap) {
     sweepFormCache(now);
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = '#05060a';
+    // animated sea backdrop (#260): the flat black fill becomes very dark
+    // blue-green water with two drifting pattern layers, painted in screen
+    // space under the whole frame (the map slides over it when panning).
+    // Wall-clock, like the marching dashes and the armed-source halo, so the
+    // sea keeps moving while the sim is paused; reduced-motion freezes the
+    // drift, not the texture.
+    ctx.fillStyle = SEA_BASE;
     ctx.fillRect(0, 0, cssW, cssH);
+    ensureSeaPatterns();
+    const seaT = reduceMotion ? 0 : now / 1000;
+    for (const [pat, [sdx, sdy]] of seaPatterns) {
+      const tx = (seaT * sdx) % SEA_TILE, ty = (seaT * sdy) % SEA_TILE;
+      ctx.save();
+      ctx.translate(tx, ty);
+      // the rect must stay over the viewport in SCREEN space, so it is
+      // drawn back by the translation — otherwise the pattern rect slides
+      // with the drift and uncovers a band of bare base at one edge
+      ctx.fillStyle = pat;
+      ctx.fillRect(-tx, -ty, cssW, cssH);
+      ctx.restore();
+    }
 
     const s = view.scale;
     // snap the map origin to whole device pixels so terrain and fog land
