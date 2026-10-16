@@ -1774,8 +1774,13 @@ function startMatch(g, opts) {
   input.setMapSize(g.map.w, g.map.h);
   const start = g.map.starts[me] || g.map.starts[0];
   view.cx = start.x + 2; view.cy = start.y;
-  const cssW = window.innerWidth;
-  view.scale = Math.max(10, Math.min(20, cssW / (cssW < 640 ? 22 : 30)));
+  const cssW = window.innerWidth, cssH = window.innerHeight;
+  // the tutorial's close-up (#185) is tuned off the old opening scale, so it
+  // keeps that base even though the default now opens closer (#261)
+  const tutorialBase = Math.max(10, Math.min(20, cssW / (cssW < 640 ? 22 : 30)));
+  // open close enough that the home clearing (13 tiles across) and its army
+  // fill ~60% of the short screen side (#261); phones land near the old value
+  view.scale = Math.max(16, Math.min(40, Math.min(cssW, cssH) / 22));
   // A resume that dumps you back at your home settlement isn't a resume (#240):
   // the saved camera comes back with the match. Non-sim data, so it rides in
   // the payload beside savedAt and needs no version bump.
@@ -1790,7 +1795,7 @@ function startMatch(g, opts) {
     // at start+1, the army at start+(2.5,0.5)); panning/zooming stays free
     view.cx = start.x + 1.5;
     view.cy = start.y + 0.5;
-    view.scale = Math.min(48, view.scale * 1.9);
+    view.scale = Math.min(48, tutorialBase * 1.9);
   }
   input.clampView();
 

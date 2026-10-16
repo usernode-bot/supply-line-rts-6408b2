@@ -10,7 +10,13 @@
 
 const POOL_TARGET = 3;      // ready snapshots to keep on hand (~20 KB each)
 const WARMUP_TICKS = 4500;  // 15 min of 1×-speed play — a developed mid-game
-const TICKS_PER_SLICE = 300; // yield to the event loop between slices
+// 60 rather than a bigger slice: a developed game's tick slows to ~2.7ms
+// (measured: 300-tick slices blocked the loop 88–810ms), and that stall
+// starved every HTTP response behind it — the proposal checks' shot-page
+// module fetches stretched past their text-wait and flaked. ~60 ticks
+// keeps each block to tens of ms so requests interleave; refills just
+// take longer in wall-clock, which only delays scenery.
+const TICKS_PER_SLICE = 60; // yield to the event loop between slices
 const MAX_ATTEMPTS = 3;     // degenerate maps (early elimination) get retried
 
 let mods = null;
