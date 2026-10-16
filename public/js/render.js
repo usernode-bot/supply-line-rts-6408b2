@@ -542,19 +542,32 @@ export function createRenderer(canvas, minimap) {
       }
       ctx.stroke();
     }
+    // round caps/joins soften the segment corners — reset after the ghost
+    // ring loop below so later strokes (blob paths, walls) stay square
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     const edges = ensureTerrEdges(game);
     for (const st of game.settlements) {
       if (st.building) continue; // construction sites feed nobody — no ring yet (#95)
       if (st.owner !== viewer(game) && !settSeen(game, st)) continue;
       const e = edges.get(st.id);
       if (!e) continue;
+      const own = st.owner === viewer(game);
+      if (own) {
+        // soft wide underlay under the viewer's frontier (#263) — reads as
+        // a glow, so your land pops against the enemy's at a glance
+        ctx.strokeStyle = OWNER_COLOR[0];
+        ctx.globalAlpha = 0.18;
+        ctx.lineWidth = 7;
+        strokeSegs(e.outer);
+      }
       ctx.strokeStyle = ownerColor(game, st.owner);
-      ctx.globalAlpha = 0.55;
-      ctx.lineWidth = 2;
+      ctx.globalAlpha = own ? 0.8 : 0.7;
+      ctx.lineWidth = own ? 3 : 2.5;
       strokeSegs(e.outer);
       if (e.seam.length) {
-        ctx.globalAlpha = 0.35;
-        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.4;
+        ctx.lineWidth = 1.25;
         strokeSegs(e.seam);
       }
     }
@@ -576,6 +589,8 @@ export function createRenderer(canvas, minimap) {
       strokeTerritory(k.x, k.y);
     }
     ctx.globalAlpha = 1;
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
 
     // selected blob paths (own blobs only — never reveal enemy plans)
     if (selSet) {
@@ -1537,20 +1552,16 @@ export function createRenderer(canvas, minimap) {
     if (building) ctx.setLineDash([5, 4]);
     ctx.strokeRect(x0, y0, size, size);
     ctx.setLineDash([]);
-    // siege state (#108): amber dashed halo + ⏳ — income cut, deliveries
-    // blocked, the stockpile is the clock. Visible to both players.
-    if (!ghost && !building && S.besieged(game, st)) {
+    // siege state (#108): amber dashed halo — income cut, deliveries
+    // blocked, the stockpile is the clock. Visible to both players. The
+    // ⏳ clock itself draws after the name card so it never hides.
+    const besiegedNow = !ghost && !building && S.besieged(game, st);
+    if (besiegedNow) {
       ctx.strokeStyle = '#fbbf24';
       ctx.lineWidth = 2;
       ctx.setLineDash([4, 3]);
       ctx.strokeRect(x0 - 3, y0 - 3, size + 6, size + 6);
       ctx.setLineDash([]);
-      if (s >= 6) {
-        ctx.font = `${Math.max(9, Math.min(16, s * 0.7))}px system-ui`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('⏳', x0 + size, y0 - 2);
-      }
     }
     if (building && s >= 5) {
       const fs = Math.max(10, Math.min(22, s * 0.9));
@@ -1559,29 +1570,62 @@ export function createRenderer(canvas, minimap) {
       ctx.textBaseline = 'middle';
       ctx.fillText('🔨', cx, cy);
     }
-    // unit counts inside, loose triangle: ⚔️ upper-left, 🚚 upper-right,
-    // 🌱 (garrisoned + working the fields) bottom-center; own settlements
-    // also show the 🌾 stockpile top-center (#86 — the enemy's stays private)
-    if (!ghost && !building && st.garrison && s >= 8) {
+    // name + garrison in one floating card above the keep (#263): dark
+    // see-through fill, thin owner-coloured border, evenly spaced status
+    // icons — same look as the placement-score card. Ghosts (remembered
+    // enemy settlements) and construction sites get a name-only card.
+    if (st.name && s >= 5) {
+      const nfs = Math.max(9, Math.min(13, s * 0.55));
       const fs = Math.max(9, Math.min(12, s * 0.55));
-      ctx.font = `600 ${fs}px system-ui`;
+      const chips = (!ghost && !building && st.garrison && s >= 8) ? [
+        `⚔️${st.garrison.deploy}`,
+        `🚚${st.garrison.supply}`,
+        `🌱${st.garrison.farm + (workingN || 0)}`,
+        ...(st.owner === viewer(game) && st.stockpile != null
+          ? [`🌾${Math.floor(st.stockpile)}`] : []),
+      ] : null;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const chips = [
-        [`⚔️${st.garrison.deploy}`, cx - 0.45 * s, cy - 0.05 * s],
-        [`🚚${st.garrison.supply}`, cx + 0.45 * s, cy + 0.10 * s],
-        [`🌱${st.garrison.farm + (workingN || 0)}`, cx, cy + 0.60 * s],
-      ];
-      if (st.owner === viewer(game) && st.stockpile != null) {
-        chips.push([`🌾${Math.floor(st.stockpile)}`, cx, cy - 0.55 * s]);
+      ctx.font = `600 ${nfs}px system-ui`;
+      const nameW = ctx.measureText(st.name).width;
+      let rowW = 0;
+      if (chips) {
+        ctx.font = `600 ${fs}px system-ui`;
+        for (const label of chips) rowW += ctx.measureText(label).width;
+        rowW += fs * 0.8 * (chips.length - 1);
       }
-      for (const [label, lx, ly] of chips) {
-        const tw = ctx.measureText(label).width;
-        ctx.fillStyle = 'rgba(0,0,0,0.45)';
-        ctx.fillRect(lx - tw / 2 - 2, ly - fs * 0.7, tw + 4, fs * 1.4);
+      const padX = 7, padY = 4, lineGap = 2;
+      const w = Math.max(nameW, rowW) + padX * 2;
+      const h = chips ? padY + nfs + lineGap + fs + padY : padY * 2 + nfs;
+      const cardX = cx - w / 2, cardY = y0 - 4 - h;
+      ctx.fillStyle = 'rgba(9,9,11,0.78)';
+      ctx.strokeStyle = st.owner === viewer(game)
+        ? 'rgba(139,92,246,0.6)' : 'rgba(239,68,68,0.6)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(cardX + 0.5, cardY + 0.5, w, h, 6);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = `600 ${nfs}px system-ui`;
+      ctx.fillStyle = ghost ? '#a1a1aa' : '#e4e4e7';
+      ctx.fillText(st.name, cx, cardY + padY + nfs / 2);
+      if (chips) {
+        ctx.font = `600 ${fs}px system-ui`;
         ctx.fillStyle = '#e4e4e7';
-        ctx.fillText(label, lx, ly);
+        let tx = cx - rowW / 2;
+        for (const label of chips) {
+          const tw = ctx.measureText(label).width;
+          ctx.fillText(label, tx + tw / 2, cardY + padY + nfs + lineGap + fs / 2);
+          tx += tw + fs * 0.8;
+        }
       }
+    }
+    // the siege ⏳ draws on top of the card so it is never hidden
+    if (besiegedNow && s >= 6) {
+      ctx.font = `${Math.max(9, Math.min(16, s * 0.7))}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⏳', x0 + size, y0 - 2);
     }
     // health / production bars just below the plot — amber while under
     // construction, so the fill reads as build progress (#95)
@@ -1600,20 +1644,6 @@ export function createRenderer(canvas, minimap) {
       ctx.fillStyle = '#fbbf24';
       ctx.fillRect(x0, barY, size * (st.trainAcc / S.C.TRAIN_COST), 3);
       barY += 4;
-    }
-    // name plate above the keep — every settlement wears its name; ghosts
-    // keep the last-seen name from the viewer's memory
-    if (st.name && s >= 5) {
-      const nfs = Math.max(9, Math.min(13, s * 0.55));
-      ctx.font = `600 ${nfs}px system-ui`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const ny = y0 - nfs * 0.9;
-      const ntw = ctx.measureText(st.name).width;
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fillRect(cx - ntw / 2 - 3, ny - nfs * 0.7, ntw + 6, nfs * 1.4);
-      ctx.fillStyle = ghost ? '#a1a1aa' : '#e4e4e7';
-      ctx.fillText(st.name, cx, ny);
     }
     // garrison arm-up progress (#108, own settlements only)
     if (!ghost && st.owner === viewer(game) && st.convert) {
