@@ -10,13 +10,12 @@
 
 const POOL_TARGET = 3;      // ready snapshots to keep on hand (~20 KB each)
 const WARMUP_TICKS = 4500;  // 15 min of 1×-speed play — a developed mid-game
-// 60 rather than a bigger slice: a developed game's tick slows to ~2.7ms
-// (measured: 300-tick slices blocked the loop 88–810ms), and that stall
-// starved every HTTP response behind it — the proposal checks' shot-page
-// module fetches stretched past their text-wait and flaked. ~60 ticks
-// keeps each block to tens of ms so requests interleave; refills just
-// take longer in wall-clock, which only delays scenery.
-const TICKS_PER_SLICE = 60; // yield to the event loop between slices
+const TICKS_PER_SLICE = 300; // yield to the event loop between slices
+const SLICE_MS = 60;         // yield EARLY once a slice has run this long —
+                             // late-game ticks slow down (~1s per 300-tick
+                             // slice), and a boot-time warm-up that stalls the
+                             // event loop that long delays the first pages a
+                             // fresh copy serves
 const MAX_ATTEMPTS = 3;     // degenerate maps (early elimination) get retried
 
 let mods = null;
@@ -46,6 +45,7 @@ async function generateOne() {
     const ai0 = freshAiState();
     while (g.tick < WARMUP_TICKS && !g.result) {
       const sliceEnd = Math.min(WARMUP_TICKS, g.tick + TICKS_PER_SLICE);
+      const sliceDeadline = Date.now() + SLICE_MS;
       // both sides run the Normal commander, so the cadence is the classic
       // 20 either way — read from the table so there is one definition
       const cad = S.aiCadence(g.difficulty);
@@ -57,6 +57,10 @@ async function generateOne() {
         // rules (updateVision rewrites fog every 5 ticks)
         if (g.tick % 5 === 0) g.fog.fill(2);
         g.events.length = 0;
+        // a mid-game slice outruns its tick budget: hand the event loop
+        // back before the 60ms ceiling so pending requests aren't queued
+        // behind a second of sim time
+        if ((g.tick & 15) === 0 && Date.now() >= sliceDeadline) break;
       }
       await new Promise((resolve) => setImmediate(resolve));
     }
