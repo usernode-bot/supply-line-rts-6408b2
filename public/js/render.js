@@ -588,6 +588,8 @@ export function createRenderer(canvas, minimap) {
       ctx.globalAlpha = 0.25;
       strokeTerritory(k.x, k.y);
     }
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
     ctx.globalAlpha = 1;
     ctx.lineCap = 'butt';
     ctx.lineJoin = 'miter';
@@ -1526,6 +1528,20 @@ export function createRenderer(canvas, minimap) {
       ctx.fillText('🏚️', x0 + size / 2, y0 + size / 2);
     }
     ctx.globalAlpha = 1;
+  }
+
+  // Glass plate: a rounded translucent dark card with a thin light
+  // outline — canvas has no cheap backdrop blur, so translucency plus the
+  // outline stand in for glassmorphism. Echoes the site preview card
+  // style in drawPlacementScore. Runs under the caller's globalAlpha, so
+  // ghosts and construction sites stay dimmed as before.
+  function glassPlate(x, y, w, h, r) {
+    ctx.fillStyle = 'rgba(9,9,11,0.6)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    ctx.fill(); ctx.stroke();
   }
 
   function drawSettlement(game, st, wx, wy, s, ghost, sel, workingN) {

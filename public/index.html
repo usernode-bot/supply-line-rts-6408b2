@@ -588,6 +588,12 @@
     e.preventDefault();
   });
   </script>
+  <!-- Preload the module graph so it fetches in parallel instead of the
+       serial waterfall a plain module script produces: main.js's imports
+       are only discovered once main.js itself has been fetched and parsed,
+       and a shot/?boot (screenshot states, the proposal checks) renders its
+       panel text only after the whole graph has landed. -->
+  <link rel="modulepreload" href="/js/main.js">
   <script type="module" src="/js/main.js"></script>
 </body>
 </html>
