@@ -542,6 +542,11 @@ export function createRenderer(canvas, minimap) {
       }
       ctx.stroke();
     }
+    // round caps/joins: the segments are unit tile edges, one subpath
+    // each, so rounded ends make the outline read as one soft boundary
+    // with rounded corners instead of a hard wire
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     const edges = ensureTerrEdges(game);
     for (const st of game.settlements) {
       if (st.building) continue; // construction sites feed nobody — no ring yet (#95)
@@ -549,12 +554,17 @@ export function createRenderer(canvas, minimap) {
       const e = edges.get(st.id);
       if (!e) continue;
       ctx.strokeStyle = ownerColor(game, st.owner);
-      ctx.globalAlpha = 0.55;
-      ctx.lineWidth = 2;
+      // a faint wide underlay under the main line, so the edge reads as a
+      // soft area boundary rather than a thin rigid stroke
+      ctx.globalAlpha = 0.12;
+      ctx.lineWidth = 7;
+      strokeSegs(e.outer);
+      ctx.globalAlpha = 0.5;
+      ctx.lineWidth = 3;
       strokeSegs(e.outer);
       if (e.seam.length) {
-        ctx.globalAlpha = 0.35;
-        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.3;
+        ctx.lineWidth = 1.5;
         strokeSegs(e.seam);
       }
     }
@@ -575,6 +585,8 @@ export function createRenderer(canvas, minimap) {
       ctx.globalAlpha = 0.25;
       strokeTerritory(k.x, k.y);
     }
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
     ctx.globalAlpha = 1;
 
     // selected blob paths (own blobs only — never reveal enemy plans)
@@ -1513,6 +1525,20 @@ export function createRenderer(canvas, minimap) {
     ctx.globalAlpha = 1;
   }
 
+  // Glass plate: a rounded translucent dark card with a thin light
+  // outline — canvas has no cheap backdrop blur, so translucency plus the
+  // outline stand in for glassmorphism. Echoes the site preview card
+  // style in drawPlacementScore. Runs under the caller's globalAlpha, so
+  // ghosts and construction sites stay dimmed as before.
+  function glassPlate(x, y, w, h, r) {
+    ctx.fillStyle = 'rgba(9,9,11,0.6)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    ctx.fill(); ctx.stroke();
+  }
+
   function drawSettlement(game, st, wx, wy, s, ghost, sel, workingN) {
     // fills the 2×2 footprint exactly: a plain square keep — no roof
     // triangle (#67) — with unit counts inside in a loose triangle (#40)
@@ -1568,19 +1594,25 @@ export function createRenderer(canvas, minimap) {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       const chips = [
-        [`⚔️${st.garrison.deploy}`, cx - 0.45 * s, cy - 0.05 * s],
-        [`🚚${st.garrison.supply}`, cx + 0.45 * s, cy + 0.10 * s],
-        [`🌱${st.garrison.farm + (workingN || 0)}`, cx, cy + 0.60 * s],
+        ['⚔️', `${st.garrison.deploy}`, cx - 0.45 * s, cy - 0.05 * s],
+        ['🚚', `${st.garrison.supply}`, cx + 0.45 * s, cy + 0.10 * s],
+        ['🌱', `${st.garrison.farm + (workingN || 0)}`, cx, cy + 0.60 * s],
       ];
       if (st.owner === viewer(game) && st.stockpile != null) {
-        chips.push([`🌾${Math.floor(st.stockpile)}`, cx, cy - 0.55 * s]);
+        chips.push(['🌾', `${Math.floor(st.stockpile)}`, cx, cy - 0.55 * s]);
       }
-      for (const [label, lx, ly] of chips) {
-        const tw = ctx.measureText(label).width;
-        ctx.fillStyle = 'rgba(0,0,0,0.45)';
-        ctx.fillRect(lx - tw / 2 - 2, ly - fs * 0.7, tw + 4, fs * 1.4);
-        ctx.fillStyle = '#e4e4e7';
-        ctx.fillText(label, lx, ly);
+      const gap = fs * 0.25, padX = fs * 0.4;
+      for (const [icon, count, lx, ly] of chips) {
+        const iw = ctx.measureText(icon).width;
+        const nw = ctx.measureText(count).width;
+        const pw = iw + gap + nw + padX * 2, ph = fs * 1.5;
+        const px = lx - pw / 2, py = ly - ph / 2;
+        glassPlate(px, py, pw, ph, fs * 0.45);
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#f4f4f5';
+        ctx.fillText(icon, px + padX, ly);
+        ctx.fillText(count, px + padX + iw + gap, ly);
+        ctx.textAlign = 'center';
       }
     }
     // health / production bars just below the plot — amber while under
@@ -1610,9 +1642,9 @@ export function createRenderer(canvas, minimap) {
       ctx.textBaseline = 'middle';
       const ny = y0 - nfs * 0.9;
       const ntw = ctx.measureText(st.name).width;
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fillRect(cx - ntw / 2 - 3, ny - nfs * 0.7, ntw + 6, nfs * 1.4);
-      ctx.fillStyle = ghost ? '#a1a1aa' : '#e4e4e7';
+      const nw = ntw + nfs * 1.1, nh = nfs * 1.6;
+      glassPlate(cx - nw / 2, ny - nh / 2, nw, nh, nfs * 0.5);
+      ctx.fillStyle = ghost ? '#a1a1aa' : '#f4f4f5';
       ctx.fillText(st.name, cx, ny);
     }
     // garrison arm-up progress (#108, own settlements only)
