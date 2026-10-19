@@ -6418,5 +6418,59 @@ function bootShot(name) {
     console.error('shot boot failed', e);
   }
 }
+// a loaded caravan and a roughed-up lean one on their lines, with the
+// raiding party on the lean one: the health bars above the circles, the
+// cargo chips, and the ambush report staged in the event queue so the
+// toast renders from a URL alone (#268). Pure local UI state — no DB writes.
+function shotCaravan() {
+  try {
+    clearSaves();
+    me = 0;
+    const g = S.newGame('shot-caravan', 'xsmall', 'normal');
+    const home = g.settlements.find(s => s.owner === 0 && !s.building);
+    const mk = (deployN, supplyN, hurt) => {
+      const b = g.blobs.find(x => !x.dead && x.owner === 0
+        && S.total(x) >= deployN + supplyN && x.working == null);
+      if (!b) return null;
+      b.units.length = deployN + supplyN;
+      b.units.forEach((u, i) => { u.role = i < supplyN ? 'supply' : 'deploy'; });
+      b.count = { deploy: deployN, supply: supplyN, farm: 0 };
+      if (hurt < 1) for (const u of b.units) u.hp *= hurt;   // below half — red bar
+      return b;
+    };
+    const a = mk(5, 3, 1);              // healthy escort carrier — amber bar
+    if (!a) return;
+    const c = S.opSplit(g, a, 4).blob;  // split four off as a lean carrier
+    if (!c) return;
+    c.units.forEach(u => { u.role = 'supply'; });
+    c.count = { deploy: 0, supply: c.units.length, farm: 0 };
+    for (const u of c.units) u.hp *= 0.4;   // ambushed — red bar
+    a.units.forEach((u, i) => { u.role = i < 2 ? 'supply' : 'deploy'; });
+    a.count = { deploy: a.units.length - 2, supply: 2, farm: 0 };
+    // both join ONE line (#133): same owner, source and destination
+    const dock = g.blobs.find(x => !x.dead && x.owner === 0 && x !== a && x !== c);
+    if (!dock) return;
+    S.opRoute(g, a, { kind: 'blob', id: dock.id }, home.id);
+    S.opRoute(g, c, { kind: 'blob', id: dock.id }, home.id);
+    a.order.cargo = 12; c.order.cargo = 9;
+    // stage on home ground so the shot opens on explored, visible land
+    a.x = home.x + 3.5; a.y = home.y + 5.5;
+    c.x = home.x + 7.5; c.y = home.y + 5.5;
+    for (const b2 of [a, c]) { b2.prevX = b2.x; b2.prevY = b2.y; b2.path = null; b2.pathGoal = null; }
+    const foe = g.blobs.find(x => !x.dead && x.owner === 1 && x.count.deploy > 0);
+    foe.order = null; foe.path = null; foe.pathGoal = null;
+    foe.x = c.x - 0.6; foe.y = c.y + 1.6;
+    foe.prevX = foe.x; foe.prevY = foe.y;
+    g.events.push({ owner: 0, msg: '🚚 Caravan ambushed by an enemy army of 6: 2 units lost', x: c.x, y: c.y });
+    startMatch(g);
+    view.cx = home.x + 5.5; view.cy = home.y + 5.5; view.scale = 26;
+    paused = true;
+    $('btn-pause').textContent = '▶';
+    updateHUD();
+  } catch (e) {
+    console.error('shot boot failed', e);
+  }
+}
 const shot = params.get('shot');
-if (shot) bootShot(shot);
+if (shot === 'caravan') shotCaravan();
+else if (shot) bootShot(shot);

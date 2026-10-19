@@ -61,6 +61,7 @@ export const C = {
   EAT_PER_SEC: 1 / 12,     // food per unit per second
   STARVE_FRAC: 0.005,      // fraction of blob lost per tick at 0 food (5%/s — dead in ~20 s)
   K_COMBAT: 0.0035,        // casualties per enemy deploy-unit per tick
+  AMBUSH_QUIET: 30,        // ticks with no blob hits that close a caravan's ambush tally (#268)
   K_SIEGE: 0.134,          // settlement HP per deploy-unit per tick — ~20× the old
                            // 0.0067 (#108): an UNGARRISONED settlement falls in
                            // seconds (effectively ~5 HP of the old scale); while a
@@ -2690,7 +2691,17 @@ function tickCarrier(game, b) {
     b.food = Math.min(foodCap(b), b.food + (b.order.cargo || 0));
     SUP.removeCarrier(game, route, b.id);
     b.order = null; b.path = null;
-    game.events.push({ owner: b.owner, msg: '🚚 Caravan lost its carriers', x: b.x, y: b.y });
+    // if an ambush tally is open, the release reads as a raid outcome (#268)
+    if (b.ambush) {
+      const t = b.ambush; b.ambush = null;
+      game.events.push({
+        owner: b.owner,
+        msg: `🚚 Caravan lost its carriers to an enemy army of ${t.peak}: ${t.lost} unit${t.lost === 1 ? '' : 's'} lost`,
+        x: b.x, y: b.y,
+      });
+    } else {
+      game.events.push({ owner: b.owner, msg: '🚚 Caravan lost its carriers', x: b.x, y: b.y });
+    }
     return;
   }
   const cap = SUP.holdCap(b);
@@ -3085,8 +3096,53 @@ function tickCombat(game) {
       }
     }
     if (isFarmerGroup(b)) fleeFarmers(game, b);
-    applyLosses(game, b, d);
-    if (b.dead) raidCargo(game, b, hitBy.get(b));
+    // ambush tally (#268): blob-vs-blob hits on a route carrier open a
+    // tally of the worst simultaneous attacking force and the units lost,
+    // reported once the fight goes quiet — or, if the caravan dies first,
+    // as a final destroyed report. Garrison and wall return fire and
+    // starvation never open one (they add no hitBy entry). Transient like
+    // engagedT — never serialized, so a resume drops it and with it the
+    // report for a fight still in progress.
+    const hits = hitBy.get(b);
+    const tallying = (!!hits && b.order && b.order.type === 'route') || !!b.ambush;
+    let tickPeak = 0;
+    if (tallying) {
+      if (hits) for (const a of hits.keys()) tickPeak += a.count.deploy;
+      if (!b.ambush) b.ambush = { lastT: game.tick, peak: 0, lost: 0 };
+      b.ambush.lastT = game.tick;
+      b.ambush.peak = Math.max(b.ambush.peak, tickPeak);
+    }
+    const removed = applyLosses(game, b, d);
+    if (tallying) b.ambush.lost += removed;
+    if (b.dead) {
+      if (b.ambush) {
+        const t = b.ambush; b.ambush = null;
+        // read the hold before raidCargo zeroes it — the report names the
+        // whole load the caravan was carrying, half of which the raider
+        // loots as today
+        const cargo = (b.order && b.order.type === 'route') ? (b.order.cargo || 0) : 0;
+        game.events.push({
+          owner: b.owner,
+          msg: `🚚 Caravan destroyed by an enemy army of ${t.peak}: ${t.lost} unit${t.lost === 1 ? '' : 's'} lost, ${Math.round(cargo)} food dropped`,
+          x: b.x, y: b.y,
+        });
+      }
+      raidCargo(game, b, hitBy.get(b));
+    }
+  }
+  // close out ambushes that have gone quiet for AMBUSH_QUIET ticks, and
+  // drop the tallies of blobs that died outside the loop above (a merge
+  // absorbs its victim's tally; the survivor keeps its own)
+  for (const b of game.blobs) {
+    if (b.dead) { b.ambush = null; continue; }
+    if (b.ambush && game.tick - b.ambush.lastT >= C.AMBUSH_QUIET) {
+      const t = b.ambush; b.ambush = null;
+      game.events.push({
+        owner: b.owner,
+        msg: `🚚 Caravan ambushed by an enemy army of ${t.peak}: ${t.lost === 0 ? 'no units lost' : `${t.lost} unit${t.lost === 1 ? '' : 's'} lost`}`,
+        x: b.x, y: b.y,
+      });
+    }
   }
 }
 
@@ -3158,7 +3214,8 @@ function raidCargo(game, victim, attackers) {
     });
   }
   game.events.push({ owner: killer.owner, msg: `🌾 Caravan raided! +${Math.round(Math.max(0, loot))} food`, x: victim.x, y: victim.y });
-  game.events.push({ owner: victim.owner, msg: '🌾 Your caravan was raided!', x: victim.x, y: victim.y });
+  // the victim's old "Your caravan was raided!" push is gone (#268): the
+  // destroyed ambush report in tickCombat replaces it, so one event per raid
 }
 
 // -- farmer safety: AI-owned working farmers shelter in their settlement
@@ -3273,7 +3330,7 @@ function tickFarmerSpread(game) {
 // spilling to the next once it dies. `casualties` is in whole-unit
 // equivalents (1 casualty = UNIT_HP damage).
 function applyLosses(game, b, casualties) {
-  if (casualties <= 0 || b.dead) return;
+  if (casualties <= 0 || b.dead) return 0;
   let dmgHP = casualties * C.UNIT_HP;
   let removed = 0;
   while (dmgHP > 0.0001 && b.units.length) {
@@ -3289,6 +3346,7 @@ function applyLosses(game, b, casualties) {
     b.food = Math.min(b.food, foodCap(b));
   }
   if (b.units.length === 0) b.dead = true;
+  return removed;   // the ambush tally adds this to its losses (#268)
 }
 
 // `starve` marks deaths from an empty stockpile: the fx swaps the plain
