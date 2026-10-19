@@ -730,6 +730,103 @@ export function createRenderer(canvas, minimap) {
       }
     }
 
+    // armed-route preview (#267): while a route pick is armed with a
+    // source chosen, a dashed line to the pointer shows where the caravan
+    // would go before it is sent — same dash and green/amber/red as live
+    // route health, with the ETA chip in the cargo-chip style. Tap still
+    // dispatches; nothing here is sim state.
+    if (ui.routePreview && ui.routeSrc != null && (ui.pending === 'route' || ui.pending === 'route-sett')) {
+      const rsrc = game.settlements.find(st => st.id === ui.routeSrc && st.owner === viewer(game));
+      const rp = ui.routePreview;
+      if (rsrc && rp) {
+        const from = { x: rsrc.x + 1, y: rsrc.y + 1 };
+        // the same end points live routes draw (blob = interpolated, wall =
+        // tile centre, settlement = footprint centre); a stale id resolves
+        // to null so a target that died this tick draws nothing
+        const rBlob = rp.kind === 'blob' ? game.blobs.find(x => x.id === rp.id && !x.dead) : null;
+        const rWall = rp.kind === 'wall' ? (game.walls || []).find(x => x.id === rp.id) : null;
+        const rSett = rp.kind === 'settlement' ? game.settlements.find(x => x.id === rp.id) : null;
+        const to = rBlob ? { x: bx(rBlob), y: by(rBlob) }
+          : rWall ? { x: rWall.x + 0.5, y: rWall.y + 0.5 }
+            : rSett ? S.settCenter(rSett)
+              : rp.kind === 'point' ? { x: rp.x, y: rp.y } : null;
+        if (to) {
+          const fx = wx(from.x), fy = wy(from.y);
+          const txp = wx(to.x), typ = wy(to.y);
+          if (rp.kind === 'point') {
+            // over nothing supplyable: a faint white line, no chip —
+            // tapping there would cancel, not dispatch
+            ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([10, 4]);
+            ctx.beginPath();
+            ctx.moveTo(fx, fy);
+            ctx.lineTo(txp, typ);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          } else {
+            const prev = SUP.previewRoute(game, viewer(game), from, to,
+              s2 => settSeen(game, s2), b2 => seesAt(game, b2.x, b2.y));
+            const SPAN_COLOR = {
+              null: 'rgba(74,222,128,0.85)',
+              near: 'rgba(251,191,36,0.9)',
+              enemy: 'rgba(248,113,113,0.9)',
+            };
+            const GLOW = { enemy: 'rgba(248,113,113,0.30)', near: 'rgba(251,191,36,0.30)' };
+            const at = t => [fx + (txp - fx) * t, fy + (typ - fy) * t];
+            ctx.globalAlpha = 1;
+            // soft underlay behind the risky stretches first (the same
+            // technique as the #193 highlighted-route underlay)
+            for (const sp of prev.spans) {
+              if (!sp.risk) continue;
+              const [ax, ay] = at(sp.t0), [bx2, by2] = at(sp.t1);
+              ctx.strokeStyle = GLOW[sp.risk];
+              ctx.lineWidth = 6;
+              ctx.beginPath();
+              ctx.moveTo(ax, ay);
+              ctx.lineTo(bx2, by2);
+              ctx.stroke();
+            }
+            // then the dashes, offset per span by the pixel length so far
+            // so the dash pattern stays continuous across colour changes
+            let cum = 0;
+            for (const sp of prev.spans) {
+              const [ax, ay] = at(sp.t0), [bx2, by2] = at(sp.t1);
+              ctx.strokeStyle = SPAN_COLOR[sp.risk];
+              ctx.lineWidth = 2.5;
+              ctx.setLineDash([10, 4]);
+              ctx.lineDashOffset = -cum;
+              ctx.beginPath();
+              ctx.moveTo(ax, ay);
+              ctx.lineTo(bx2, by2);
+              ctx.stroke();
+              cum += Math.hypot(bx2 - ax, by2 - ay);
+            }
+            ctx.setLineDash([]);
+            ctx.lineDashOffset = 0;
+            // ETA chip: travel time at 1×, plus the worst risk on the way
+            let label = `🚚 ${SUP.fmtEta(prev.etaSec)}`;
+            if (prev.worst === 'enemy') label += ' · ⚠ enemy land';
+            else if (prev.worst === 'near') label += ' · ⚠ enemies nearby';
+            ctx.font = 'bold 13px system-ui';
+            const cw = ctx.measureText(label).width;
+            const ch = 13 * 1.4;
+            let cxp = Math.max(2, Math.min(cssW - cw - 8, txp - cw / 2 - 3));
+            const cyp = Math.max(2, typ - ch - 8);
+            const savedAlign = ctx.textAlign, savedBase = ctx.textBaseline;
+            ctx.fillStyle = 'rgba(0,0,0,0.45)';
+            ctx.fillRect(cxp, cyp, cw + 6, ch);
+            ctx.fillStyle = '#fff';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, cxp + 3, cyp + ch / 2);
+            ctx.textAlign = savedAlign;
+            ctx.textBaseline = savedBase;
+          }
+        }
+      }
+    }
+
     // farmers mid-crossing over a footprint (#135): drawn above the keep
     // so they stay visible walking across instead of blinking out
     for (const b of crossingFarmers) drawWorkingFarmer(game, b, wx, wy, s, alpha, selSet);
