@@ -460,5 +460,163 @@ function check(name, cond, detail) {
   }
 }
 
+// ------------------------------------------- #268 convoy ambush reports
+// A caravan under blob attack opens a tally of the worst simultaneous
+// attack and the units lost; the tally reports once the fight goes quiet,
+// or as a destroyed report when the caravan dies. Garrison and wall return
+// fire and starvation never open one, and the tally is transient (never
+// serialized), so a resume drops the report for a fight in progress.
+{
+  console.log('\nconvoy ambush reports (#268)');
+
+  // same staging as the #239 mixedGame above, local to this section
+  function mixedGame(deployN, supplyN) {
+    const game = S.newTutorialGame();
+    const home = game.settlements.find(s => s.owner === 0 && !s.building);
+    const outpost = game.settlements.find(s => s.owner === 0 && s.id !== home.id);
+    const b = game.blobs.find(x => !x.dead && x.owner === 0
+      && S.total(x) >= deployN + supplyN && x.working == null);
+    b.units.length = deployN + supplyN;
+    b.units.forEach((u, i) => { u.role = i < supplyN ? 'supply' : 'deploy'; });
+    b.count = { deploy: deployN, supply: supplyN, farm: 0 };
+    b.food = 20;
+    return { game, home, outpost, b };
+  }
+
+  // a loaded caravan pinned in contact with a foe, out in the open well
+  // clear of every other unit and settlement (the #235/#239 isolation trick)
+  function ambushStage(deployN, supplyN) {
+    const { game, outpost, home, b } = mixedGame(deployN, supplyN);
+    S.opRoute(game, b, { kind: 'settlement', id: outpost.id }, home.id);
+    let spot = null, bestD = -1;
+    for (let ty = 0; ty < game.map.h; ty++) {
+      for (let tx = 0; tx < game.map.w; tx++) {
+        if (!passable(game.map, tx, ty)) continue;
+        let d = Infinity;
+        for (const o of game.blobs) {
+          if (o.dead || o === b) continue;
+          d = Math.min(d, Math.hypot(tx + 0.5 - o.x, ty + 0.5 - o.y));
+        }
+        for (const s of game.settlements) {
+          d = Math.min(d, Math.hypot(tx + 0.5 - (s.x + 1), ty + 0.5 - (s.y + 1)));
+        }
+        if (d > bestD) { bestD = d; spot = { x: tx + 0.5, y: ty + 0.5 }; }
+      }
+    }
+    b.x = spot.x; b.y = spot.y;
+    b.prevX = b.x; b.prevY = b.y;
+    b.path = null; b.pathGoal = null;
+    const foe = game.blobs.find(x => !x.dead && x.owner === 1 && x.count.deploy > 0);
+    pin(game, b, foe);
+    return { game, b, foe, spot };
+  }
+  function pin(game, b, foe) {
+    foe.order = null; foe.path = null; foe.pathGoal = null;
+    foe.x = b.x + 0.5; foe.y = b.y;
+    foe.prevX = foe.x; foe.prevY = foe.y;
+  }
+  function farPassable(game, ref) {
+    for (let ty = 0; ty < game.map.h; ty++) {
+      for (let tx = 0; tx < game.map.w; tx++) {
+        if (!passable(game.map, tx, ty)) continue;
+        if (Math.hypot(tx + 0.5 - ref.x, ty + 0.5 - ref.y) > 15) return { x: tx + 0.5, y: ty + 0.5 };
+      }
+    }
+    return null;
+  }
+  const mine = g => g.events.filter(e => e.owner === 0).map(e => e.msg);
+
+  // -- a lean caravan wiped out: one destroyed report, no old raid notice
+  {
+    const { game, b, foe, spot } = ambushStage(0, 10);
+    b.order.cargo = 24;
+    b.food = S.foodCap(b);   // full bellies, so the hold is untouched until the raid
+    for (let t = 0; t < 400 && !b.dead; t++) {
+      game.events.length = 0;
+      // hold both sides in contact at the isolated spot for the whole
+      // fight — otherwise the caravan walks home mid-fight and docks,
+      // and the load logic clamps its overfull hold at the dock
+      b.x = spot.x; b.y = spot.y; b.prevX = b.x; b.prevY = b.y;
+      b.path = null;
+      pin(game, b, foe);
+      S.step(game);
+    }
+    check('the lean caravan was wiped out', b.dead);
+    const evs = mine(game);
+    const destroyed = evs.filter(m => m.startsWith('🚚 Caravan destroyed by an enemy army of'));
+    check('exactly one destroyed report', destroyed.length === 1, evs.join(' | '));
+    check('it names the army, the losses and the dropped food',
+      /enemy army of \d+: 10 units lost, 24 food dropped$/.test(destroyed[0] || ''), destroyed[0]);
+    check('the old raided notice is gone',
+      !evs.some(m => m.includes('Your caravan was raided!')), evs.join(' | '));
+    check('the raider still gets its loot notice',
+      game.events.some(e => e.owner === 1 && e.msg.startsWith('🌾 Caravan raided!')),
+      game.events.filter(e => e.owner === 1).map(e => e.msg).join(' | '));
+  }
+
+  // -- an escorted caravan hit, then the foe breaks off: one quiet report
+  {
+    const { game, b, foe } = ambushStage(7, 3);
+    const peak = foe.count.deploy;
+    for (let i = 0; i < 5; i++) { game.events.length = 0; pin(game, b, foe); S.step(game); }
+    check('the ambush opened under fire', !!b.ambush, JSON.stringify(b.ambush));
+    const tally = b.ambush ? { ...b.ambush } : null;
+    const spot = farPassable(game, b);
+    check('found the foe a far retreat', !!spot);
+    const evs = [];
+    for (let i = 0; i < 40; i++) {
+      foe.order = null; foe.path = null; foe.pathGoal = null;
+      if (spot) { foe.x = spot.x; foe.y = spot.y; foe.prevX = foe.x; foe.prevY = foe.y; }
+      S.step(game);
+      for (const e of game.events) if (e.owner === 0) evs.push(e.msg);
+      game.events.length = 0;
+    }
+    const reports = evs.filter(m => m.startsWith('🚚 Caravan ambushed by an enemy army of'));
+    check('exactly one ambush report after the quiet window', reports.length === 1, evs.join(' | '));
+    check('it names the foe at full strength',
+      reports[0] && reports[0].startsWith(`🚚 Caravan ambushed by an enemy army of ${peak}:`),
+      `${reports[0]} vs peak ${peak}`);
+    check('the lost count matches the tally',
+      !!reports[0] && tally && (tally.lost === 0
+        ? reports[0].endsWith(': no units lost')
+        : reports[0].endsWith(`: ${tally.lost} unit${tally.lost === 1 ? '' : 's'} lost`)),
+      `${reports[0]} vs ${JSON.stringify(tally)}`);
+    check('the tally is cleared afterwards', !b.ambush, JSON.stringify(b.ambush));
+  }
+
+  // -- carriers all killed, escort survives: the release reads as a raid
+  {
+    const { game, b, foe } = ambushStage(7, 3);
+    for (let i = 0; i < 3; i++) { game.events.length = 0; pin(game, b, foe); S.step(game); }
+    check('the tally is open before the release', !!b.ambush, JSON.stringify(b.ambush));
+    b.units = b.units.filter(u => u.role !== 'supply');   // raiders killed the carriers
+    b.count = { deploy: 7, supply: 0, farm: 0 };
+    game.events.length = 0;
+    pin(game, b, foe);
+    S.step(game);
+    const evs = mine(game);
+    check('the release names the ambush',
+      evs.some(m => m.startsWith('🚚 Caravan lost its carriers to an enemy army of')),
+      evs.join(' | '));
+    check('no plain lost-carriers notice alongside it',
+      !evs.includes('🚚 Caravan lost its carriers'), evs.join(' | '));
+    check('the tally was consumed', !b.ambush, JSON.stringify(b.ambush));
+  }
+
+  // -- the tally is transient: never serialized, save round-trips
+  {
+    const { game, b, foe } = ambushStage(0, 10);
+    b.order.cargo = 24;
+    b.food = S.foodCap(b);
+    for (let i = 0; i < 2; i++) { game.events.length = 0; pin(game, b, foe); S.step(game); }
+    check('an ambush is open mid-fight', !!b.ambush);
+    const data = S.serialize(game);
+    check('the tally is not in the save', data.blobs.every(x => !('ambush' in x)));
+    const round = JSON.parse(JSON.stringify(data));
+    check('the save round-trips through JSON',
+      round.blobs.length === data.blobs.length && round.seed === data.seed);
+  }
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nall sim-rule checks passed');
 process.exit(failures ? 1 : 0);

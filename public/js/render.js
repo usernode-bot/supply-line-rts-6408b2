@@ -837,6 +837,15 @@ export function createRenderer(canvas, minimap) {
       // drawn for every visible carrier regardless of owner, so enemy
       // caravans read as raid targets (killing one loots half its cargo).
       if (b.order && b.order.type === 'route') {
+        // caravan health bar (#268): the HP arc ring is hard to read at
+        // caravan size, so a thin bar just above the circle mirrors the
+        // arm-up bar — same dark track, amber while healthy, red below half
+        const bw = Math.max(18, r * 1.6);
+        const byy = py - r - 7;
+        ctx.fillStyle = '#111827';
+        ctx.fillRect(px - bw / 2, byy, bw, 3);
+        ctx.fillStyle = hp >= 0.5 ? '#fbbf24' : '#f87171';
+        ctx.fillRect(px - bw / 2, byy, bw * hp, 3);
         const cfs = Math.max(9, Math.min(13, r * 0.6));
         const clabel = `🌾 ${Math.round(b.order.cargo || 0)}`;
         ctx.font = `bold ${cfs}px system-ui`;
