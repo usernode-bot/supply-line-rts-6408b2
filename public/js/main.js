@@ -236,7 +236,7 @@ let game = null;
 let view = { cx: 48, cy: 48, scale: 14 };
 let speed = 1; // displayed speed step 1–4; the sim multiplier is speed × 0.5
 let paused = false;
-let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, fieldRole: null, flowOpen: false, flowFor: null, modeOpen: false, ping: null, buildSite: null, wallStart: null, wallEnd: null, hover: null, touchMode: 'select' };
+let ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, fieldRole: null, flowOpen: false, flowFor: null, modeOpen: false, ping: null, buildSite: null, wallStart: null, wallEnd: null, hover: null, routePreview: null, touchMode: 'select' };
 
 // Phone-sized UI (the sm breakpoint that turns the panel into a bottom
 // sheet): mode toggle, contextual tap popups, stats-only panel. Desktop
@@ -1737,7 +1737,7 @@ function startMatch(g, opts) {
   $('btn-end-replay').classList.add('hidden');
   $('btn-end-stats').classList.add('hidden');
   $('end-replay-controls').classList.add('hidden');
-  ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, wallStart: null, wallEnd: null, hover: null, touchMode: 'select' };
+  ui = { selected: null, pending: null, routeSrc: null, splitCount: null, orderTarget: null, orderTargetEnt: null, fieldCounts: {}, recallCount: null, ping: null, buildSite: null, wallStart: null, wallEnd: null, hover: null, routePreview: null, touchMode: 'select' };
   groups = {};
   hideOrderPopup();
   acc = 0; speed = 1; paused = false; lastSaveTick = g.tick;
@@ -3740,6 +3740,64 @@ function resolvePending(world, pointerType, screen) {
 
 // Is the armed route selection a MIXED group (#239)? Drives the extra hint
 // line telling the player the whole group is about to march out as an escort.
+// -- route preview (#267) ---------------------------------------------
+// Side-effect-free mirror of the destination hit tests in resolvePending:
+// while a route pick is armed with a source chosen, this says what the
+// pointer is over WITHOUT dispatching, toasting or touching any state —
+// render.js draws the preview line to it every frame, and the tap itself
+// still resolves through resolvePending.
+function routePreviewTarget(world) {
+  const hitR = Math.max(1.5, 24 / view.scale);
+  if (ui.pending === 'route') {
+    const carriers = selectedBlobs().filter(b => S.total(b) > 0 && b.count.supply > 0);
+    if (!carriers.length || ui.routeSrc == null) return null;
+    // settlement-first resolution (#142), same order as the tap: an own
+    // settlement, else an own finished wall, else an own non-working
+    // non-carrier blob, else a settlement at the wider arm radius. A
+    // settlement equal to the source or still building is not a valid
+    // destination (the tap would toast), so it reads as a bare point.
+    let st = S.settlementAt(game, world.x, world.y, 1.9);
+    if (st && (st.owner !== me || st.id === ui.routeSrc || st.building)) st = null;
+    let wl = null;
+    if (!st) {
+      const w2 = wallAtPoint(world);
+      if (w2 && w2.owner === me && !w2.building) wl = w2;
+    }
+    let tgt = null;
+    if (!st && !wl) {
+      tgt = S.blobAt(game, world.x, world.y, hitR,
+        (b) => b.owner === me && b.working == null && !carriers.some(c => c.id === b.id));
+      if (!tgt) {
+        st = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+        if (st && (st.owner !== me || st.id === ui.routeSrc || st.building)) st = null;
+      }
+    }
+    if (wl) return { kind: 'wall', id: wl.id };
+    if (tgt) return { kind: 'blob', id: tgt.id };
+    if (st) return { kind: 'settlement', id: st.id };
+    return { kind: 'point', x: world.x, y: world.y };
+  }
+  if (ui.pending === 'route-sett') {
+    const src = game.settlements.find(s2 => s2.id === ui.routeSrc && s2.owner === me && !s2.building);
+    if (!src) return null;
+    const stT = S.settlementAt(game, world.x, world.y, Math.max(1.9, hitR));
+    const wlT = wallAtPoint(world);
+    if (stT && stT.owner === me && stT.id !== src.id && !stT.building) {
+      return { kind: 'settlement', id: stT.id };
+    }
+    if (wlT && wlT.owner === me && !wlT.building) return { kind: 'wall', id: wlT.id };
+    const tgt = S.blobAt(game, world.x, world.y, hitR,
+      (b) => b.owner === me && b.working == null);   // #243: never shadowed by an enemy
+    if (tgt) return { kind: 'blob', id: tgt.id };
+    return { kind: 'point', x: world.x, y: world.y };
+  }
+  return null;
+}
+
+// #239 drives the mixed-group line; #267 adds the touch hint: with no
+// hover on a phone, the preview follows the held finger instead
+function routeHoldHint() { return isMobile() ? ' Hold to preview the route.' : ''; }
+
 function routeArmedMixed() {
   const blobs = selectedBlobs();
   if (!blobs.length) return false;
@@ -3760,11 +3818,11 @@ function updateHint() {
       ? (ui.buildSite ? 'Tap ✓ to found here — or tap elsewhere to move the site'
         : 'Tap where to found the settlement…')
       : ui.pending === 'route-sett'
-        ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination settlement, wall or army to supply…`
+        ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination settlement, wall or army to supply…${routeHoldHint()}`
         : ui.routeSrc != null
           // #239: say it out loud when the selection is mixed, so it's clear
           // the fighters are marching out with the caravan
-          ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination — a friendly settlement, wall or army…${routeArmedMixed() ? ' the whole group will escort the caravan' : ''}`
+          ? `${isMobile() ? 'Tap' : 'Tap or right-click'} the destination — a friendly settlement, wall or army…${routeArmedMixed() ? ' the whole group will escort the caravan' : ''}${routeHoldHint()}`
           : `${isMobile() ? 'Tap' : 'Tap or right-click'} the source settlement to load from…`;
   $('hint-text').textContent = text;
   // #234: touch has no hover, so the placement score rides the hint bar —
@@ -4762,6 +4820,15 @@ function frameBody(ts) {
   // the hover-only states would otherwise be unreachable from a URL (#234).
   ui.hover = shotHover
     || ((ui.pending === 'build' || ui.pending === 'wall') ? input.mouseWorld : null);
+  // route preview (#267): while a route pick is armed with the source
+  // chosen, the preview follows the pointer — desktop hover, the held
+  // finger on touch, or the pinned ?shot= hover. ui.hover is untouched,
+  // so build/wall previews behave exactly as before. Derived every frame,
+  // never stored in game state; it disappears on dispatch and cancel,
+  // which both clear routeSrc.
+  const routeArmed = (ui.pending === 'route' || ui.pending === 'route-sett') && ui.routeSrc != null;
+  const routePtr = routeArmed ? (shotHover || input.pressWorld || input.mouseWorld) : null;
+  ui.routePreview = routePtr ? routePreviewTarget(routePtr) : null;
   renderer.draw(game, view, ui, Math.max(0, Math.min(1, acc / 100)));
 
   if (ts - lastPanel > 400) {
@@ -6324,6 +6391,39 @@ if (SHOT === 'place-preview' || SHOT === 'place-preview-touch') {
 }
 if (SHOT === 'stats' || SHOT === 'stats-one') {
   try { shotStats(SHOT === 'stats-one' ? 'units' : null); } catch (e) { console.warn('shot link failed', e); }
+}
+// The armed-route preview state (#267): a pure supply caravan selected,
+// the route pick armed with the source settlement chosen, and the pointer
+// pinned (shotHover) on a friendly target — the desktop hover state a
+// headless screenshot can't reach by itself. The tutorial flag is
+// cleared so the hint bar (not the tutorial card) owns the instruction
+// slot. Pure local UI state; the sim is paused so the preview holds still.
+function shotRoutePreview() {
+  clearSaves();
+  me = 0;
+  const g = S.newTutorialGame();
+  g.tutorial = false;
+  const src = g.settlements.find(s2 => s2.owner === 0 && !s2.building);
+  const caravan = g.blobs.find(b => b.owner === 0 && !b.dead && b.working == null && b.count.supply > 0);
+  if (!src || !caravan) return;
+  const home = g.settlements.find(s2 => s2.owner === 0 && s2.id !== src.id && !s2.building);
+  if (!home) return;
+  startMatch(g);
+  paused = true;
+  $('btn-pause').textContent = '▶';
+  ui.selected = { kind: 'blob', id: caravan.id };
+  ui.pending = 'route';
+  ui.routeSrc = src.id;
+  ui.hover = shotHover = S.settCenter(home); // pointer parked on the destination
+  view.cx = (src.x + 1 + home.x + 1) / 2;
+  view.cy = (src.y + 1 + home.y + 1) / 2;
+  view.scale = 16;
+  input.clampView();
+  updateHint();
+  renderPanel(true);
+}
+if (SHOT === 'route-preview') {
+  try { shotRoutePreview(); } catch (e) { console.warn('shot link failed', e); }
 }
 if (SHOT === 'stats-pvp-guest') {
   try { shotStatsPvpGuest(); } catch (e) { console.warn('shot link failed', e); }

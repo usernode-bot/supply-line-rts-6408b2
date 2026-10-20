@@ -71,7 +71,7 @@ export function createInput({ canvas, minimap, view, handlers }) {
       };
       selbox.style.display = 'none';
     } else if (pointers.size === 1) {
-      start = { x: e.clientX, y: e.clientY, type: e.pointerType, button: e.button };
+      start = { x: e.clientX, y: e.clientY, type: e.pointerType, button: e.button, id: e.pointerId };
       panStart = { cx: view.cx, cy: view.cy };
       mode = e.button === 1 ? 'pan' : 'maybe';
       if (mode === 'pan' && handlers.gesture) handlers.gesture();
@@ -336,5 +336,16 @@ export function createInput({ canvas, minimap, view, handlers }) {
     // move — i.e. on touch-only devices); drives the build-placement
     // hover preview (#94)
     get mouseWorld() { return mousePos ? worldFromScreen(mousePos.x, mousePos.y) : null; },
+    // the world point under the single held non-mouse pointer while the
+    // press is still a candidate tap (mode 'maybe', not yet past SLOP).
+    // Touch has no hover (#214), so the route preview (#267) follows the
+    // held finger instead: hold to preview, lift to send. Dragging past
+    // SLOP (pan/box) or a second finger (pinch) nulls it, matching the
+    // tap that pointerup would actually fire.
+    get pressWorld() {
+      if (mode !== 'maybe' || !start || start.type === 'mouse') return null;
+      const p = pointers.get(start.id);
+      return p ? worldFromScreen(p.x, p.y) : null;
+    },
   };
 }

@@ -2,7 +2,7 @@
 // Carrier movement itself is ticked by sim.js (it owns movement/pathing);
 // this module owns the route objects and their math.
 
-import { C } from './sim.js';
+import { C, gameSeconds, blobRadius, rebuildTerritory } from './sim.js';
 
 export const CARRY_PER_UNIT = 10;      // food capacity per supply unit
 export const HEALTH_WINDOW_TICKS = 300; // 30 s rolling window
@@ -179,4 +179,73 @@ export function dissolveRoute(game, route) {
 
 function foodCap(b) {
   return (b.count.deploy + b.count.supply + b.count.farm) * 10;
+}
+
+// ------------------------------------------------------------------ route preview
+
+// Pure read-only math behind the dispatch-time route preview (#267): the
+// straight line a live route would draw, its ETA and where that line is
+// exposed. Never called by the sim — the UI calls it per frame while a
+// route pick is armed, so it must stay allocation-cheap and side-effect-
+// free. The one exception is the same lazy `game.terr` rebuild
+// `ensureTerrEdges` already does: terr is derived data, never serialized.
+//
+// Fog stays out of this module: the callers pass their own seen
+// predicates (render.js honours the reveal-map override there), so a
+// hidden enemy settlement or army never colours the line.
+export function previewRoute(game, viewer, from, to, seenSett, seenBlob) {
+  const dist = Math.hypot(to.x - from.x, to.y - from.y);
+  // straight-line travel time at the 1× display speed: ticks = tiles /
+  // (tiles per sim second) / (seconds per tick), then ticks → 1× seconds
+  const etaSec = gameSeconds(dist / C.SPEED_SUPPLY / C.DT);
+  if (!game.terr) rebuildTerritory(game);
+  const { w, h } = game.map;
+  const n = Math.max(2, Math.ceil(dist / 0.25)); // ≥2 samples, every 0.25 tiles
+  const spans = [];
+  // each sample classifies one interval of the line (measured at its
+  // midpoint), so consecutive equal risks merge into spans that tile
+  // 0..1 with no gaps and no double-counted boundaries
+  for (let i = 0; i < n; i++) {
+    const t0 = i / n, t1 = (i + 1) / n;
+    const x = from.x + (to.x - from.x) * (t0 + t1) / 2;
+    const y = from.y + (to.y - from.y) * (t0 + t1) / 2;
+    const tx = Math.floor(x), ty = Math.floor(y);
+    let risk = null;
+    if (tx >= 0 && ty >= 0 && tx < w && ty < h) {
+      // 'enemy': crossing enemy-owned territory the viewer can see
+      const sid = game.terr[ty * w + tx];
+      if (sid) {
+        const st = game.settlements.find(s2 => s2.id === sid);
+        if (st && !st.building && st.owner !== viewer && seenSett(st)) risk = 'enemy';
+      }
+    }
+    if (!risk) {
+      // 'near': passing within the aggro reach of a visible, live enemy
+      // group (working field hands never pick fights)
+      for (const b of game.blobs) {
+        if (b.dead || b.owner === viewer || b.working != null) continue;
+        if (!seenBlob(b)) continue;
+        if (Math.hypot(b.x - x, b.y - y) <= C.AGGRO + blobRadius(b)) {
+          risk = 'near';
+          break;
+        }
+      }
+    }
+    const last = spans[spans.length - 1];
+    if (last && last.risk === risk) last.t1 = t1;
+    else spans.push({ t0, t1, risk });
+  }
+  const worst = spans.some(sp => sp.risk === 'enemy') ? 'enemy'
+    : spans.some(sp => sp.risk === 'near') ? 'near' : null;
+  return { dist, etaSec, spans, worst };
+}
+
+// ETA for the preview chip, quantised to 5 s so the label doesn't
+// flicker every frame as the pointer drifts. `~45s` under a minute,
+// `~1m 25s` past it (seconds zero-padded only there: `~2m 05s`).
+export function fmtEta(sec) {
+  const s = Math.max(5, Math.round(sec / 5) * 5);
+  if (s < 60) return `~${s}s`;
+  const m = Math.floor(s / 60);
+  return `~${m}m ${String(s % 60).padStart(2, '0')}s`;
 }

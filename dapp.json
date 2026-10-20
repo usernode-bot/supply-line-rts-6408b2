@@ -190,6 +190,8 @@
     { "name": "Large-army formation is one 34-strong group (#251)", "path": "/?shot=formation-large&demo=1", "expectText": "34" },
     { "name": "Re-forming (role change) formation state boots a live match (#251)", "path": "/?shot=formation-convert&demo=1", "expectSelector": "#game-ui:not(.hidden)" },
     { "name": "Back-to-work button shows the JOINING player's own farmhands (#247)", "path": "/?shot=backtowork-guest&demo=1", "expectSelector": "#btn-backtowork:not(.hidden)" },
-    { "name": "Back-to-work badge carries a count for that player (#247)", "path": "/?shot=backtowork-guest&demo=1", "expectText": "Back to work" }
+    { "name": "Back-to-work badge carries a count for that player (#247)", "path": "/?shot=backtowork-guest&demo=1", "expectText": "Back to work" },
+    { "name": "Route-preview shot arms a supply route with its source chosen (#267)", "path": "/?shot=route-preview&demo=1", "expectText": "a friendly settlement, wall or army" },
+    { "name": "Route-preview shot boots into the paused match canvas (#267)", "path": "/?shot=route-preview&demo=1", "expectSelector": "#game-canvas" }
   ]
 }
